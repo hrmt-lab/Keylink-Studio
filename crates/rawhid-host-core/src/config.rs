@@ -1,0 +1,387 @@
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
+
+use directories::ProjectDirs;
+use serde::{Deserialize, Deserializer, Serialize};
+use thiserror::Error;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AppConfig {
+    pub polling: PollingConfig,
+    pub hid: HidConfig,
+    pub layer_switch: LayerSwitchConfig,
+    pub time: TimeConfig,
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            polling: PollingConfig::default(),
+            hid: HidConfig::default(),
+            layer_switch: LayerSwitchConfig::default(),
+            time: TimeConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct PollingConfig {
+    pub interval_ms: u64,
+}
+
+impl Default for PollingConfig {
+    fn default() -> Self {
+        Self { interval_ms: 500 }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct HidConfig {
+    pub usage_page: u16,
+    pub usage: u16,
+    pub hello_timeout_ms: i32,
+}
+
+impl Default for HidConfig {
+    fn default() -> Self {
+        Self {
+            usage_page: 0xFF60,
+            usage: 0x61,
+            hello_timeout_ms: 200,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct LayerSwitchConfig {
+    pub enabled: bool,
+    pub rules: Vec<RuleConfig>,
+}
+
+impl Default for LayerSwitchConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            rules: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RuleConfig {
+    pub name: String,
+    pub layer: u8,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default)]
+    pub exe: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct TimeConfig {
+    pub enabled: bool,
+    pub format_hint: TimeFormatHint,
+    pub clock_mode: ClockMode,
+    pub periodic_sync_sec: u64,
+    #[serde(default, deserialize_with = "deserialize_tz_offset_min")]
+    pub tz_offset_min: Option<i16>,
+}
+
+impl Default for TimeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            format_hint: TimeFormatHint::TimeHm,
+            clock_mode: ClockMode::TwentyFourHour,
+            periodic_sync_sec: 60,
+            tz_offset_min: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TimeFormatHint {
+    TimeHm,
+    TimeHms,
+    DateYmd,
+    DateMd,
+    DatetimeHm,
+    WeekdayHm,
+}
+
+impl TimeFormatHint {
+    pub fn as_packet_value(self) -> u8 {
+        match self {
+            Self::TimeHm => 0,
+            Self::TimeHms => 1,
+            Self::DateYmd => 2,
+            Self::DateMd => 3,
+            Self::DatetimeHm => 4,
+            Self::WeekdayHm => 5,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ClockMode {
+    #[serde(rename = "24h")]
+    TwentyFourHour,
+    #[serde(rename = "12h")]
+    TwelveHour,
+}
+
+impl ClockMode {
+    pub fn as_packet_value(self) -> u8 {
+        match self {
+            Self::TwentyFourHour => 0,
+            Self::TwelveHour => 1,
+        }
+    }
+}
+
+fn deserialize_tz_offset_min<'de, D>(deserializer: D) -> Result<Option<i16>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = Option::<i16>::deserialize(deserializer)?;
+    if let Some(offset) = value {
+        if !(-1440..=1440).contains(&offset) {
+            return Err(serde::de::Error::custom(
+                "tz_offset_min must be between -1440 and 1440",
+            ));
+        }
+    }
+    Ok(value)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigPaths {
+    pub explicit: Option<PathBuf>,
+    pub cwd: PathBuf,
+    pub user: Option<PathBuf>,
+}
+
+impl ConfigPaths {
+    pub fn discover(explicit: Option<PathBuf>) -> Self {
+        Self {
+            explicit,
+            cwd: PathBuf::from("rawhid-host.toml"),
+            user: user_config_path(),
+        }
+    }
+
+    pub fn selected_path(&self) -> Option<PathBuf> {
+        if let Some(explicit) = &self.explicit {
+            return Some(explicit.clone());
+        }
+        if self.cwd.exists() {
+            return Some(self.cwd.clone());
+        }
+        if let Some(user) = &self.user {
+            if user.exists() {
+                return Some(user.clone());
+            }
+        }
+        self.user.clone()
+    }
+
+    pub fn existing_path(&self) -> Option<PathBuf> {
+        if let Some(explicit) = &self.explicit {
+            return explicit.exists().then(|| explicit.clone());
+        }
+        if self.cwd.exists() {
+            return Some(self.cwd.clone());
+        }
+        self.user
+            .as_ref()
+            .and_then(|user| user.exists().then(|| user.clone()))
+    }
+}
+
+pub fn load_config(explicit: Option<PathBuf>) -> Result<(AppConfig, Option<PathBuf>), ConfigError> {
+    let paths = ConfigPaths::discover(explicit);
+    let Some(path) = paths.existing_path() else {
+        return Ok((AppConfig::default(), None));
+    };
+
+    let text = fs::read_to_string(&path).map_err(|source| ConfigError::Read {
+        path: path.clone(),
+        source,
+    })?;
+    let config = toml::from_str(&text).map_err(|source| ConfigError::Parse {
+        path: path.clone(),
+        source,
+    })?;
+    Ok((config, Some(path)))
+}
+
+pub fn write_default_config(path: &Path, overwrite: bool) -> Result<(), ConfigError> {
+    if path.exists() && !overwrite {
+        return Err(ConfigError::AlreadyExists(path.to_path_buf()));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|source| ConfigError::CreateDir {
+            path: parent.to_path_buf(),
+            source,
+        })?;
+    }
+    fs::write(path, example_config()).map_err(|source| ConfigError::Write {
+        path: path.to_path_buf(),
+        source,
+    })
+}
+
+pub fn example_config() -> &'static str {
+    r#"# RawHID Host configuration
+
+[polling]
+interval_ms = 500
+
+[hid]
+usage_page = 65376 # 0xFF60
+usage = 97         # 0x61
+hello_timeout_ms = 200
+
+[layer_switch]
+enabled = true
+
+[[layer_switch.rules]]
+name = "Notepad"
+# exe matches the full executable file name, including ".exe".
+exe = "notepad.exe"
+layer = 1
+
+[[layer_switch.rules]]
+name = "Browser title example"
+title = "GitHub"
+layer = 2
+
+# Prefer path rules when the same exe name can appear in multiple locations.
+#[[layer_switch.rules]]
+#name = "Specific app"
+#path = "C:\\Program Files\\Example\\example.exe"
+#layer = 3
+
+[time]
+enabled = false
+format_hint = "time_hm"
+clock_mode = "24h"
+periodic_sync_sec = 60
+# tz_offset_min = 540
+"#
+}
+
+fn user_config_path() -> Option<PathBuf> {
+    ProjectDirs::from("", "", "RawHID Host").map(|dirs| dirs.config_dir().join("config.toml"))
+}
+
+#[derive(Debug, Error)]
+pub enum ConfigError {
+    #[error("failed to read config {path}: {source}")]
+    Read {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to parse config {path}: {source}")]
+    Parse {
+        path: PathBuf,
+        source: toml::de::Error,
+    },
+    #[error("failed to create config directory {path}: {source}")]
+    CreateDir {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("failed to write config {path}: {source}")]
+    Write {
+        path: PathBuf,
+        source: std::io::Error,
+    },
+    #[error("config already exists: {0}")]
+    AlreadyExists(PathBuf),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_example_config() {
+        let config: AppConfig = toml::from_str(example_config()).unwrap();
+
+        assert_eq!(config.polling.interval_ms, 500);
+        assert_eq!(config.hid.usage_page, 0xFF60);
+        assert_eq!(config.hid.usage, 0x61);
+        assert!(config.layer_switch.enabled);
+        assert_eq!(config.layer_switch.rules.len(), 2);
+        assert!(!config.time.enabled);
+        assert_eq!(config.time.format_hint, TimeFormatHint::TimeHm);
+        assert_eq!(config.time.clock_mode, ClockMode::TwentyFourHour);
+        assert_eq!(config.time.periodic_sync_sec, 60);
+    }
+
+    #[test]
+    fn parses_time_config() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[time]
+enabled = true
+format_hint = "weekday_hm"
+clock_mode = "12h"
+periodic_sync_sec = 0
+tz_offset_min = 540
+"#,
+        )
+        .unwrap();
+
+        assert!(config.time.enabled);
+        assert_eq!(config.time.format_hint, TimeFormatHint::WeekdayHm);
+        assert_eq!(config.time.clock_mode, ClockMode::TwelveHour);
+        assert_eq!(config.time.periodic_sync_sec, 0);
+        assert_eq!(config.time.tz_offset_min, Some(540));
+    }
+
+    #[test]
+    fn rejects_out_of_range_tz_offset() {
+        let error = toml::from_str::<AppConfig>(
+            r#"
+[time]
+tz_offset_min = 1441
+"#,
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("tz_offset_min"));
+    }
+
+    #[test]
+    fn explicit_path_is_selected_even_when_missing() {
+        let paths = ConfigPaths {
+            explicit: Some(PathBuf::from("custom.toml")),
+            cwd: PathBuf::from("rawhid-host.toml"),
+            user: Some(PathBuf::from("user.toml")),
+        };
+
+        assert_eq!(paths.selected_path(), Some(PathBuf::from("custom.toml")));
+    }
+
+    #[test]
+    fn missing_config_loads_default() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("missing.toml");
+        let (config, path) = load_config(Some(missing)).unwrap();
+
+        assert_eq!(config, AppConfig::default());
+        assert_eq!(path, None);
+    }
+}

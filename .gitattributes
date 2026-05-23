@@ -1,0 +1,65 @@
+# Default: text files are normalized by Git.
+* text=auto
+
+# Rust
+*.rs text eol=lf
+Cargo.toml text eol=lf
+Cargo.lock text eol=lf
+
+# Tauri / JSON / config
+*.json text eol=lf
+*.json5 text eol=lf
+*.toml text eol=lf
+
+# Web frontend
+*.html text eol=lf
+*.css text eol=lf
+*.js text eol=lf
+*.jsx text eol=lf
+*.ts text eol=lf
+*.tsx text eol=lf
+*.mjs text eol=lf
+*.cjs text eol=lf
+
+# Node package files
+package.json text eol=lf
+package-lock.json text eol=lf
+
+# Markdown / docs
+*.md text eol=lf
+
+# YAML
+*.yml text eol=lf
+*.yaml text eol=lf
+
+# PowerShell scripts
+*.ps1 text eol=lf
+
+# XML
+*.xml text eol=lf
+
+# Shell / scripts
+*.sh text eol=lf
+
+# Common config files
+*.gitignore text eol=lf
+*.gitattributes text eol=lf
+*.editorconfig text eol=lf
+
+# Binary files
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.icns binary
+*.webp binary
+*.svg text eol=lf
+
+*.exe binary
+*.dll binary
+*.pdb binary
+*.zip binary
+*.tar binary
+*.gz binary
+*.7z binary

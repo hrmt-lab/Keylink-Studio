@@ -1,0 +1,17 @@
+[package]
+name = "rawhid-host-cli"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "rawhid-host"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+rawhid-host-core = { path = "../rawhid-host-core" }
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

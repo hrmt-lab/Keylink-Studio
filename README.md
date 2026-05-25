@@ -154,6 +154,7 @@ Tauri アプリを開発起動:
 
 - [セットアップガイド](docs/manual-setup.md)
 - [アプリ操作マニュアル](docs/manual-app-usage.md)
+- [仕組みと技術スタックのやさしい解説](docs/technology-overview.md)
 - [技術仕様書](docs/spec.md)
 - [Packet 仕様](docs/packet-spec.md)
 
@@ -249,5 +250,6 @@ Build outputs are generated under `target/` and `ui/dist/`. Do not commit them t
 
 - [Setup Guide](docs/manual-setup.md)
 - [App Usage Manual](docs/manual-app-usage.md)
+- [Technology Overview for New Readers](docs/technology-overview.md)
 - [Technical Specification](docs/spec.md)
 - [Packet Specification](docs/packet-spec.md)

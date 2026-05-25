@@ -120,7 +120,7 @@ Tauri アプリを開発起動:
 配布用ビルド:
 
 ```powershell
-cargo tauri build
+.\build-release.ps1
 ```
 
 生成物は `target/` や `ui/dist/` に作られます。これらは GitHub リポジトリには含めず、配布物は GitHub Releases に添付する運用を推奨します。
@@ -240,7 +240,7 @@ Start Tauri development app:
 Build release bundles:
 
 ```powershell
-cargo tauri build
+.\build-release.ps1
 ```
 
 Build outputs are generated under `target/` and `ui/dist/`. Do not commit them to the repository. Attach release artifacts to GitHub Releases instead.

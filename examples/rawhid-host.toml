@@ -1,0 +1,36 @@
+# RawHID Host configuration
+
+[polling]
+interval_ms = 500
+
+[hid]
+usage_page = 65376 # 0xFF60
+usage = 97         # 0x61
+hello_timeout_ms = 200
+
+[layer_switch]
+enabled = true
+
+[[layer_switch.rules]]
+name = "Notepad"
+# exe matches the full executable file name, including ".exe".
+exe = "notepad.exe"
+layer = 1
+
+[[layer_switch.rules]]
+name = "Browser title example"
+title = "GitHub"
+layer = 2
+
+# Prefer path rules when the same exe name can appear in multiple locations.
+#[[layer_switch.rules]]
+#name = "Specific app"
+#path = "C:\\Program Files\\Example\\example.exe"
+#layer = 3
+
+[time]
+enabled = false
+format_hint = "time_hm"
+clock_mode = "24h"
+periodic_sync_sec = 60
+# tz_offset_min = 540

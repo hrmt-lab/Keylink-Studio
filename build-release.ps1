@@ -20,4 +20,4 @@ Set-Location $tauriDir
 
 Write-Host ""
 Write-Host "Build complete!"
-Write-Host "Installer: $tauriDir\target\release\bundle\"
+Write-Host "Installer: $root\target\release\bundle\"

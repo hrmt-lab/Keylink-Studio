@@ -111,7 +111,7 @@ write error が出た device は verified list から外し、次回以降に再
 
 GitHub リポジトリにはソース、設定例、ドキュメント、アイコン元画像を含めます。`target/`、`ui/node_modules/`、`ui/dist/`、個人設定、生成済み installer は含めません。
 
-配布物は `cargo tauri build` で作成し、GitHub Releases へ添付します。
+配布物はプロジェクトルートで `.\build-release.ps1` を実行して作成し、GitHub Releases へ添付します。
 
 ---
 

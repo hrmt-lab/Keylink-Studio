@@ -100,7 +100,7 @@ Claude Code OAuth usage API は experimental / best-effort source です。`.cre
 
 使用率バーは `used` です。80% 以上でオレンジ、90% 以上で赤になります。値が invalid の場合は `no data` と表示します。
 
-`更新` ボタンは監視中のみ使えます。更新中はボタンが disabled になり、worker 側でも多重取得を防ぎます。
+`更新` ボタンは監視中のみ使えます。押すと worker に更新要求を送り、取得処理は背景で行われます。要求直後に表示される「更新を要求しました。」は、AI 使用量の status / updated time / error などが更新されたら自動で消えます。worker 側では多重取得を防ぎます。
 
 ## Devices
 

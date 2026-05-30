@@ -30,8 +30,18 @@ export default function AiUsage({ config, setConfig, status }: Props) {
   const [refreshing, setRefreshing] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [pendingRefreshSignature, setPendingRefreshSignature] = useState<string | null>(null);
 
   useEffect(() => setDraft(config), [config]);
+
+  useEffect(() => {
+    if (!pendingRefreshSignature || message !== t("ai_usage.refresh.done")) return;
+    const currentSignature = aiUsageStatusSignature(status.ai_usage);
+    if (currentSignature !== pendingRefreshSignature) {
+      setMessage(null);
+      setPendingRefreshSignature(null);
+    }
+  }, [message, pendingRefreshSignature, status.ai_usage, t]);
 
   const isDirty = JSON.stringify(draft.ai_usage) !== JSON.stringify(config.ai_usage);
   const updateAiUsage = (ai_usage: AppConfig["ai_usage"]) => setDraft({ ...draft, ai_usage });
@@ -41,6 +51,7 @@ export default function AiUsage({ config, setConfig, status }: Props) {
     setSaved(false);
     setError(null);
     setMessage(null);
+    setPendingRefreshSignature(null);
     try {
       const updated = { ...config, ai_usage: draft.ai_usage };
       await saveConfig(updated);
@@ -58,10 +69,14 @@ export default function AiUsage({ config, setConfig, status }: Props) {
     setRefreshing(true);
     setError(null);
     setMessage(null);
+    setPendingRefreshSignature(null);
+    const signatureBeforeRefresh = aiUsageStatusSignature(status.ai_usage);
     try {
       await refreshAiUsage();
+      setPendingRefreshSignature(signatureBeforeRefresh);
       setMessage(t("ai_usage.refresh.done"));
     } catch (e) {
+      setPendingRefreshSignature(null);
       const code = String(e);
       setError(
         code === "not_running"
@@ -78,6 +93,7 @@ export default function AiUsage({ config, setConfig, status }: Props) {
   const handleShowConfig = async () => {
     setError(null);
     setMessage(null);
+    setPendingRefreshSignature(null);
     try {
       const result = await showConfigFileLocation();
       setMessage(
@@ -708,4 +724,24 @@ function usageBarColor(bp: number, valid: boolean, accent: "primary" | "amber") 
   if (bp >= 9000) return "bg-red-500";
   if (bp >= 8000) return "bg-orange-400";
   return accent === "amber" ? "bg-amber-600" : "bg-primary";
+}
+
+function aiUsageStatusSignature(statuses: AiUsageProviderStatus[]) {
+  return statuses
+    .map((status) =>
+      [
+        status.provider,
+        status.status,
+        status.updated_unix ?? "",
+        status.last_error_code ?? "",
+        status.five_hour_used_bp ?? "",
+        status.seven_day_used_bp ?? "",
+        status.five_hour_valid ? "1" : "0",
+        status.seven_day_valid ? "1" : "0",
+        status.stale ? "1" : "0",
+        status.error_present ? "1" : "0",
+      ].join(":")
+    )
+    .sort()
+    .join("|");
 }

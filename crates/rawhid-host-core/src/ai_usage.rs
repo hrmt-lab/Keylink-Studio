@@ -2,7 +2,10 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
-    sync::{mpsc, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
     thread::{self, JoinHandle},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -220,13 +223,20 @@ impl AiUsageShared {
 pub struct AiUsageRuntime {
     shared: AiUsageShared,
     command_tx: Option<mpsc::Sender<AiUsageWorkerCommand>>,
+    refresh_pending: Arc<AtomicBool>,
     join: Option<JoinHandle<()>>,
 }
 
 #[derive(Debug)]
 enum AiUsageWorkerCommand {
     Stop,
-    Refresh(mpsc::Sender<()>),
+    Refresh,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiUsageRefreshError {
+    InProgress,
+    Stopped,
 }
 
 impl AiUsageRuntime {
@@ -237,12 +247,15 @@ impl AiUsageRuntime {
         let shared = AiUsageShared::new();
         let thread_shared = shared.clone();
         let (command_tx, command_rx) = mpsc::channel();
+        let refresh_pending = Arc::new(AtomicBool::new(false));
+        let thread_refresh_pending = Arc::clone(&refresh_pending);
         let join = thread::spawn(move || {
-            run_worker(config, thread_shared, command_rx);
+            run_worker(config, thread_shared, command_rx, thread_refresh_pending);
         });
         Some(Self {
             shared,
             command_tx: Some(command_tx),
+            refresh_pending,
             join: Some(join),
         })
     }
@@ -255,15 +268,22 @@ impl AiUsageRuntime {
         self.shared.statuses(stale_after_sec)
     }
 
-    pub fn refresh(&self) -> bool {
+    pub fn refresh(&self) -> Result<(), AiUsageRefreshError> {
         let Some(tx) = &self.command_tx else {
-            return false;
+            return Err(AiUsageRefreshError::Stopped);
         };
-        let (ack_tx, ack_rx) = mpsc::channel();
-        if tx.send(AiUsageWorkerCommand::Refresh(ack_tx)).is_err() {
-            return false;
+        if self
+            .refresh_pending
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_err()
+        {
+            return Err(AiUsageRefreshError::InProgress);
         }
-        ack_rx.recv().is_ok()
+        if tx.send(AiUsageWorkerCommand::Refresh).is_err() {
+            self.refresh_pending.store(false, Ordering::SeqCst);
+            return Err(AiUsageRefreshError::Stopped);
+        }
+        Ok(())
     }
 }
 
@@ -320,6 +340,7 @@ fn run_worker(
     config: AiUsageConfig,
     shared: AiUsageShared,
     command_rx: mpsc::Receiver<AiUsageWorkerCommand>,
+    refresh_pending: Arc<AtomicBool>,
 ) {
     let interval = Duration::from_secs(config.poll_interval_sec.max(1));
     let mut previous: Vec<AiUsageSnapshot> = Vec::new();
@@ -327,12 +348,13 @@ fn run_worker(
         collect_and_update(&config, &shared, &mut previous);
         match command_rx.recv_timeout(interval) {
             Ok(AiUsageWorkerCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Ok(AiUsageWorkerCommand::Refresh(ack)) => {
+            Ok(AiUsageWorkerCommand::Refresh) => {
                 collect_and_update(&config, &shared, &mut previous);
-                let _ = ack.send(());
                 if drain_refresh_commands(&command_rx) {
+                    refresh_pending.store(false, Ordering::SeqCst);
                     break;
                 }
+                refresh_pending.store(false, Ordering::SeqCst);
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
@@ -353,9 +375,7 @@ fn drain_refresh_commands(command_rx: &mpsc::Receiver<AiUsageWorkerCommand>) -> 
     loop {
         match command_rx.try_recv() {
             Ok(AiUsageWorkerCommand::Stop) | Err(mpsc::TryRecvError::Disconnected) => return true,
-            Ok(AiUsageWorkerCommand::Refresh(ack)) => {
-                let _ = ack.send(());
-            }
+            Ok(AiUsageWorkerCommand::Refresh) => {}
             Err(mpsc::TryRecvError::Empty) => return false,
         }
     }

@@ -10,6 +10,7 @@ use std::{
 
 use rawhid_host_core::{
     active_app::SystemActiveAppProvider,
+    ai_usage::AiUsageRefreshError,
     config::{load_config, AppConfig, ConfigPaths},
     hid::{HidDeviceManager, ProbeResult},
     runner::{RunEvent, Runner},
@@ -370,7 +371,9 @@ pub fn refresh_ai_usage(state: State<AppState>) -> Result<(), String> {
     let (reply_tx, reply_rx) = mpsc::channel();
     tx.send(MonitorCommand::RefreshAiUsage(reply_tx))
         .map_err(|_| "not_running".to_string())?;
-    reply_rx.recv().map_err(|_| "refresh_failed".to_string())?
+    reply_rx
+        .recv_timeout(Duration::from_secs(2))
+        .map_err(|_| "refresh_failed".to_string())?
 }
 
 struct RefreshGuard(Arc<AtomicBool>);
@@ -475,10 +478,7 @@ fn run_monitor_loop(
                     }
                 }
                 Ok(MonitorCommand::RefreshAiUsage(reply_tx)) => {
-                    let result = runner
-                        .refresh_ai_usage()
-                        .then_some(())
-                        .ok_or_else(|| "not_running".to_string());
+                    let result = runner.refresh_ai_usage().map_err(refresh_error_code);
                     let _ = reply_tx.send(result);
                     let mut s = status.lock().unwrap();
                     s.ai_usage = runner.ai_usage_statuses();
@@ -567,10 +567,7 @@ fn run_monitor_loop(
                 }
             }
             Ok(MonitorCommand::RefreshAiUsage(reply_tx)) => {
-                let result = runner
-                    .refresh_ai_usage()
-                    .then_some(())
-                    .ok_or_else(|| "not_running".to_string());
+                let result = runner.refresh_ai_usage().map_err(refresh_error_code);
                 let _ = reply_tx.send(result);
                 let mut s = status.lock().unwrap();
                 s.ai_usage = runner.ai_usage_statuses();
@@ -593,4 +590,12 @@ fn run_monitor_loop(
 
     let entry = add_log(&log_entries, &log_counter, "info", "Monitoring stopped");
     let _ = app.emit("log-added", entry);
+}
+
+fn refresh_error_code(error: AiUsageRefreshError) -> String {
+    match error {
+        AiUsageRefreshError::InProgress => "refresh_in_progress",
+        AiUsageRefreshError::Stopped => "not_running",
+    }
+    .to_string()
 }

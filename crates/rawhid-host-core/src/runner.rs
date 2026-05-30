@@ -4,7 +4,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     active_app::{ActiveAppError, ActiveAppProvider},
-    ai_usage::{AiUsageProviderStatus, AiUsageRuntime, AiUsageSendState},
+    ai_usage::{AiUsageProviderStatus, AiUsageRefreshError, AiUsageRuntime, AiUsageSendState},
     app_match::{match_action, LayerAction},
     config::AppConfig,
     hid::{HidDeviceManager, HidError, HidTransport},
@@ -134,10 +134,11 @@ where
             .unwrap_or_default()
     }
 
-    pub fn refresh_ai_usage(&self) -> bool {
+    pub fn refresh_ai_usage(&self) -> Result<(), AiUsageRefreshError> {
         self.ai_usage
             .as_ref()
-            .is_some_and(|runtime| runtime.refresh())
+            .ok_or(AiUsageRefreshError::Stopped)
+            .and_then(AiUsageRuntime::refresh)
     }
 
     pub fn run_forever(&mut self) -> ! {

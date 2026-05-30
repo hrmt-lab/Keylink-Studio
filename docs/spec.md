@@ -118,8 +118,9 @@ AI Usage は任意機能で、既定では無効です。
 - monitoring start で AI usage worker を起動します。
 - config update では worker を停止して新 config で再起動します。
 - stop / loop 終了時は worker を停止します。
-- `refresh_ai_usage` command は worker に即時更新を依頼します。
-- refresh 中は UI button を disabled にし、Tauri / worker 側でも多重実行を防ぎます。
+- `refresh_ai_usage` command は worker に即時更新を依頼し、取得完了までは待ちません。
+- refresh request 中は UI button を disabled にし、Tauri / worker 側でも多重実行を防ぎます。
+- UI の「更新を要求しました。」メッセージは、provider status / updated time / error などの AI usage 状態が変わった時点で消します。
 - `now - snapshot.updated_unix >= stale_after_sec` の場合は `stale=1` とします。
 - 取得失敗時、前回成功値があれば valid を維持して `stale=1` と error code を立てます。
 - 前回成功値がなければ valid を立てず、error code だけを返します。

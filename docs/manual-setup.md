@@ -1,73 +1,58 @@
-# RawHID Host セットアップガイド / Setup Guide
+# RawHID Host セットアップガイド
 
-## 日本語
+## 前提
 
-### 前提
+RawHID Host は Windows 上で動くホストアプリです。ZMK ファームウェア側には、Raw HID で `HL` protocol を受け取る実装が必要です。
 
-RawHID Host は Windows ホスト上で動作するアプリです。ZMK ファームウェア側には、Raw HID で `HL` protocol を受信する実装が別途必要です。
+## Host 側要件
 
-#### ホスト側要件
-
-| 項目 | 要件 |
+| Item | Requirement |
 | --- | --- |
 | OS | Windows 10 / 11 64-bit |
-| Rust | Windows ネイティブの Rust toolchain |
-| Node.js | UI / Tauri 開発に必要 |
+| Rust | Windows native Rust toolchain |
+| Node.js | UI / Tauri 開発時に必要 |
 | WebView2 | Tauri アプリ実行に必要。Windows 11 では通常インストール済み |
 | USB | Raw HID は USB 接続で使用 |
 
-#### キーボード側要件
+## Keyboard 側要件
 
-- ZMK が動作していること
+- ZMK firmware が動作していること
 - Raw HID が有効であること
-- HID Usage Page / Usage がホスト側設定と一致していること
-- `hello` / `hello_response` に対応していること
-- レイヤー切り替えを使う場合は `set_layer` / `clear` に対応していること
-- 時刻表示を使う場合は `time_sync` に対応していること
+- HID Usage Page / Usage が host 設定と一致していること
+- `HOST_HELLO` / `DEVICE_HELLO` に対応していること
+- レイヤー切り替えを使う場合は `APP_LAYER set` / `APP_LAYER clear` に対応していること
+- 時刻表示を使う場合は `TIME_SYNC` に対応していること
+- AI 使用量表示を使う場合は `AI_USAGE` に対応していること
 
 既定の HID 値は Usage Page `0xFF60`、Usage `0x61` です。
 
-### インストール方法
+## 開発起動
 
-#### インストーラー版
-
-配布版を使う場合は、GitHub Releases から Windows 用インストーラーをダウンロードして実行します。
-
-インストーラーや署名の有無は配布方法によって変わります。配布物はリポジトリへ直接 commit せず、GitHub Releases に添付する運用を推奨します。
-
-#### ポータブル運用
-
-zip などで配布する場合は、展開したフォルダ内の実行ファイルを起動します。設定ファイルの場所を固定したい場合は、起動ディレクトリに `rawhid-host.toml` を置いてください。
-
-### 開発起動
-
-実行場所: プロジェクトルート
+プロジェクトルートで実行します。
 
 ```powershell
 .\dev.ps1
 ```
 
-`dev.ps1` は必要に応じて `ui/node_modules` を用意し、Tauri development app を起動します。Vite dev server は Tauri の `beforeDevCommand` から起動されるため、通常は別ターミナルで `npm run dev` を起動する必要はありません。
+`dev.ps1` は必要に応じて `ui/node_modules` を用意し、Tauri development app を起動します。通常、別ターミナルで `npm run dev` を起動する必要はありません。
 
-### ビルド方法
+## ビルド
 
-目的によって実行場所とコマンドが異なります。
-
-| 目的 | 実行場所 | コマンド |
+| Purpose | Location | Command |
 | --- | --- | --- |
-| UI だけ確認 | `ui` | `npm run build` |
-| Rust / CLI 確認 | プロジェクトルート | `cargo build` |
-| Tauri 開発起動 | プロジェクトルート | `.\dev.ps1` |
-| 配布用ビルド | プロジェクトルート | `.\build-release.ps1` |
+| UI only | `ui` | `npm run build` |
+| Rust / CLI | project root | `cargo build` |
+| Tauri dev app | project root | `.\dev.ps1` |
+| Release bundle | project root | `.\build-release.ps1` |
 
-UI だけ確認:
+UI のみ:
 
 ```powershell
 cd ui
 npm run build
 ```
 
-Rust / CLI 確認:
+Rust / CLI:
 
 ```powershell
 cargo build
@@ -79,11 +64,11 @@ cargo build
 .\build-release.ps1
 ```
 
-生成物は `target/` や `ui/dist/` に作られます。これらはリポジトリに含めません。
+生成物は `target/` と `ui/dist/` に作られます。リポジトリには含めません。
 
-### CLI の使い方
+## CLI
 
-実行場所: プロジェクトルート
+プロジェクトルートで実行します。
 
 ```powershell
 cargo run -p rawhid-host-cli -- config-path
@@ -92,23 +77,23 @@ cargo run -p rawhid-host-cli -- list-devices
 cargo run -p rawhid-host-cli -- run
 ```
 
-サブコマンドを省略すると `run` と同じ動作になります。
+subcommand を省略すると `run` と同じ動作になります。
 
-### 初回確認
+## 初回確認
 
-1. キーボードを USB で接続します。
-2. アプリを起動します。
+1. キーボードを USB 接続します。
+2. `.\dev.ps1` でアプリを起動します。
 3. `Devices` 画面で `Scan` を実行します。
-4. 対象デバイスが表示され、HELLO が成功することを確認します。
+4. 対象デバイスが表示され、`HOST_HELLO` / `DEVICE_HELLO` verification が成功することを確認します。
 5. `Dashboard` で監視を開始します。
 
-HELLO に失敗する場合は、ZMK 側の Raw HID、Usage Page / Usage、reserved bytes zero、`seq` の扱いを確認してください。
+HELLO verification に失敗する場合は、ZMK 側の Raw HID、Usage Page / Usage、reserved bytes zero、`seq` の扱いを確認してください。
 
-### 設定ファイル
+## 設定ファイル
 
-推奨: 開発中やポータブル運用では、プロジェクトルートまたは起動ディレクトリに `rawhid-host.toml` を置くと場所がわかりやすくなります。
+開発中や portable 運用では、プロジェクトルートまたは起動ディレクトリに `rawhid-host.toml` を置くと場所が分かりやすくなります。
 
-通常の探索順:
+探索順:
 
 1. CLI の `--config <path>`
 2. カレントディレクトリの `rawhid-host.toml`
@@ -136,15 +121,45 @@ exe = "notepad.exe"
 layer = 1
 
 [time]
-enabled = true
-format_hint = "weekday_hm"
+enabled = false
+format_hint = "time_hm"
 clock_mode = "24h"
 periodic_sync_sec = 60
+
+[ai_usage]
+enabled = false
+poll_interval_sec = 300
+stale_after_sec = 900
+
+[ai_usage.codex]
+enabled = true
+# sessions_dir = "C:\\Users\\<user>\\.codex\\sessions"
+history_fallback_enabled = true
+allow_activity_baseline = false
+activity_five_hour_token_baseline = 0
+activity_seven_day_token_baseline = 0
+
+[ai_usage.claude_code]
+enabled = true
+# credentials_path = "C:\\Users\\<user>\\.claude\\.credentials.json"
+api_timeout_sec = 10
 ```
 
-### GitHub 公開時に除外するもの
+`sessions_dir` と `credentials_path` を空欄にすると、Core default を使います。UI では `Default` / `Core default` として表示されます。
 
-`.gitignore` で少なくとも次を除外してください。
+## AI Usage 利用時の注意
+
+- AI Usage は既定で無効です。
+- Codex は `rate_limits` を優先し、取れない場合のみ local history fallback を使います。
+- local history fallback は activity estimate であり、実 quota ではありません。
+- `activity_*_token_baseline` は fallback 用の仮分母です。実 quota limit ではありません。
+- Claude Code OAuth usage API は experimental / best-effort source です。
+- `.credentials.json` は環境によって存在しないことがあります。
+- access token、credentials JSON、API response を UI や log に出さない方針です。
+
+## GitHub 公開時に除外するもの
+
+少なくとも次を除外してください。
 
 ```gitignore
 /target/
@@ -161,81 +176,3 @@ Thumbs.db
 ```
 
 `rawhid-host.toml` は個人設定になりやすいため、公開する場合は `examples/` にサンプルを置く運用を推奨します。
-
----
-
-## English
-
-### Requirements
-
-RawHID Host is a Windows host application. The ZMK firmware side must implement the `HL` protocol over Raw HID.
-
-Host requirements:
-
-- Windows 10 / 11 64-bit
-- Native Windows Rust toolchain
-- Node.js for UI / Tauri development
-- WebView2 Runtime for Tauri
-- USB connection to the keyboard
-
-Keyboard requirements:
-
-- ZMK firmware with Raw HID enabled
-- Matching HID Usage Page / Usage
-- `hello` / `hello_response`
-- `set_layer` / `clear` for layer switching
-- `time_sync` for keyboard display time sync
-
-Default HID values are Usage Page `0xFF60` and Usage `0x61`.
-
-### Installation
-
-For releases, download the Windows installer or portable package from GitHub Releases.
-
-Release artifacts should not be committed directly to the repository. Attach installers and zip files to GitHub Releases instead.
-
-### Development Startup
-
-Run from the project root:
-
-```powershell
-.\dev.ps1
-```
-
-`dev.ps1` prepares frontend dependencies when needed and starts the Tauri development app. Vite dev server is started by Tauri's `beforeDevCommand`.
-
-### Build
-
-| Purpose | Location | Command |
-| --- | --- | --- |
-| UI only | `ui` | `npm run build` |
-| Rust / CLI | Project root | `cargo build` |
-| Tauri dev app | Project root | `.\dev.ps1` |
-| Release bundle | Project root | `.\build-release.ps1` |
-
-Build outputs are created under `target/` and `ui/dist/`. Do not commit them.
-
-### CLI
-
-Run from the project root:
-
-```powershell
-cargo run -p rawhid-host-cli -- config-path
-cargo run -p rawhid-host-cli -- init-config --output rawhid-host.toml
-cargo run -p rawhid-host-cli -- list-devices
-cargo run -p rawhid-host-cli -- run
-```
-
-When no subcommand is supplied, the CLI defaults to `run`.
-
-### Config
-
-Recommended for development and portable use: put `rawhid-host.toml` in the project root or launch directory.
-
-Normal lookup order:
-
-1. CLI `--config <path>`
-2. `rawhid-host.toml` in the current working directory
-3. `RawHID Host/config.toml` in the OS user config directory
-
-Tauri debug builds prefer the project-root `rawhid-host.toml`.

@@ -34,3 +34,26 @@ format_hint = "time_hm"
 clock_mode = "24h"
 periodic_sync_sec = 60
 # tz_offset_min = 540
+
+[ai_usage]
+enabled = false
+poll_interval_sec = 300
+stale_after_sec = 900
+
+[ai_usage.codex]
+enabled = true
+# When sessions_dir is omitted, the core default is used.
+# Codex rate_limits are preferred. Local history is only a fallback activity estimate.
+# sessions_dir = "C:\\Users\\<user>\\.codex\\sessions"
+history_fallback_enabled = true
+allow_activity_baseline = false
+# Activity estimate baselines are not quota limits.
+activity_five_hour_token_baseline = 0
+activity_seven_day_token_baseline = 0
+
+[ai_usage.claude_code]
+enabled = true
+# When credentials_path is omitted, the core default is used.
+# Claude OAuth usage API is experimental / best-effort. Do not log or display token contents.
+# credentials_path = "C:\\Users\\<user>\\.claude\\.credentials.json"
+api_timeout_sec = 10

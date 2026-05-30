@@ -3,6 +3,7 @@ import { Sidebar } from "./components/Sidebar";
 import Dashboard from "./pages/Dashboard";
 import Rules from "./pages/Rules";
 import TimeSync from "./pages/TimeSync";
+import AiUsage from "./pages/AiUsage";
 import Devices from "./pages/Devices";
 import Settings from "./pages/Settings";
 import {
@@ -35,6 +36,7 @@ function AppInner() {
     current_layer: null,
     current_rule: null,
     last_error: null,
+    ai_usage: [],
   });
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -94,13 +96,21 @@ function AppInner() {
       <Sidebar currentPage={page} onNavigate={setPage} status={status} />
       <main className="flex-1 overflow-y-auto">
         {page === "dashboard" && (
-          <Dashboard config={config} setConfig={updateConfig} status={status} logs={logs} />
+          <Dashboard
+            config={config}
+            setConfig={updateConfig}
+            status={status}
+            logs={logs}
+          />
         )}
         {page === "rules" && (
           <Rules config={config} setConfig={updateConfig} status={status} />
         )}
         {page === "timesync" && (
           <TimeSync config={config} setConfig={updateConfig} />
+        )}
+        {page === "ai_usage" && (
+          <AiUsage config={config} setConfig={updateConfig} status={status} />
         )}
         {page === "devices" && <Devices />}
         {page === "settings" && (

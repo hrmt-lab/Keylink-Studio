@@ -14,6 +14,7 @@ pub struct AppConfig {
     pub hid: HidConfig,
     pub layer_switch: LayerSwitchConfig,
     pub time: TimeConfig,
+    pub ai_usage: AiUsageConfig,
 }
 
 impl Default for AppConfig {
@@ -23,6 +24,7 @@ impl Default for AppConfig {
             hid: HidConfig::default(),
             layer_switch: LayerSwitchConfig::default(),
             time: TimeConfig::default(),
+            ai_usage: AiUsageConfig::default(),
         }
     }
 }
@@ -94,6 +96,70 @@ pub struct TimeConfig {
     pub periodic_sync_sec: u64,
     #[serde(default, deserialize_with = "deserialize_tz_offset_min")]
     pub tz_offset_min: Option<i16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AiUsageConfig {
+    pub enabled: bool,
+    pub poll_interval_sec: u64,
+    pub stale_after_sec: u64,
+    pub codex: CodexAiUsageConfig,
+    pub claude_code: ClaudeCodeAiUsageConfig,
+}
+
+impl Default for AiUsageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            poll_interval_sec: 300,
+            stale_after_sec: 900,
+            codex: CodexAiUsageConfig::default(),
+            claude_code: ClaudeCodeAiUsageConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CodexAiUsageConfig {
+    pub enabled: bool,
+    pub sessions_dir: Option<String>,
+    pub history_fallback_enabled: bool,
+    pub allow_activity_baseline: bool,
+    pub activity_five_hour_token_baseline: u64,
+    pub activity_seven_day_token_baseline: u64,
+}
+
+impl Default for CodexAiUsageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            sessions_dir: None,
+            history_fallback_enabled: true,
+            allow_activity_baseline: false,
+            activity_five_hour_token_baseline: 0,
+            activity_seven_day_token_baseline: 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ClaudeCodeAiUsageConfig {
+    pub enabled: bool,
+    pub credentials_path: Option<String>,
+    pub api_timeout_sec: u64,
+}
+
+impl Default for ClaudeCodeAiUsageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            credentials_path: None,
+            api_timeout_sec: 10,
+        }
+    }
 }
 
 impl Default for TimeConfig {
@@ -278,6 +344,24 @@ format_hint = "time_hm"
 clock_mode = "24h"
 periodic_sync_sec = 60
 # tz_offset_min = 540
+
+[ai_usage]
+enabled = false
+poll_interval_sec = 300
+stale_after_sec = 900
+
+[ai_usage.codex]
+enabled = true
+# sessions_dir = "C:\\Users\\<user>\\.codex\\sessions"
+history_fallback_enabled = true
+allow_activity_baseline = false
+activity_five_hour_token_baseline = 0
+activity_seven_day_token_baseline = 0
+
+[ai_usage.claude_code]
+enabled = true
+# credentials_path = "C:\\Users\\<user>\\.claude\\.credentials.json"
+api_timeout_sec = 10
 "#
 }
 
@@ -328,6 +412,8 @@ mod tests {
         assert_eq!(config.time.format_hint, TimeFormatHint::TimeHm);
         assert_eq!(config.time.clock_mode, ClockMode::TwentyFourHour);
         assert_eq!(config.time.periodic_sync_sec, 60);
+        assert!(!config.ai_usage.enabled);
+        assert!(config.ai_usage.codex.enabled);
     }
 
     #[test]
@@ -362,6 +448,40 @@ tz_offset_min = 1441
         .unwrap_err();
 
         assert!(error.to_string().contains("tz_offset_min"));
+    }
+
+    #[test]
+    fn parses_ai_usage_config() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[ai_usage]
+enabled = true
+poll_interval_sec = 120
+stale_after_sec = 600
+
+[ai_usage.codex]
+enabled = true
+sessions_dir = "C:\\Users\\me\\.codex\\sessions"
+history_fallback_enabled = true
+allow_activity_baseline = true
+activity_five_hour_token_baseline = 1000
+activity_seven_day_token_baseline = 7000
+
+[ai_usage.claude_code]
+enabled = true
+credentials_path = "C:\\Users\\me\\.claude\\.credentials.json"
+api_timeout_sec = 5
+"#,
+        )
+        .unwrap();
+
+        assert!(config.ai_usage.enabled);
+        assert_eq!(config.ai_usage.poll_interval_sec, 120);
+        assert_eq!(
+            config.ai_usage.codex.activity_five_hour_token_baseline,
+            1000
+        );
+        assert_eq!(config.ai_usage.claude_code.api_timeout_sec, 5);
     }
 
     #[test]

@@ -6,7 +6,7 @@ use tracing::{debug, warn};
 
 use crate::{
     config::HidConfig,
-    packet::{Packet, PacketType, TimeSyncPacket, PACKET_SIZE, REPORT_SIZE},
+    packet::{AiUsagePacket, Packet, PacketType, TimeSyncPacket, PACKET_SIZE, REPORT_SIZE},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -24,7 +24,7 @@ pub struct DeviceInfo {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct ProbeResult {
     pub device: DeviceInfo,
-    pub hello_ok: bool,
+    pub verified: bool,
     pub error: Option<String>,
 }
 
@@ -104,12 +104,12 @@ impl HidTransport for RealHidTransport {
             return Ok(false);
         }
         let response = Packet::decode_payload(&buffer).map_err(HidError::Packet)?;
-        let hello_ok =
-            response.packet_type == PacketType::HelloResponse && response.seq == packet.seq;
-        if hello_ok {
+        let device_hello_ok =
+            response.packet_type == PacketType::DeviceHello && response.seq == packet.seq;
+        if device_hello_ok {
             self.handles.borrow_mut().insert(device.path.clone(), hid);
         }
-        Ok(hello_ok)
+        Ok(device_hello_ok)
     }
 
     fn write_report(
@@ -176,7 +176,7 @@ impl<T: HidTransport> HidDeviceManager<T> {
 
         for device in candidates {
             let seq = self.next_seq();
-            let hello = Packet::hello(seq);
+            let hello = Packet::host_hello(seq);
             match self
                 .transport
                 .hello(&device, hello, self.config.hello_timeout_ms)
@@ -186,14 +186,14 @@ impl<T: HidTransport> HidDeviceManager<T> {
                     verified.push(device.clone());
                     results.push(ProbeResult {
                         device,
-                        hello_ok: true,
+                        verified: true,
                         error: None,
                     });
                 }
                 Ok(false) => {
                     results.push(ProbeResult {
                         device,
-                        hello_ok: false,
+                        verified: false,
                         error: None,
                     });
                 }
@@ -201,7 +201,7 @@ impl<T: HidTransport> HidDeviceManager<T> {
                     let message = error.to_string();
                     results.push(ProbeResult {
                         device,
-                        hello_ok: false,
+                        verified: false,
                         error: Some(message),
                     });
                 }
@@ -239,6 +239,10 @@ impl<T: HidTransport> HidDeviceManager<T> {
     }
 
     pub fn send_time_sync(&mut self, packet: TimeSyncPacket) -> Result<usize, HidError> {
+        self.send_report_to_verified(packet.encode_report())
+    }
+
+    pub fn send_ai_usage(&mut self, packet: AiUsagePacket) -> Result<usize, HidError> {
         self.send_report_to_verified(packet.encode_report())
     }
 

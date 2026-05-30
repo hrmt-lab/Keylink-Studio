@@ -1,11 +1,11 @@
 use std::{
     collections::VecDeque,
     path::PathBuf,
-    sync::{Arc, Mutex},
+    sync::{atomic::AtomicBool, Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rawhid_host_core::config::AppConfig;
+use rawhid_host_core::{ai_usage::AiUsageProviderStatus, config::AppConfig};
 
 pub const MAX_LOG_ENTRIES: usize = 200;
 
@@ -25,6 +25,7 @@ pub struct MonitorStatus {
     pub current_layer: Option<u8>,
     pub current_rule: Option<String>,
     pub last_error: Option<String>,
+    pub ai_usage: Vec<AiUsageProviderStatus>,
 }
 
 impl Default for MonitorStatus {
@@ -36,6 +37,7 @@ impl Default for MonitorStatus {
             current_layer: None,
             current_rule: None,
             last_error: None,
+            ai_usage: Vec::new(),
         }
     }
 }
@@ -47,12 +49,14 @@ pub struct AppState {
     pub log_entries: Arc<Mutex<VecDeque<LogEntry>>>,
     pub log_counter: Arc<Mutex<u64>>,
     pub stop_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<MonitorCommand>>>>,
+    pub ai_usage_refreshing: Arc<AtomicBool>,
 }
 
 #[derive(Debug, Clone)]
 pub enum MonitorCommand {
     Stop,
     UpdateConfig(AppConfig),
+    RefreshAiUsage(std::sync::mpsc::Sender<Result<(), String>>),
 }
 
 impl AppState {
@@ -64,6 +68,7 @@ impl AppState {
             log_entries: Arc::new(Mutex::new(VecDeque::new())),
             log_counter: Arc::new(Mutex::new(0)),
             stop_tx: Arc::new(Mutex::new(None)),
+            ai_usage_refreshing: Arc::new(AtomicBool::new(false)),
         }
     }
 }

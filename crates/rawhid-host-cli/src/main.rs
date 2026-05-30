@@ -116,10 +116,10 @@ fn print_config_source(path: &Option<PathBuf>) {
 }
 
 fn print_probe_result(result: ProbeResult) {
-    let status = if result.hello_ok {
-        "HELLO ok"
+    let status = if result.verified {
+        "verified"
     } else {
-        "HELLO failed"
+        "not verified"
     };
     println!(
         "{} vid={:04x} pid={:04x} usage_page={:04x} usage={:04x} path={}",

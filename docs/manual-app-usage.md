@@ -1,134 +1,131 @@
-# RawHID Host アプリ操作マニュアル / App Usage Manual
+# RawHID Host アプリ操作マニュアル
 
-## 日本語
+このドキュメントは、GUI で何ができるかを画面ごとに説明します。設定は `rawhid-host.toml` に保存され、監視中に保存した変更は runner に反映されます。
 
-### 概要
+## 共通
 
-RawHID Host の GUI は、設定編集、デバイス確認、監視開始、ログ確認を行うための Tauri + React アプリです。設定は `rawhid-host.toml` に保存され、監視中に保存した変更も即時反映されます。
+- 左の Sidebar から画面を切り替えます。
+- Sidebar 下部の `JP / EN` で日本語 / 英語表示を切り替えられます。
+- 監視中は Sidebar に接続デバイス数が表示されます。
+- `保存` ボタンがあるページは、押した時点で設定ファイルへ保存します。
+- Layer Rules は自動保存です。ルール追加、削除、変更の操作時に保存されます。
 
-### Dashboard
+## Dashboard
 
-`Dashboard` は監視状態の確認と開始 / 停止を行う画面です。
+Dashboard は監視状態を確認し、監視を開始 / 停止する画面です。
 
-- `Start Monitoring` で監視を開始します。
-- `Stop Monitoring` で監視を停止します。
-- 接続デバイス数、現在のレイヤー、適用中ルール、ログを確認できます。
-- 時刻同期が有効な場合、監視開始後に HELLO 成功済みデバイスへ TIME_SYNC が送られます。
+- `Start Monitoring` / `Stop Monitoring` で監視を切り替えます。
+- 接続済み Raw HID デバイス数を表示します。
+- 現在適用中の layer と rule を表示します。
+- 直近ログを表示します。
+- AI Usage が有効な場合は Codex / Claude Code の簡易サマリを表示します。
+- AI Usage 全体、Codex、Claude Code の有効 / 無効を切り替えられます。
 
-### Layer Rules
+Dashboard から詳細ページへの導線は置いていません。他の機能と同様に、詳細設定は Sidebar から開きます。
 
-アクティブアプリとレイヤー番号の対応を設定します。
+## Layer Rules
 
-GUI での追加手順:
+前面アプリと ZMK layer の対応を設定します。
 
-1. 起動中アプリ一覧から対象アプリを選びます。
-2. レイヤー番号を選びます。
-3. ルールを追加します。
+GUI で追加するルールは `exe` 条件を使います。`path` や `title` を使いたい場合は `rawhid-host.toml` を直接編集してください。
 
-GUI で追加したルールは `exe` 条件を使います。`path` や `title` を使う場合は設定ファイルを直接編集してください。
-
-マッチング優先順位:
-
-| 優先度 | 条件 | 説明 |
-| --- | --- | --- |
-| 1 | `path` | 実行ファイルのフルパス完全一致。大文字小文字は区別しません。 |
-| 2 | `exe` | 実行ファイル名の完全一致。大文字小文字は区別しません。 |
-| 3 | `title` | ウィンドウタイトルの部分一致。大文字小文字は区別しません。 |
-
-同じ優先度で複数一致した場合は設定順が優先されます。どのルールにも一致しない場合は `clear` を送信します。
-
-Windows では Desktop、Taskbar、File Explorer が `explorer.exe` として見えることがあります。`explorer.exe` ルールを作ると、デスクトップクリックでもそのルールに一致する場合があります。通常運用では Explorer ルールは作らない方が扱いやすいです。
-
-### Time Sync
-
-キーボード側ディスプレイへ日時情報を送る設定です。
-
-| 設定 | 説明 |
-| --- | --- |
-| Enabled | TIME_SYNC を送るかどうか |
-| Display Format | 表示形式のヒント |
-| Clock Mode | `24h` または `12h` |
-| Periodic Sync | 定期補正間隔。`0` で無効 |
-| Timezone Offset | 空欄ならホストの現在 offset。指定時は分単位 |
-
-`time_hms` でも毎秒送信はしません。ZMK 側が TIME_SYNC 受信時の uptime を基準に秒を進める想定です。
-
-### Devices
-
-Raw HID 候補を列挙し、HELLO の成否を確認します。
-
-- Usage Page / Usage が設定値と一致する HID を候補にします。
-- 候補へ HELLO を送ります。
-- HELLO に成功したデバイスだけが監視時の送信対象になります。
-
-### Settings
-
-Polling と HID の基本値を編集します。
-
-| 設定 | 既定値 |
-| --- | --- |
-| Poll Interval | `500` ms |
-| Usage Page | `0xFF60` |
-| Usage | `0x61` |
-| HELLO Timeout | `200` ms |
-
-設定保存後、監視中であれば runner が新しい設定で再構築されます。ユーザーが別途「反映」操作をする必要はありません。
-
-### システムトレイ
-
-ウィンドウを閉じてもアプリは終了せず、トレイに残ります。完全に終了する場合はトレイメニューの `Quit` を使います。
-
----
-
-## English
-
-### Overview
-
-The GUI is a Tauri + React app for editing settings, checking devices, starting monitoring, and reading logs. Settings are saved to `rawhid-host.toml`. Changes saved while monitoring is running are applied immediately.
-
-### Dashboard
-
-- Start / stop monitoring
-- Check connected device count
-- Check current layer and matched rule
-- Read recent logs
-- Send initial TIME_SYNC after devices pass HELLO when time sync is enabled
-
-### Layer Rules
-
-GUI-created rules use the `exe` condition. Edit `rawhid-host.toml` directly when you need `path` or `title`.
-
-Matching priority:
+matching priority:
 
 | Priority | Condition | Description |
+| ---: | --- | --- |
+| 1 | `path` | 実行ファイルのフルパス。大文字小文字は区別しません。 |
+| 2 | `exe` | 実行ファイル名。大文字小文字は区別しません。 |
+| 3 | `title` | ウィンドウタイトルの部分一致。大文字小文字は区別しません。 |
+
+同じ優先度で複数一致した場合は、設定ファイル上の順番が優先されます。どのルールにも一致しない場合は `APP_LAYER clear` を送信します。
+
+Windows では Desktop、Taskbar、File Explorer が `explorer.exe` として見えることがあります。意図しない layer 切り替えを避けたい場合、通常は `explorer.exe` ルールを作らない方が扱いやすいです。
+
+## Time Sync
+
+キーボードの表示用に時刻情報を送る設定です。
+
+| UI | Config | Description |
 | --- | --- | --- |
-| 1 | `path` | Full process path, case-insensitive exact match |
-| 2 | `exe` | Executable filename, case-insensitive exact match |
-| 3 | `title` | Window title, case-insensitive substring match |
+| Enabled | `time.enabled` | `TIME_SYNC` を送るかどうか |
+| Display Format | `time.format_hint` | 表示形式のヒント |
+| Clock Mode | `time.clock_mode` | `24h` または `12h` |
+| 同期間隔 / Sync interval | `time.periodic_sync_sec` | 定期補正間隔。`0` で無効 |
+| Timezone Offset | `time.tz_offset_min` | 空欄なら OS の現在 offset。指定時は分単位 |
 
-If nothing matches, the host sends `clear`.
+`time_hms` でも毎秒 packet を送るわけではありません。ZMK 側は `TIME_SYNC` 受信時の uptime を保存し、uptime 差分で秒を進める想定です。
 
-On Windows, Desktop, Taskbar, and File Explorer can all appear as `explorer.exe`. Avoid an Explorer rule unless you explicitly want desktop focus to select a layer.
+## AI Usage
 
-### Time Sync
+Codex / Claude Code の使用率を Raw HID で送る設定です。既定では無効です。
 
-TIME_SYNC sends time information for keyboard displays.
+### Dashboard
 
-- It is disabled by default.
-- It is sent on monitoring start, verified device changes, display-relevant boundaries, and periodic correction.
-- It is not sent every second. ZMK advances seconds from uptime.
+Dashboard では次の操作だけを行えます。
 
-### Devices
+- AI Usage 全体の有効 / 無効
+- Codex の有効 / 無効
+- Claude Code の有効 / 無効
+- provider ごとの簡易サマリ表示
 
-The Devices page lists Raw HID candidates and checks HELLO. Only HELLO-verified devices are used while monitoring.
+### AI Usage 詳細ページ
 
-### Settings
+詳細ページでは、使用率バー、状態、基本設定、Advanced 設定を確認 / 編集できます。
 
-Basic settings:
+基本設定:
 
-- Poll interval
-- HID Usage Page
-- HID Usage
-- HELLO timeout
+| UI | Config | Description |
+| --- | --- | --- |
+| AI Usage | `ai_usage.enabled` | AI usage の取得と送信を有効化 |
+| Poll interval | `ai_usage.poll_interval_sec` | provider を取得する間隔 |
+| Stale threshold | `ai_usage.stale_after_sec` | snapshot を stale とみなす秒数 |
+| Codex enabled | `ai_usage.codex.enabled` | Codex provider の有効化 |
+| Claude Code enabled | `ai_usage.claude_code.enabled` | Claude Code provider の有効化 |
 
-Saved settings are applied to the running monitor automatically.
+Advanced:
+
+| UI | Config | Description |
+| --- | --- | --- |
+| Codex sessions dir | `ai_usage.codex.sessions_dir` | 空欄なら Core default。通常は `%USERPROFILE%\\.codex\\sessions` |
+| History fallback | `ai_usage.codex.history_fallback_enabled` | `rate_limits` がない場合に local history を読む |
+| Allow activity baseline | `ai_usage.codex.allow_activity_baseline` | fallback を割合表示するための baseline 使用を許可 |
+| 5h activity baseline | `activity_five_hour_token_baseline` | fallback 用の仮分母。実 quota limit ではない |
+| 7d activity baseline | `activity_seven_day_token_baseline` | fallback 用の仮分母。実 quota limit ではない |
+| Claude credentials path | `ai_usage.claude_code.credentials_path` | 空欄なら Core default。通常は `%USERPROFILE%\\.claude\\.credentials.json` |
+| API timeout | `ai_usage.claude_code.api_timeout_sec` | Claude OAuth usage API の timeout |
+
+Codex は session history の `rate_limits` を優先します。取れた場合は quota source です。local history fallback は activity estimate であり、実 quota ではありません。そのため fallback 時は reset 時刻を表示しません。
+
+Claude Code OAuth usage API は experimental / best-effort source です。`.credentials.json` が存在しない環境や、schema 変更、認証失敗、token 期限切れがあり得ます。UI には access token、credentials JSON、API response、raw error は表示しません。
+
+使用率バーは `used` です。80% 以上でオレンジ、90% 以上で赤になります。値が invalid の場合は `no data` と表示します。
+
+`更新` ボタンは監視中のみ使えます。更新中はボタンが disabled になり、worker 側でも多重取得を防ぎます。
+
+## Devices
+
+Raw HID 候補を列挙し、HELLO 検証を行います。
+
+- Usage Page / Usage が設定値と一致する HID を候補にします。
+- host は候補へ `HOST_HELLO` を送ります。
+- 同じ `seq` の `DEVICE_HELLO` が返った device だけが verified になります。
+- verified device だけが監視時の送信対象になります。
+
+HELLO 検証に失敗する場合は、ZMK 側の Raw HID、Usage Page / Usage、reserved bytes zero、`seq` の返し方を確認してください。
+
+## Settings
+
+Polling と HID の基本設定を編集します。
+
+| UI | Config | Default |
+| --- | --- | ---: |
+| Poll interval | `polling.interval_ms` | `500` ms |
+| Usage Page | `hid.usage_page` | `0xFF60` |
+| Usage | `hid.usage` | `0x61` |
+| HELLO timeout | `hid.hello_timeout_ms` | `200` ms |
+
+`更新` は設定ファイルを再読み込みします。`保存` は現在の設定をファイルに書き込みます。
+
+## System tray
+
+ウィンドウを閉じてもアプリは完全終了せず、システムトレイに残ります。完全に終了する場合はトレイメニューの `Quit` を使います。

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Save, AlertCircle, RotateCcw } from "lucide-react";
+import { Save, AlertCircle, RefreshCcw } from "lucide-react";
 import { saveConfig, reloadConfig } from "../api";
 import { useLang } from "../i18n";
 import type { AppConfig } from "../types";
@@ -54,9 +54,9 @@ export default function Settings({ config, setConfig }: Props) {
         <div className="flex items-center gap-2">
           <button
             onClick={handleReload}
-            className="flex items-center gap-1.5 rounded-lg px-3 py-2 text-sm text-gray-600 hover:bg-panel"
+            className="flex items-center gap-2 rounded-lg border border-border bg-white px-4 py-2.5 text-sm font-medium text-gray-600 hover:bg-panel transition-colors"
           >
-            <RotateCcw size={14} />
+            <RefreshCcw size={15} />
             {t("settings.reload")}
           </button>
           <button

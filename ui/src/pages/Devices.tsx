@@ -71,7 +71,7 @@ export default function Devices() {
       {results !== null && (
         <p className="text-xs text-gray-400 text-center">
           {t("devices.summary", {
-            ok: results.filter((r) => r.hello_ok).length,
+            ok: results.filter((r) => r.verified).length,
             total: results.length,
           })}
         </p>
@@ -82,28 +82,28 @@ export default function Devices() {
 
 function DeviceCard({ result }: { result: ProbeResult }) {
   const { t } = useLang();
-  const { device, hello_ok, error } = result;
+  const { device, verified, error } = result;
   const name = device.product ?? device.manufacturer ?? "Unknown Device";
 
   return (
     <div
       className={`rounded-xl bg-white shadow-card ring-1 transition-all ${
-        hello_ok ? "ring-emerald-200 bg-emerald-50/30" : "ring-border"
+        verified ? "ring-emerald-200 bg-emerald-50/30" : "ring-border"
       }`}
     >
       <div className="flex items-start gap-4 px-5 py-4">
         <div
           className={`mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg ${
-            hello_ok ? "bg-emerald-100" : "bg-gray-100"
+            verified ? "bg-emerald-100" : "bg-gray-100"
           }`}
         >
-          <Usb size={18} className={hello_ok ? "text-emerald-600" : "text-gray-400"} />
+          <Usb size={18} className={verified ? "text-emerald-600" : "text-gray-400"} />
         </div>
 
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <span className="font-medium text-gray-800 text-sm">{name}</span>
-            {hello_ok ? (
+            {verified ? (
               <span className="flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-700">
                 <CheckCircle2 size={10} /> {t("devices.ok")}
               </span>

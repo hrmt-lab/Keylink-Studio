@@ -1,160 +1,139 @@
-# RawHID Host の仕組みと技術スタック / Technology Overview
+# RawHID Host の仕組みと技術スタック
 
-## 日本語
+このドキュメントは、Rust / React / Tauri などを知らない人でも、RawHID Host が何をしていて、どこに何があるかを掴めるようにした概要です。
 
-### このアプリは何をするものか
+## このアプリは何をするものか
 
-RawHID Host は、Windows で現在使っているアプリを確認し、USB 接続された対応キーボードへ命令を送る常駐アプリです。
+RawHID Host は、Windows で常駐し、USB 接続された対応キーボードへ命令を送るアプリです。
 
-例えば次のような使い方ができます。
+主な使い方:
 
-- メモ帳を前面に出したら、キーボードを指定レイヤーへ切り替える
-- アプリに対応するルールがなければ、自動レイヤー指定を解除する
-- PC の現在時刻を、ディスプレイ付きキーボードへ送る
+- 前面アプリに応じて ZMK キーボードの layer を切り替える
+- どのルールにも一致しない場合、自動 layer 指定を解除する
+- PC の現在時刻をキーボードの表示用に送る
+- Codex / Claude Code の 5h / 7d 使用量 snapshot をキーボードへ送る
 
-このリポジトリに含まれるのは PC 側のアプリです。命令を受け取ってレイヤーや表示を変更するキーボード側の ZMK ファームウェアは、別途対応実装が必要です。
+このリポジトリに含まれるのは PC 側のアプリです。命令を受け取って layer や表示に反映する ZMK 側ファームウェアは、別途同じ packet protocol に対応している必要があります。
 
-### 全体の見取り図
+## 全体像
 
 ```mermaid
 flowchart LR
-    User["利用者"] --> UI["操作画面<br>React"]
-    UI <--> Shell["デスクトップアプリの器<br>Tauri"]
-    Shell <--> Engine["中核処理<br>Rust"]
-    Engine --> Windows["Windows<br>前面アプリの取得"]
-    Engine <--> Config["設定ファイル<br>rawhid-host.toml"]
-    Engine --> USB["Raw HID / USB"]
-    USB --> Keyboard["ZMK キーボード"]
+    User["ユーザー"] --> UI["React UI"]
+    UI <--> Tauri["Tauri<br>Desktop Shell"]
+    Tauri <--> Rust["Rust Core"]
+    Rust --> Windows["Windows<br>foreground app"]
+    Rust <--> Config["rawhid-host.toml"]
+    Rust --> Claude["Claude OAuth API<br>best effort"]
+    Rust --> Codex["Codex local sessions"]
+    Rust --> USB["Raw HID / USB"]
+    USB --> Keyboard["ZMK keyboard"]
 ```
 
-画面で行った操作は Tauri を通じて Rust の処理に渡ります。Rust は設定を読み、Windows の状態を調べ、必要な命令をキーボードへ送ります。
+画面で行った操作は Tauri を通じて Rust の処理に渡ります。Rust は設定を読み、Windows の状態を調べ、必要な packet をキーボードへ送ります。
 
-### 使われている技術
+## 技術スタック
 
-| 技術 | このアプリでの役割 | イメージ |
+| Technology | Role | Image |
 | --- | --- | --- |
-| Rust | Windows や USB との通信、設定処理、監視ループ | エンジン |
-| React | ボタン、設定画面、状態表示 | 操作パネル |
-| TypeScript | React 画面のプログラムを書く言語 | 間違いを見つけやすい画面用設計図 |
-| Tauri | React と Rust を Windows アプリとしてまとめる | 外箱と連絡係 |
-| Vite | React の開発起動と製品用ビルド | UI の組み立て道具 |
-| Tailwind CSS | 画面の色、余白、レイアウト | 見た目の部品集 |
-| TOML | 設定ファイルの形式 | 人が読める設定メモ |
-| Raw HID | USB 経由で独自の命令を送る通信方式 | PC とキーボードの専用伝送路 |
-| ZMK | キーボード側で動くファームウェア | キーボード内部の制御ソフト |
+| Rust | Windows / USB / 設定 / 監視ロジック | エンジン |
+| React | 画面、ボタン、状態表示 | 操作パネル |
+| TypeScript | UI の型付きコード | 画面側の設計図 |
+| Tauri | React と Rust を一つの Windows アプリにまとめる | 外箱と連絡役 |
+| Vite | React の開発起動と production build | UI のビルド道具 |
+| Tailwind CSS | 画面の余白、色、ボタン、カード | 見た目の部品集 |
+| TOML | 設定ファイル形式 | 人が読める設定メモ |
+| Raw HID | PC からキーボードへ独自 packet を送る USB 経路 | 専用通信路 |
+| ZMK | キーボード側ファームウェア | 受信して実際に動く側 |
 
-### Rust: 実際の処理を担当する部分
+## Rust: 実際の処理を担当する部分
 
-Rust は、画面の裏で実際に仕事をする部分に使われています。
+Rust は、画面の裏側で実際に仕事をする部分です。
 
 - Windows に問い合わせて、現在前面にあるアプリを確認する
-- USB の HID デバイスを探す
-- 対応キーボードかどうかを HELLO 通信で確認する
-- キーボードへレイヤー変更や時刻同期の命令を送る
+- USB の HID device を探す
+- 対応キーボードかどうかを `HOST_HELLO` / `DEVICE_HELLO` で確認する
+- layer、time sync、AI usage の packet を作る
 - 設定ファイルを読み書きする
-- 一定間隔で監視処理を繰り返す
+- 監視処理を一定間隔で繰り返す
 
-Rust のコードは `crates/` 配下で三つに分かれています。
+Rust コードは `crates/` 配下にあります。
 
 ```text
 crates/
-├── rawhid-host-core/     # 画面に依存しない中核処理
-├── rawhid-host-cli/      # PowerShell などから使う文字ベースの入口
-└── rawhid-host-tauri/    # GUI アプリとして動かすための Rust 側
+├─ rawhid-host-core/     # UI に依存しない中核処理
+├─ rawhid-host-cli/      # コマンドライン入口
+└─ rawhid-host-tauri/    # GUI アプリとして動かすための Rust 側
 ```
 
-#### `rawhid-host-core`
+### `rawhid-host-core`
 
-アプリの頭脳にあたります。
+アプリの中心です。
 
-| ファイル | 担当 |
+| File | Role |
 | --- | --- |
-| `src/config.rs` | TOML 設定の読込、既定値、設定例 |
-| `src/active_app.rs` | 前面アプリの実行ファイル名やタイトルの取得 |
-| `src/app_match.rs` | アプリとレイヤールールの照合 |
-| `src/packet.rs` | キーボードへ送る命令形式の作成と検証 |
-| `src/hid.rs` | USB デバイス探索、HELLO 確認、送信 |
-| `src/time.rs` | 時刻同期 packet の作成と送信時期の判断 |
-| `src/runner.rs` | 上記を一回の監視処理として実行 |
+| `src/config.rs` | TOML 設定の読み込み、default、設定例 |
+| `src/active_app.rs` | 前面アプリの実行ファイル名や title の取得 |
+| `src/app_match.rs` | アプリと layer rule の照合 |
+| `src/packet.rs` | キーボードへ送る packet の encode / decode |
+| `src/hid.rs` | USB device 探索、HELLO 検証、packet 送信 |
+| `src/time.rs` | `TIME_SYNC` packet と送信タイミング |
+| `src/ai_usage.rs` | Codex / Claude Code 使用量 snapshot の取得 |
+| `src/runner.rs` | 監視処理をまとめて実行 |
 
-中核処理を GUI から分離しているため、画面を使わない CLI からも同じ仕組みを利用できます。
+core は GUI に依存しないため、CLI からも同じ仕組みを使えます。
 
-#### `rawhid-host-cli`
+### `rawhid-host-cli`
 
-CLI は Command Line Interface の略で、画面ではなくコマンドで操作する入口です。
+GUI なしで確認するための入口です。
 
 ```powershell
 cargo run -p rawhid-host-cli -- list-devices
 cargo run -p rawhid-host-cli -- run
 ```
 
-`list-devices` は接続候補と HELLO 応答を確認し、`run` は GUI なしで監視処理を開始します。開発時の確認やトラブル調査に便利です。
+`list-devices` は接続候補と `DEVICE_HELLO` 応答を確認し、`run` は GUI なしで監視を開始します。
 
-### React と TypeScript: 人が操作する画面
+## React / TypeScript: ユーザーが操作する画面
 
-React はアプリの画面を構成するために使われています。画面上の状態が変わると、表示もその状態に合わせて更新されます。
+React はアプリの画面を作るために使っています。TypeScript は、UI が扱う設定や状態の形を分かりやすくするための言語です。
 
-| 画面 | できること |
+画面は `ui/src/pages/` に分かれています。
+
+| Page | What it does |
 | --- | --- |
-| Dashboard | 監視開始と停止、接続状態、ログの確認 |
-| Layer Rules | アプリごとのレイヤールール設定 |
-| Time Sync | 時刻同期の有効化と表示形式の設定 |
-| Devices | Raw HID デバイスと HELLO 結果の確認 |
-| Settings | ポーリング間隔と HID 設定の編集 |
+| `Dashboard.tsx` | 監視開始 / 停止、状態、ログ、AI Usage 簡易サマリ |
+| `Rules.tsx` | アプリごとの layer rule 設定 |
+| `TimeSync.tsx` | 時刻同期設定 |
+| `AiUsage.tsx` | Codex / Claude Code 使用量設定と状態表示 |
+| `Devices.tsx` | Raw HID device scan と HELLO 結果 |
+| `Settings.tsx` | polling / HID 基本設定 |
 
-React のコードは `ui/src/` にあります。`ui/src/App.tsx` が画面全体の入口で、`ui/src/pages/` に各画面が分かれています。
+`ui/src/i18n.tsx` に日本語 / 英語の表示文言があります。新しい UI 文言を追加する場合は、ここに両言語分を追加します。
 
-TypeScript は React のコードを書く言語です。「接続台数は数字」「エラーは文字列または空」のように、扱うデータの形を明確にできます。このアプリでは `ui/src/types.ts` が、画面と Rust 側が共有する設定や状態の形を定義しています。
+## Tauri: UI と Rust をつなぐ部分
 
-### Tauri: 画面と中核処理をつなぐ部分
-
-React は見た目のよい画面を作るのが得意ですが、React の画面だけで Windows の前面アプリを調べたり、USB 機器を制御したりする構成には向いていません。
-
-Tauri は、React の画面をデスクトップアプリとして表示し、Rust の機能を画面から呼び出せるようにします。
+React だけでは、Windows の前面アプリ取得や USB device 制御は扱いにくいです。Tauri は React の画面をデスクトップアプリとして表示し、Rust の処理を UI から呼び出せるようにします。
 
 ```mermaid
 sequenceDiagram
-    participant UI as React 画面
-    participant T as Tauri
-    participant R as Rust
-    participant K as キーボード
-
-    UI->>T: 監視を開始してほしい
-    T->>R: start_monitoring を呼び出す
-    R->>R: 前面アプリと設定を確認
-    R->>K: 必要ならレイヤー命令を送信
-    R->>T: 状態を更新
-    T->>UI: 表示更新イベントを送信
+    participant UI as React UI
+    participant T as Tauri Command
+    participant R as Rust Runner
+    participant K as ZMK Keyboard
+    UI->>T: start_monitoring
+    T->>R: runner を起動
+    R->>R: active app / config / AI snapshot を確認
+    R->>K: APP_LAYER / TIME_SYNC / AI_USAGE
+    R->>T: status-update
+    T->>UI: 表示更新
 ```
 
-UI から Rust への呼び出しは `ui/src/api.ts`、受け取る Rust 側の処理は `crates/rawhid-host-tauri/src/commands.rs` にあります。
+UI から Rust への呼び出しは `ui/src/api.ts`、Rust 側の command は `crates/rawhid-host-tauri/src/commands.rs` にあります。
 
-また、GUI のウィンドウを閉じてもアプリは完全終了せず、システムトレイに残ります。設定画面を閉じた後も監視を続ける、常駐アプリとしての動作です。
+## TOML: 設定を保存する形式
 
-### なぜ React、Tauri、Rust を組み合わせるのか
-
-それぞれ得意な役割が異なるからです。
-
-| やりたいこと | 担当技術 |
-| --- | --- |
-| 分かりやすい設定画面を作る | React / TypeScript |
-| Windows や USB 機器と安全に通信する | Rust |
-| UI と Rust を一つのデスクトップアプリにする | Tauri |
-
-つまり、このアプリは「Web 技術で作った操作しやすい画面」と「Rust で作った機器制御エンジン」を Tauri で一つにまとめたものです。
-
-### Vite と Tailwind CSS: UI を作りやすくする道具
-
-Vite は React の開発とビルドを支えるツールです。
-
-- 開発中は画面の修正をすばやく確認する
-- 配布用には React のファイルを `ui/dist/` にまとめる
-
-Tailwind CSS は、色、余白、ボタン、カード、文字サイズなどの見た目を作るために使われています。これらは画面を作るための道具であり、キーボード通信そのものは担当しません。
-
-### TOML: 設定を保存する形式
-
-設定は `rawhid-host.toml` に保存されます。TOML は、人が読んだり直接編集したりしやすい設定形式です。
+設定は `rawhid-host.toml` に保存されます。UI から保存しても、最終的にはこの TOML 形式に書き込まれます。
 
 ```toml
 [polling]
@@ -169,179 +148,93 @@ exe = "notepad.exe"
 layer = 1
 
 [time]
-enabled = true
-format_hint = "weekday_hm"
+enabled = false
+format_hint = "time_hm"
+
+[ai_usage]
+enabled = false
 ```
 
-この例は、0.5 秒ごとに前面アプリを確認し、メモ帳が前面にあればレイヤー 1 を指定し、時刻同期も有効にする設定です。GUI で設定を保存した場合も、この形式で設定ファイルに書き込まれます。
+TOML は人が直接編集しやすいため、UI にまだ細かい項目がない場合でも設定できます。
 
-### Raw HID: PC からキーボードへ命令を送る方法
+## Raw HID と packet
 
-HID は Human Interface Device の略で、キーボードやマウスなどの USB 機器に使われる仕組みです。
+HID はキーボードやマウスで使われる USB の仕組みです。Raw HID を使うと、PC からキーボードへ独自の 32 byte payload を送れます。
 
-通常のキーボード利用では、キー入力がキーボードから PC へ送られます。
+このアプリでは `HL` protocol と呼ぶ packet を使います。
 
-```text
-キーボード -> PC: A キーが押された
-```
-
-Raw HID を使うこのアプリでは、PC からキーボードへ独自の命令も送ります。
-
-```text
-PC -> キーボード: レイヤー 2 に切り替える
-PC -> キーボード: 現在時刻を表示に使う
-```
-
-このアプリでは `HL` という packet protocol を使い、次の命令を扱います。
-
-| 命令 | 意味 |
+| Packet | Meaning |
 | --- | --- |
-| `hello` | 対応キーボードか確認する |
-| `hello_response` | 対応しているとキーボードが応答する |
-| `set_layer` | 指定したレイヤーを選ぶ |
-| `clear` | 自動レイヤー指定を解除する |
-| `time_sync` | 日時情報をキーボードへ送る |
+| `HOST_HELLO` | host が対応キーボードか確認する |
+| `DEVICE_HELLO` | keyboard が同じ `seq` で応答する |
+| `APP_LAYER set` | 指定した layer を選ぶ |
+| `APP_LAYER clear` | 自動 layer 指定を解除する |
+| `TIME_SYNC` | 日時情報を送る |
+| `AI_USAGE` | Codex / Claude Code 使用量 snapshot を送る |
 
-詳細な byte 配置は [Packet 仕様](packet-spec.md) に記載されています。
+byte layout は [Packet Specification](packet-spec.md) にあります。
 
-### ZMK: キーボード側で命令を実行する部分
-
-ZMK は、カスタムキーボード内部で動作するファームウェアです。
-
-```text
-PC 側:          RawHID Host が命令を送る
-キーボード側:  ZMK が命令を受け取り、レイヤーや表示へ反映する
-```
-
-PC 側のアプリだけではレイヤー変更や時刻表示は成立しません。キーボード側にも、同じ packet protocol を受け取って処理する実装が必要です。
-
-### レイヤーが切り替わるまで
-
-例えばメモ帳を前面にした場合、処理は次の順で進みます。
+## Layer が切り替わる流れ
 
 ```mermaid
 flowchart TD
-    A["監視を開始"] --> B["一定間隔で前面アプリを確認"]
-    B --> C["notepad.exe を検出"]
-    C --> D["設定内の Notepad ルールと一致"]
-    D --> E["set_layer packet を作成"]
-    E --> F["HELLO 確認済みキーボードへ送信"]
-    F --> G["ZMK が指定レイヤーへ切り替える"]
+    A["監視開始"] --> B["一定間隔で前面アプリを確認"]
+    B --> C["例: notepad.exe を検出"]
+    C --> D["設定内の rule と一致"]
+    D --> E["APP_LAYER set packet を作成"]
+    E --> F["HELLO verified device へ送信"]
+    F --> G["ZMK が指定 layer に切り替える"]
 ```
 
-どのルールにも一致しなくなった場合は `clear` を送り、自動的に指定したレイヤーを解除します。前面アプリが変わらず同じレイヤーでよい場合は、同じ命令を毎回送り続けないように抑制します。
+どの rule にも一致しなくなった場合は `APP_LAYER clear` を送り、自動的に指定した layer を解除します。前面アプリが変わらず同じ layer でよい場合は、同じ命令を毎回送り続けないように抑制します。
 
-### 時刻同期の仕組み
+## Time Sync の流れ
 
-時刻同期を有効にすると、PC からキーボードへ次の情報を送れます。
+Time Sync を有効にすると、PC からキーボードへ次の情報を送ります。
 
-- 現在の Unix 時刻
-- タイムゾーンのオフセット
-- 曜日
-- 表示形式のヒント
-- 12 時間表示または 24 時間表示
+- Unix time
+- timezone offset
+- weekday
+- display format hint
+- 12h / 24h mode
 
-時刻情報は毎秒送信されません。主に次のタイミングで送ります。
+毎秒送るのではなく、初回、device 変化、表示に必要な値の変化、定期補正タイミングで送ります。キーボード側は受信時の uptime を使って表示秒を進めます。
 
-- 監視開始後の最初の同期
-- キーボードの接続状態が変わったとき
-- 表示に必要な分や日付が変化したとき
-- 定期的な補正時刻になったとき
+## AI Usage の流れ
 
-キーボード側は、受け取った時刻と内部の経過時間を使って表示を進める設計です。通信量を抑えながら表示を維持できます。
+AI Usage は background worker が取得します。`Runner::tick()` は重い取得処理をせず、最新 snapshot に変化があれば packet を送るだけです。
 
-### 理解するときに読む順番
+### Codex
 
-初めてソースを見る場合は、次の順で読むと全体を掴みやすくなります。
+Codex は local session history を読みます。
+
+- `rate_limits` があれば quota source として使う
+- `rate_limits` がなければ、設定により local history fallback を使う
+- fallback は activity estimate であり、実 quota ではない
+- fallback の割合表示に使う `activity_*_token_baseline` は仮分母であり、実 quota limit ではない
+
+### Claude Code
+
+Claude Code は OAuth usage API を experimental / best-effort source として使います。
+
+- `.credentials.json` が存在しない環境があります
+- schema 変更、認証失敗、token 期限切れがあり得ます
+- refresh token 更新は v1 では行いません
+- access token、credentials JSON、API response、raw parse error は UI / log / packet に出しません
+
+## 初めて読むときのおすすめ順
 
 1. `README.md`: アプリの目的と起動方法
 2. `docs/manual-app-usage.md`: GUI で何ができるか
 3. `examples/rawhid-host.toml`: 設定の具体例
-4. `ui/src/pages/`: 表示される画面
-5. `crates/rawhid-host-tauri/src/commands.rs`: 画面操作と Rust の接続
-6. `crates/rawhid-host-core/src/runner.rs`: 監視処理の中心
-7. `docs/packet-spec.md`: キーボードと交わす命令形式
+4. `docs/packet-spec.md`: ZMK 側実装に必要な byte layout
+5. `ui/src/pages/`: 画面実装
+6. `crates/rawhid-host-tauri/src/commands.rs`: UI と Rust の接続
+7. `crates/rawhid-host-core/src/runner.rs`: 監視処理の中心
+8. `crates/rawhid-host-core/src/ai_usage.rs`: AI Usage provider / worker
 
-### まとめ
+## English Summary
 
-RawHID Host は次の三層で構成されています。
+RawHID Host is a resident Windows app. React and TypeScript build the UI, Tauri connects that UI to Rust, and Rust handles Windows integration, TOML configuration, Raw HID, packet encoding, monitoring, time sync, and AI usage snapshots.
 
-```text
-React:
-利用者が操作する画面
-
-Tauri:
-画面を Windows アプリとして動かし、Rust とつなぐ部分
-
-Rust:
-前面アプリ確認、設定管理、Raw HID 通信、レイヤー切替、時刻同期を行う本体
-```
-
-そして、USB の向こう側では ZMK ファームウェアが命令を受け取り、実際のキーボード動作へ反映します。
-
----
-
-## English
-
-### What This App Does
-
-RawHID Host is a resident Windows application that observes the foreground application and sends commands to a compatible USB keyboard. It can select a keyboard layer for a specific desktop application and send time information for a keyboard display.
-
-This repository contains the host application only. The keyboard-side ZMK firmware must separately implement the compatible Raw HID packet receiver.
-
-### Technology Stack At A Glance
-
-| Technology | Role in this app |
-| --- | --- |
-| Rust | Windows integration, USB Raw HID communication, configuration, monitoring logic |
-| React | User-facing screens and controls |
-| TypeScript | Typed UI code and data models |
-| Tauri | Desktop application shell connecting React to Rust |
-| Vite | UI development server and production build tool |
-| Tailwind CSS | UI styling |
-| TOML | Human-readable configuration file format |
-| Raw HID | USB transport for custom host-to-keyboard commands |
-| ZMK | Keyboard-side firmware that performs received actions |
-
-### How The Parts Work Together
-
-The React UI lets the user start monitoring, configure layer rules, scan devices, and edit time sync settings. Through Tauri commands, those requests reach the Rust implementation. Rust reads configuration, inspects the active Windows application, verifies compatible Raw HID devices using HELLO, and sends layer or time synchronization packets when necessary.
-
-The core implementation is separated from the UI:
-
-```text
-crates/
-├── rawhid-host-core/     # reusable configuration, device, packet, and monitoring logic
-├── rawhid-host-cli/      # command-line entry point
-└── rawhid-host-tauri/    # desktop app integration and monitor thread
-ui/                       # React + TypeScript screens
-```
-
-### Layer Switching
-
-While monitoring is running, the app periodically reads the current foreground application. It compares the application to configured rules and sends `set_layer` when a rule matches, or `clear` when no rule matches. It avoids sending the same unchanged layer command repeatedly.
-
-### Time Synchronization
-
-When enabled, time sync sends current time information to the keyboard on initial synchronization, verified-device changes, display-relevant changes, and periodic correction. It does not send a new packet every second; the keyboard firmware advances displayed time locally.
-
-### Raw HID And ZMK
-
-Raw HID is the USB channel used for custom commands such as:
-
-- `hello` / `hello_response` to verify compatible devices
-- `set_layer` to select a keyboard layer
-- `clear` to release an automatically selected layer
-- `time_sync` to send time data for display use
-
-The corresponding ZMK firmware on the keyboard receives these packets and applies the actual keyboard behavior. For packet field details, see [Packet Specification](packet-spec.md).
-
-### Recommended Reading Order
-
-1. `README.md`
-2. `docs/manual-app-usage.md`
-3. `examples/rawhid-host.toml`
-4. `ui/src/pages/`
-5. `crates/rawhid-host-tauri/src/commands.rs`
-6. `crates/rawhid-host-core/src/runner.rs`
-7. `docs/packet-spec.md`
+The ZMK firmware side is not included in this repository. It must implement the compatible Raw HID receiver described in [Packet Specification](packet-spec.md).

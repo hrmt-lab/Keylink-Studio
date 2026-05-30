@@ -19,11 +19,13 @@ pub fn run() {
             commands::get_config_path,
             commands::save_config,
             commands::reload_config,
+            commands::show_config_file_location,
             commands::get_status,
             commands::get_log_entries,
             commands::probe_devices,
             commands::start_monitoring,
             commands::stop_monitoring,
+            commands::refresh_ai_usage,
             commands::get_running_apps,
         ])
         .setup(|app| {

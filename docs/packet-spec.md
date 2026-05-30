@@ -1,12 +1,10 @@
 # RawHID Host Packet Specification
 
-## 日本語
+この仕様は、host 側 `rawhid-host` と ZMK 側 Raw HID 受信処理の間で使う packet を定義します。
 
-この仕様は、ホスト側 `rawhid-host` と ZMK 側 Raw HID 受信処理の間で使う packet を定義します。
+## Transport
 
-### Transport
-
-| 項目 | 値 |
+| Item | Value |
 | --- | --- |
 | HID Usage Page | `0xFF60` |
 | HID Usage | `0x0061` |
@@ -15,9 +13,9 @@
 | Payload size | 32 bytes |
 | Multi-byte values | little-endian |
 
-ホスト側が `hidapi` で write する buffer は、先頭 1 byte の Report ID `0x00` と 32 byte payload です。
+host が `hidapi` で write する buffer は、先頭 1 byte の Report ID `0x00` と 32 byte payload です。
 
-### Common Header
+## Common Header
 
 | Offset | Size | Field | Value |
 | --- | ---: | --- | --- |
@@ -25,133 +23,116 @@
 | `2` | 1 | version | `0x01` |
 | `3` | 1 | type | packet type |
 
-byte `4` 以降は packet type ごとに異なります。
+## Packet Types
 
-### Packet Types
-
-| Type | Name | Direction | ACK |
+| Type | Name | Direction | Notes |
 | ---: | --- | --- | --- |
-| `0x01` | `set_layer` | Host -> ZMK | none |
-| `0x02` | `clear` | Host -> ZMK | none |
-| `0x10` | `hello` | Host -> ZMK | `hello_response` |
-| `0x11` | `hello_response` | ZMK -> Host | none |
-| `0x20` | `time_sync` | Host -> ZMK | none |
+| `0x01` | `HOST_HELLO` | Host -> ZMK | same seq must be returned |
+| `0x02` | `DEVICE_HELLO` | ZMK -> Host | response to `HOST_HELLO` |
+| `0x03` | `ERROR` | ZMK -> Host | reserved / decodable in v1 |
+| `0x04` | `PING` | Host -> ZMK | reserved / decodable in v1 |
+| `0x05` | `PONG` | ZMK -> Host | reserved / decodable in v1 |
+| `0x10` | `AI_USAGE` | Host -> ZMK | AI usage snapshot |
+| `0x20` | `TIME_SYNC` | Host -> ZMK | time display sync |
+| `0x30` | `APP_LAYER` | Host -> ZMK | app layer set/clear |
 
-### Layer / Hello Layout
-
-`set_layer`、`clear`、`hello`、`hello_response` は同じ layout です。
+## HOST_HELLO / DEVICE_HELLO
 
 | Offset | Size | Field | Notes |
 | --- | ---: | --- | --- |
 | `0..1` | 2 | magic | `"HL"` |
 | `2` | 1 | version | `0x01` |
-| `3` | 1 | type | `0x01`, `0x02`, `0x10`, `0x11` |
-| `4` | 1 | layer | `set_layer` で `0..31` |
-| `5` | 1 | flags | v1 では `0` |
-| `6` | 1 | seq | host sequence |
-| `7..31` | 25 | reserved | must be zero |
+| `3` | 1 | type | `0x01` or `0x02` |
+| `4..6` | 3 | reserved | must be zero |
+| `7` | 1 | seq | u8 wrapping counter |
+| `8..31` | 24 | reserved | must be zero |
 
-`hello_response` は `hello` と同じ `seq` を返します。`set_layer` と `clear` は ACK なしです。
+`seq` は u8 wrapping counter です。`rawhid-host` は `HOST_HELLO` を送り、同じ `seq` の `DEVICE_HELLO` が返った device だけを verified として扱います。
 
-### TIME_SYNC Layout
+`byte 4..6` と `byte 8..31` は v1 では reserved zero です。
 
-`time_sync` は type `0x20` です。
+## APP_LAYER
 
-| Offset | Size | Field | Type / Notes |
+| Offset | Size | Field | Notes |
 | --- | ---: | --- | --- |
 | `0..1` | 2 | magic | `"HL"` |
 | `2` | 1 | version | `0x01` |
-| `3` | 1 | type | `0x20` |
-| `4..7` | 4 | unix_time_sec | `uint32`, little-endian |
-| `8..9` | 2 | tz_offset_min | `int16`, little-endian |
-| `10` | 1 | weekday | ISO weekday, `1=Mon ... 7=Sun` |
-| `11` | 1 | format_hint | display format preset |
-| `12` | 1 | clock_mode | `0=24h`, `1=12h` |
-| `13..31` | 19 | reserved | must be zero |
+| `3` | 1 | type | `0x30` |
+| `4` | 1 | action | `1=set`, `2=clear` |
+| `5` | 1 | layer | `0..31` for set, `0` for clear |
+| `6` | 1 | reserved | must be zero |
+| `7` | 1 | seq | u8 wrapping counter |
+| `8..31` | 24 | reserved | must be zero |
 
-`weekday` は `unix_time_sec + tz_offset_min` を適用したローカル日付を基準にします。
+Validation rules:
 
-### format_hint
+- `action = 1` のとき `layer` は `0..31`
+- `action = 2` のとき `layer` は `0`
+- unknown action は reject
+- reserved byte が nonzero の packet は reject
 
-| Value | Name | Intended display |
+## AI_USAGE
+
+| Offset | Size | Field | Notes |
+| --- | ---: | --- | --- |
+| `0..1` | 2 | magic | `"HL"` |
+| `2` | 1 | version | `0x01` |
+| `3` | 1 | type | `0x10` |
+| `4` | 1 | provider | `1=codex`, `2=claude_code` |
+| `5` | 1 | flags | see below |
+| `6..7` | 2 | five_hour_used_bp | used percent * 100 |
+| `8..9` | 2 | seven_day_used_bp | used percent * 100 |
+| `10..13` | 4 | five_hour_reset_unix | uint32, little-endian |
+| `14..17` | 4 | seven_day_reset_unix | uint32, little-endian |
+| `18..21` | 4 | updated_unix | uint32, little-endian |
+| `22` | 1 | error_code | see below |
+| `23..31` | 9 | reserved | must be zero |
+
+`used_bp` は used basis points です。`10000` は `100.00%` を意味します。
+
+### Flags
+
+| Bit | Name | Meaning |
 | ---: | --- | --- |
-| `0` | `time_hm` | `HH:mm` |
-| `1` | `time_hms` | `HH:mm:ss` |
-| `2` | `date_ymd` | `YYYY-MM-DD` |
-| `3` | `date_md` | `MM-DD` |
-| `4` | `datetime_hm` | `YYYY-MM-DD HH:mm` |
-| `5` | `weekday_hm` | `weekday HH:mm` |
+| 0 | `five_hour_valid` | five-hour usage field is valid |
+| 1 | `seven_day_valid` | seven-day usage field is valid |
+| 2 | `estimated` | value is an estimate |
+| 3 | `local_history_source` | source is local history |
+| 4 | `quota_source` | source is quota/rate-limit information |
+| 5 | `stale` | value is stale |
+| 6 | `fallback_limit` | activity baseline was used |
+| 7 | `error_present` | error_code is meaningful |
 
-### TIME_SYNC の送信タイミング
+`AI_USAGE` には reset valid flag はありません。reset を quota reset として扱えるかどうかは、値そのものと `quota_source` で判断します。
 
-- 監視開始後、HELLO 成功済みデバイスへ送信
-- デバイス再接続または検証済みデバイス集合の変更時に送信
-- 分表示系は分境界で送信
-- 日付表示系は日付境界で送信
-- `periodic_sync_sec > 0` の場合、定期補正として送信
-- `time_hms` でも毎秒送信しない
+### Source Rules
 
-### ZMK 側推奨検証
+| Source | estimated | local_history_source | quota_source | reset fields |
+| --- | ---: | ---: | ---: | --- |
+| Codex `rate_limits` | 0 | 0 | 1 | quota reset |
+| Codex history fallback | 1 | 1 | 0 | `0` |
+| Claude OAuth API success | 0 | 0 | 1 | quota reset |
 
-- payload length が 32 bytes
-- magic が `"HL"`
-- version が `0x01`
-- type が既知
-- reserved bytes が zero
-- `set_layer.layer` が `0..31`
-- `time_sync.weekday` が `1..7`
-- `time_sync.clock_mode` が `0` または `1`
+Codex history fallback は activity estimate です。quota reset として扱わないため、`five_hour_reset_unix=0` と `seven_day_reset_unix=0` を送ります。ZMK / UI 側も `quota_source=0` の reset は表示しない想定です。
 
----
+### Error Codes
 
-## English
+| Value | Name |
+| ---: | --- |
+| 0 | `none` |
+| 1 | `source_disabled` |
+| 2 | `missing_credentials` |
+| 3 | `expired_credentials` |
+| 4 | `auth_failed` |
+| 5 | `rate_limited` |
+| 6 | `fetch_failed` |
+| 7 | `parse_failed` |
+| 8 | `no_usage_data` |
+| 9 | `missing_limit` |
 
-This document defines packets used between the host-side `rawhid-host` app and the ZMK Raw HID receiver.
+Error/status は固定 code として扱います。access token、credentials JSON、Authorization header、HTTP request/response body、raw parse error は packet、UI、log、status に出しません。
 
-### Transport
-
-- HID Usage Page: `0xFF60`
-- HID Usage: `0x0061`
-- HID write size: 33 bytes
-- Report ID: `0x00`
-- Payload size: 32 bytes
-- Multi-byte values: little-endian
-
-The host writes one Report ID byte followed by the 32-byte payload.
-
-### Common Header
-
-| Offset | Size | Field | Value |
-| --- | ---: | --- | --- |
-| `0..1` | 2 | magic | ASCII `"HL"` |
-| `2` | 1 | version | `0x01` |
-| `3` | 1 | type | packet type |
-
-### Packet Types
-
-| Type | Name | Direction | ACK |
-| ---: | --- | --- | --- |
-| `0x01` | `set_layer` | Host -> ZMK | none |
-| `0x02` | `clear` | Host -> ZMK | none |
-| `0x10` | `hello` | Host -> ZMK | `hello_response` |
-| `0x11` | `hello_response` | ZMK -> Host | none |
-| `0x20` | `time_sync` | Host -> ZMK | none |
-
-### Layer / Hello Layout
-
-| Offset | Size | Field | Notes |
-| --- | ---: | --- | --- |
-| `0..1` | 2 | magic | `"HL"` |
-| `2` | 1 | version | `0x01` |
-| `3` | 1 | type | `0x01`, `0x02`, `0x10`, `0x11` |
-| `4` | 1 | layer | `0..31` for `set_layer` |
-| `5` | 1 | flags | `0` in v1 |
-| `6` | 1 | seq | host sequence |
-| `7..31` | 25 | reserved | must be zero |
-
-`hello_response` must return the same `seq` as `hello`. `set_layer` and `clear` do not have ACKs.
-
-### TIME_SYNC Layout
+## TIME_SYNC
 
 | Offset | Size | Field | Type / Notes |
 | --- | ---: | --- | --- |
@@ -165,4 +146,14 @@ The host writes one Report ID byte followed by the 32-byte payload.
 | `12` | 1 | clock_mode | `0=24h`, `1=12h` |
 | `13..31` | 19 | reserved | must be zero |
 
-TIME_SYNC is not sent every second. ZMK should store uptime when receiving TIME_SYNC and advance displayed time from the uptime delta.
+`TIME_SYNC` は毎秒送りません。ZMK 側は `TIME_SYNC` 受信時の uptime を保存し、uptime 差分で表示秒を進める想定です。
+
+## ZMK 実装時の要点
+
+- 33 byte write の先頭は Report ID `0x00` です。
+- payload は常に 32 byte です。
+- magic `"HL"` と version `0x01` を確認してください。
+- reserved byte は zero を前提にしてください。
+- `HOST_HELLO` に対して、同じ `seq` の `DEVICE_HELLO` を返してください。
+- `APP_LAYER` は packet type ではなく `action` で set / clear を分岐してください。
+- `AI_USAGE` の history fallback は quota ではありません。`quota_source=0` の reset は表示しないでください。

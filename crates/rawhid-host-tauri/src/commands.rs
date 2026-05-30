@@ -1,6 +1,9 @@
 use std::{
     path::PathBuf,
-    sync::{mpsc, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc,
+    },
     thread,
     time::Duration,
 };
@@ -253,6 +256,41 @@ pub fn reload_config(state: State<AppState>) -> Result<AppConfig, String> {
     Ok(config)
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConfigLocationResult {
+    pub path: String,
+    pub revealed: bool,
+}
+
+#[tauri::command]
+pub fn show_config_file_location(state: State<AppState>) -> Result<ConfigLocationResult, String> {
+    let path = {
+        let config_path = state.config_path.lock().unwrap();
+        match config_path.clone() {
+            Some(p) => p,
+            None => preferred_config_path().unwrap_or_else(|| PathBuf::from("rawhid-host.toml")),
+        }
+    };
+    let revealed = reveal_config_path(&path);
+    Ok(ConfigLocationResult {
+        path: path.to_string_lossy().to_string(),
+        revealed,
+    })
+}
+
+#[cfg(windows)]
+fn reveal_config_path(path: &std::path::Path) -> bool {
+    std::process::Command::new("explorer.exe")
+        .arg(format!("/select,{}", path.to_string_lossy()))
+        .spawn()
+        .is_ok()
+}
+
+#[cfg(not(windows))]
+fn reveal_config_path(_path: &std::path::Path) -> bool {
+    false
+}
+
 #[tauri::command]
 pub fn get_status(state: State<AppState>) -> MonitorStatus {
     state.status.lock().unwrap().clone()
@@ -315,6 +353,34 @@ pub fn stop_monitoring(state: State<AppState>) -> Result<(), String> {
     }
 }
 
+#[tauri::command]
+pub fn refresh_ai_usage(state: State<AppState>) -> Result<(), String> {
+    if state
+        .ai_usage_refreshing
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("refresh_in_progress".to_string());
+    }
+    let _guard = RefreshGuard(Arc::clone(&state.ai_usage_refreshing));
+    let tx = state.stop_tx.lock().unwrap().clone();
+    let Some(tx) = tx else {
+        return Err("not_running".to_string());
+    };
+    let (reply_tx, reply_rx) = mpsc::channel();
+    tx.send(MonitorCommand::RefreshAiUsage(reply_tx))
+        .map_err(|_| "not_running".to_string())?;
+    reply_rx.recv().map_err(|_| "refresh_failed".to_string())?
+}
+
+struct RefreshGuard(Arc<AtomicBool>);
+
+impl Drop for RefreshGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
 fn rebuild_runner(
     config: &AppConfig,
 ) -> Result<Runner<SystemActiveAppProvider, rawhid_host_core::hid::RealHidTransport>, String> {
@@ -337,6 +403,7 @@ fn apply_monitor_config(
     s.current_rule = None;
     s.connected_devices = 0;
     s.connected_device_names = Vec::new();
+    s.ai_usage = runner.ai_usage_statuses();
     s.last_error = None;
     let _ = app.emit("status-update", &*s);
 
@@ -407,6 +474,16 @@ fn run_monitor_loop(
                         }
                     }
                 }
+                Ok(MonitorCommand::RefreshAiUsage(reply_tx)) => {
+                    let result = runner
+                        .refresh_ai_usage()
+                        .then_some(())
+                        .ok_or_else(|| "not_running".to_string());
+                    let _ = reply_tx.send(result);
+                    let mut s = status.lock().unwrap();
+                    s.ai_usage = runner.ai_usage_statuses();
+                    let _ = app.emit("status-update", &*s);
+                }
                 Err(mpsc::TryRecvError::Empty) => break,
             }
         }
@@ -418,12 +495,14 @@ fn run_monitor_loop(
             Ok(RunEvent::SetLayer { layer, rule_name }) => {
                 let devices = runner.verified_device_count();
                 let device_names = runner.verified_device_names();
+                let ai_usage = runner.ai_usage_statuses();
                 {
                     let mut s = status.lock().unwrap();
                     s.current_layer = Some(layer);
                     s.current_rule = Some(rule_name.clone());
                     s.connected_devices = devices;
                     s.connected_device_names = device_names;
+                    s.ai_usage = ai_usage;
                     s.last_error = None;
                     let _ = app.emit("status-update", &*s);
                 }
@@ -434,22 +513,27 @@ fn run_monitor_loop(
             Ok(RunEvent::Clear) => {
                 let devices = runner.verified_device_count();
                 let device_names = runner.verified_device_names();
+                let ai_usage = runner.ai_usage_statuses();
                 {
                     let mut s = status.lock().unwrap();
                     s.current_layer = None;
                     s.current_rule = None;
                     s.connected_devices = devices;
                     s.connected_device_names = device_names;
+                    s.ai_usage = ai_usage;
                     let _ = app.emit("status-update", &*s);
                 }
             }
             Ok(RunEvent::Unchanged) => {
                 let devices = runner.verified_device_count();
+                let ai_usage = runner.ai_usage_statuses();
                 let mut s = status.lock().unwrap();
-                if s.connected_devices != devices {
+                let ai_usage_changed = s.ai_usage != ai_usage;
+                if s.connected_devices != devices || ai_usage_changed {
                     let device_names = runner.verified_device_names();
                     s.connected_devices = devices;
                     s.connected_device_names = device_names;
+                    s.ai_usage = ai_usage;
                     let _ = app.emit("status-update", &*s);
                 }
             }
@@ -482,6 +566,16 @@ fn run_monitor_loop(
                     }
                 }
             }
+            Ok(MonitorCommand::RefreshAiUsage(reply_tx)) => {
+                let result = runner
+                    .refresh_ai_usage()
+                    .then_some(())
+                    .ok_or_else(|| "not_running".to_string());
+                let _ = reply_tx.send(result);
+                let mut s = status.lock().unwrap();
+                s.ai_usage = runner.ai_usage_statuses();
+                let _ = app.emit("status-update", &*s);
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
@@ -493,6 +587,7 @@ fn run_monitor_loop(
         s.connected_device_names = Vec::new();
         s.current_layer = None;
         s.current_rule = None;
+        s.ai_usage = Vec::new();
         let _ = app.emit("status-update", &*s);
     }
 

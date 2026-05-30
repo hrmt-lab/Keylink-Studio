@@ -4,6 +4,7 @@ use tracing::{debug, info, warn};
 
 use crate::{
     active_app::{ActiveAppError, ActiveAppProvider},
+    ai_usage::{AiUsageProviderStatus, AiUsageRuntime, AiUsageSendState},
     app_match::{match_action, LayerAction},
     config::AppConfig,
     hid::{HidDeviceManager, HidError, HidTransport},
@@ -24,6 +25,8 @@ pub struct Runner<P, T, C = SystemClock> {
     hid: HidDeviceManager<T>,
     clock: C,
     time_sync: TimeSyncState,
+    ai_usage: Option<AiUsageRuntime>,
+    ai_usage_send: AiUsageSendState,
     last_action: Option<LayerAction>,
     last_device_generation: u64,
 }
@@ -50,12 +53,15 @@ where
         hid: HidDeviceManager<T>,
         clock: C,
     ) -> Self {
+        let ai_usage = AiUsageRuntime::start(config.ai_usage.clone());
         Self {
             config,
             app_provider,
             hid,
             clock,
             time_sync: TimeSyncState::default(),
+            ai_usage,
+            ai_usage_send: AiUsageSendState::default(),
             last_action: None,
             last_device_generation: 0,
         }
@@ -65,6 +71,7 @@ where
         self.hid.ensure_verified()?;
         let device_generation = self.hid.device_generation();
         self.sync_time_if_due(device_generation)?;
+        self.sync_ai_usage_if_due(device_generation)?;
         let app = match self.app_provider.active_app() {
             Ok(app) => app,
             Err(ActiveAppError::NoForegroundWindow) => return Ok(RunEvent::Unchanged),
@@ -120,6 +127,19 @@ where
             .collect()
     }
 
+    pub fn ai_usage_statuses(&self) -> Vec<AiUsageProviderStatus> {
+        self.ai_usage
+            .as_ref()
+            .map(|runtime| runtime.statuses(self.config.ai_usage.stale_after_sec))
+            .unwrap_or_default()
+    }
+
+    pub fn refresh_ai_usage(&self) -> bool {
+        self.ai_usage
+            .as_ref()
+            .is_some_and(|runtime| runtime.refresh())
+    }
+
     pub fn run_forever(&mut self) -> ! {
         let interval = Duration::from_millis(self.config.polling.interval_ms);
         loop {
@@ -141,6 +161,25 @@ where
         {
             let sent = self.hid.send_time_sync(packet)?;
             debug!("time sync sent for {} devices", sent);
+        }
+        Ok(())
+    }
+
+    fn sync_ai_usage_if_due(&mut self, device_generation: u64) -> Result<(), RunnerError> {
+        if !self.config.ai_usage.enabled {
+            return Ok(());
+        }
+        let Some(runtime) = &self.ai_usage else {
+            return Ok(());
+        };
+        let shared = runtime.shared();
+        for packet in self.ai_usage_send.due_packets(
+            &shared,
+            self.config.ai_usage.stale_after_sec,
+            device_generation,
+        ) {
+            let sent = self.hid.send_ai_usage(packet)?;
+            debug!("AI usage sent for {} devices", sent);
         }
         Ok(())
     }

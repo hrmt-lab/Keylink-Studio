@@ -2,6 +2,7 @@
   LayoutDashboard,
   List,
   Clock,
+  Activity,
   Usb,
   Settings,
   type LucideIcon,
@@ -20,6 +21,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: "dashboard", labelKey: "nav.dashboard", icon: LayoutDashboard },
   { id: "rules", labelKey: "nav.rules", icon: List },
   { id: "timesync", labelKey: "nav.timesync", icon: Clock },
+  { id: "ai_usage", labelKey: "nav.ai_usage", icon: Activity },
   { id: "devices", labelKey: "nav.devices", icon: Usb },
   { id: "settings", labelKey: "nav.settings", icon: Settings },
 ];

@@ -5,6 +5,7 @@ import {
   Keyboard,
   List,
   Clock,
+  Activity,
   AlertCircle,
   Info,
   AlertTriangle,
@@ -12,7 +13,7 @@ import {
 import { startMonitoring, stopMonitoring, saveConfig } from "../api";
 import { Toggle } from "../components/Toggle";
 import { useLang, type TranslationKey } from "../i18n";
-import type { AppConfig, MonitorStatus, LogEntry } from "../types";
+import type { AppConfig, MonitorStatus, LogEntry, AiUsageProviderStatus } from "../types";
 
 interface Props {
   config: AppConfig;
@@ -40,6 +41,24 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
 
   const toggleTimeSync = async (enabled: boolean) => {
     const updated = { ...config, time: { ...config.time, enabled } };
+    setFeatureSaving(true);
+    try { await saveConfig(updated); setConfig(updated); } finally { setFeatureSaving(false); }
+  };
+
+  const toggleAiUsage = async (enabled: boolean) => {
+    const updated = { ...config, ai_usage: { ...config.ai_usage, enabled } };
+    setFeatureSaving(true);
+    try { await saveConfig(updated); setConfig(updated); } finally { setFeatureSaving(false); }
+  };
+
+  const toggleAiUsageProvider = async (provider: "codex" | "claude_code", enabled: boolean) => {
+    const updated = {
+      ...config,
+      ai_usage: {
+        ...config.ai_usage,
+        [provider]: { ...config.ai_usage[provider], enabled },
+      },
+    };
     setFeatureSaving(true);
     try { await saveConfig(updated); setConfig(updated); } finally { setFeatureSaving(false); }
   };
@@ -283,6 +302,73 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
           </div>
         </div>
 
+        {/* AI Usage */}
+        <div className={`rounded-xl bg-white shadow-card ring-1 transition-all ${
+          config.ai_usage.enabled ? "ring-primary/20" : "ring-border"
+        }`}>
+          <div className={`flex items-center justify-between rounded-t-xl px-5 py-3.5 ${
+            config.ai_usage.enabled ? "bg-primary/5" : "bg-gray-50"
+          }`}>
+            <div className="flex items-center gap-2">
+              <div className={`flex h-7 w-7 items-center justify-center rounded-lg ${
+                config.ai_usage.enabled ? "bg-primary text-white" : "bg-gray-200 text-gray-400"
+              }`}>
+                <Activity size={14} />
+              </div>
+              <span className="text-sm font-semibold text-gray-800">{t("dashboard.ai_usage")}</span>
+            </div>
+            <Toggle
+              checked={config.ai_usage.enabled}
+              onChange={toggleAiUsage}
+              disabled={featureSaving}
+            />
+          </div>
+
+          <div className="px-5 py-4 space-y-2.5">
+            {config.ai_usage.enabled ? (
+              <>
+                <FeatureRow
+                  label={t("dashboard.ai_usage.polling")}
+                  value={`${config.ai_usage.poll_interval_sec}s`}
+                />
+                <div className="grid grid-cols-2 gap-2">
+                  <ProviderToggle
+                    label="Codex"
+                    checked={config.ai_usage.codex.enabled}
+                    disabled={featureSaving}
+                    onChange={(enabled) => toggleAiUsageProvider("codex", enabled)}
+                  />
+                  <ProviderToggle
+                    label="Claude Code"
+                    checked={config.ai_usage.claude_code.enabled}
+                    disabled={featureSaving}
+                    onChange={(enabled) => toggleAiUsageProvider("claude_code", enabled)}
+                  />
+                </div>
+                {status.ai_usage.length === 0 ? (
+                  <p className="text-sm text-gray-400">{t("dashboard.ai_usage.waiting")}</p>
+                ) : (
+                  <div className="space-y-2 pt-1">
+                    {status.ai_usage.map((provider) => (
+                      <AiUsageSummary key={provider.provider} provider={provider} />
+                    ))}
+                  </div>
+                )}
+                <p className="pt-1 text-[11px] text-gray-400">
+                  {t("dashboard.ai_usage.footer", {
+                    poll: config.ai_usage.poll_interval_sec,
+                    stale: config.ai_usage.stale_after_sec,
+                  })}
+                </p>
+              </>
+            ) : (
+              <p className="text-sm text-gray-400">
+                {t("dashboard.ai_usage.disabled")}
+              </p>
+            )}
+          </div>
+        </div>
+
       </div>
 
       {/* Activity Log */}
@@ -320,6 +406,84 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
       </div>
     </div>
   );
+}
+
+function AiUsageSummary({ provider }: { provider: AiUsageProviderStatus }) {
+  const { t } = useLang();
+  const color = provider.status === "ok"
+    ? "text-emerald-600"
+    : provider.status === "stale"
+      ? "text-amber-600"
+      : "text-gray-500";
+  return (
+    <div className="rounded-lg bg-background px-3 py-2 text-xs">
+      <div className="mb-1.5 flex items-center justify-between gap-3">
+        <div className="font-semibold text-gray-700">{providerLabel(provider.provider)}</div>
+        <div className={`font-medium ${color}`}>{aiStatusLabel(provider.status, t)}</div>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <MiniUsage label={t("ai_usage.window.5h")} valid={provider.five_hour_valid} bp={provider.five_hour_used_bp} />
+        <MiniUsage label={t("ai_usage.window.7d")} valid={provider.seven_day_valid} bp={provider.seven_day_used_bp} />
+      </div>
+    </div>
+  );
+}
+
+function MiniUsage({ label, valid, bp }: { label: string; valid: boolean; bp: number | null }) {
+  return (
+    <div>
+      <div className="flex items-center justify-between text-[11px] text-gray-400">
+        <span>{label}</span>
+        <span>{valid && bp !== null ? formatUsedBp(bp) : "--"}</span>
+      </div>
+      <div className="mt-1 h-1.5 rounded-full bg-gray-200">
+        <div
+          className={`h-1.5 rounded-full ${usageBarColor(bp ?? 0, valid)}`}
+          style={{ width: valid && bp !== null ? `${Math.min(bp / 100, 100)}%` : "0%" }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function ProviderToggle({
+  label,
+  checked,
+  disabled,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  disabled: boolean;
+  onChange: (enabled: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between rounded-lg bg-background px-3 py-2">
+      <span className="text-xs font-medium text-gray-600">{label}</span>
+      <Toggle checked={checked} onChange={onChange} disabled={disabled} />
+    </div>
+  );
+}
+
+function providerLabel(provider: string) {
+  if (provider === "claude_code") return "Claude Code";
+  if (provider === "codex") return "Codex";
+  return provider;
+}
+
+function aiStatusLabel(status: string, t: TFn) {
+  return t(`ai_usage.status.${status}` as TranslationKey);
+}
+
+function formatUsedBp(bp: number) {
+  return `${(bp / 100).toFixed(2)}%`;
+}
+
+function usageBarColor(bp: number, valid: boolean) {
+  if (!valid) return "bg-gray-300";
+  if (bp >= 9000) return "bg-red-500";
+  if (bp >= 8000) return "bg-orange-400";
+  return "bg-primary";
 }
 
 function FeatureRow({ label, value, warn = false }: { label: string; value: string; warn?: boolean }) {

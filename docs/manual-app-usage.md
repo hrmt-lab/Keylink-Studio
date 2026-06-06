@@ -1,131 +1,167 @@
 # RawHID Host アプリ操作マニュアル
 
-このドキュメントは、GUI で何ができるかを画面ごとに説明します。設定は `rawhid-host.toml` に保存され、監視中に保存した変更は runner に反映されます。
+## 共通操作
 
-## 共通
+左側の Sidebar から画面を切り替えます。Sidebar 下部の `JP / EN` で日本語 / 英語表示を切り替えられます。
 
-- 左の Sidebar から画面を切り替えます。
-- Sidebar 下部の `JP / EN` で日本語 / 英語表示を切り替えられます。
-- 監視中は Sidebar に接続デバイス数が表示されます。
-- `保存` ボタンがあるページは、押した時点で設定ファイルへ保存します。
-- Layer Rules は自動保存です。ルール追加、削除、変更の操作時に保存されます。
+`保存` ボタンがあるページでは、画面上で変更した内容を保存します。保存に成功した場合は特別なメッセージを出しません。保存に失敗した場合だけエラーを表示します。
+
+Dashboard のトグルは即時保存です。保存に失敗した場合は、トグル表示が操作前の状態に戻ります。
+
+Layer Rules は自動保存です。ルールの追加、削除、変更を行った時点で保存されます。
 
 ## Dashboard
 
-Dashboard は監視状態を確認し、監視を開始 / 停止する画面です。
+![Dashboard](images/manual-dashboard.svg)
 
-- `Start Monitoring` / `Stop Monitoring` で監視を切り替えます。
-- 接続済み Raw HID デバイス数を表示します。
-- 現在適用中の layer と rule を表示します。
-- 直近ログを表示します。
-- AI Usage が有効な場合は Codex / Claude Code の簡易サマリを表示します。
-- AI Usage 全体、Codex、Claude Code の有効 / 無効を切り替えられます。
+Dashboard は、アプリ全体の状態を確認し、監視を開始 / 停止する画面です。
 
-Dashboard から詳細ページへの導線は置いていません。他の機能と同様に、詳細設定は Sidebar から開きます。
+`監視開始` を押すと、Raw HID 対応キーボードの監視を開始します。監視中は、前面アプリに応じたレイヤー切り替え、時刻同期、AI 使用量送信などが有効になります。
 
-## Layer Rules
+`監視停止` を押すと、キーボードへの送信を停止します。AI 使用量の取得など、キーボード送信とは独立して動く機能は、画面側で更新できる場合があります。
 
-前面アプリと ZMK layer の対応を設定します。
+Dashboard では次の情報を確認できます。
 
-GUI で追加するルールは `exe` 条件を使います。`path` や `title` を使いたい場合は `rawhid-host.toml` を直接編集してください。
+- 監視中 / 停止中
+- 接続デバイス数
+- レイヤールールの有効 / 無効
+- 時刻同期の有効 / 無効
+- AI 使用量の有効 / 無効
+- AI 使用量の簡易サマリ
+- 直近ログ
 
-matching priority:
+AI Usage 全体、Codex、Claude Code のトグルも Dashboard から切り替えられます。詳細な状態確認や細かい設定は、Sidebar の `AI 使用量` 画面で行います。
 
-| Priority | Condition | Description |
-| ---: | --- | --- |
-| 1 | `path` | 実行ファイルのフルパス。大文字小文字は区別しません。 |
-| 2 | `exe` | 実行ファイル名。大文字小文字は区別しません。 |
-| 3 | `title` | ウィンドウタイトルの部分一致。大文字小文字は区別しません。 |
+## レイヤールール
 
-同じ優先度で複数一致した場合は、設定ファイル上の順番が優先されます。どのルールにも一致しない場合は `APP_LAYER clear` を送信します。
+![Layer Rules](images/manual-layer-rules.svg)
 
-Windows では Desktop、Taskbar、File Explorer が `explorer.exe` として見えることがあります。意図しない layer 切り替えを避けたい場合、通常は `explorer.exe` ルールを作らない方が扱いやすいです。
+レイヤールールでは、前面にあるアプリに応じて、キーボード側のレイヤーを切り替えるルールを作成できます。
 
-## Time Sync
+左側に現在起動中のアプリ一覧が表示されます。対象アプリを選び、切り替えたいレイヤーを選択して `追加` を押すと、そのアプリ用のルールが作られます。
 
-キーボードの表示用に時刻情報を送る設定です。
+画面右上のデバイス選択では、ルールを適用する対象を選べます。
 
-| UI | Config | Description |
-| --- | --- | --- |
-| Enabled | `time.enabled` | `TIME_SYNC` を送るかどうか |
-| Display Format | `time.format_hint` | 表示形式のヒント |
-| Clock Mode | `time.clock_mode` | `24h` または `12h` |
-| 同期間隔 / Sync interval | `time.periodic_sync_sec` | 定期補正間隔。`0` で無効 |
-| Timezone Offset | `time.tz_offset_min` | 空欄なら OS の現在 offset。指定時は分単位 |
+- `Global fallback`: デバイス専用設定がないキーボード向けの共通ルール
+- 個別デバイス: そのキーボードだけに適用するルール
 
-`time_hms` でも毎秒 packet を送るわけではありません。ZMK 側は `TIME_SYNC` 受信時の uptime を保存し、uptime 差分で秒を進める想定です。
+デバイス専用設定が存在しない場合は `Global fallback` が使われます。デバイス専用設定が存在する場合は、ルールが空でも `Global fallback` には戻りません。そのデバイスには「専用設定がある」と扱われます。
 
-## AI Usage
+アプリがルールに一致しなくなった場合は、設定された未一致時の動作に従います。通常はキーボード側のアプリレイヤーを解除します。
 
-Codex / Claude Code の使用率を Raw HID で送る設定です。既定では無効です。
+## 時刻同期
 
-### Dashboard
+![Time Sync](images/manual-time-sync.svg)
 
-Dashboard では次の操作だけを行えます。
+時刻同期では、PC の時刻情報をキーボードへ送信できます。キーボード側が TIME_SYNC 表示に対応している場合、キーボードの画面や表示部に時刻を出せます。
+
+画面では次の操作ができます。
+
+- 時刻同期の有効 / 無効
+- 表示形式の選択
+- 12時間 / 24時間表示の選択
+- 同期間隔の変更
+- タイムゾーンオフセットの指定
+
+変更したら `保存` を押します。監視中の場合、保存後の設定は runner に反映され、以後の送信に使われます。
+
+## AI 使用量
+
+![AI Usage](images/manual-ai-usage.svg)
+
+AI 使用量では、Codex と Claude Code の 5h / 7d 使用率を取得し、対応キーボードへ送信できます。
+
+画面では次の操作ができます。
 
 - AI Usage 全体の有効 / 無効
 - Codex の有効 / 無効
 - Claude Code の有効 / 無効
-- provider ごとの簡易サマリ表示
+- 取得間隔の変更
+- stale 判定秒数の変更
+- 使用率の確認
+- `更新` による手動更新
+- Advanced で詳細設定の確認 / 編集
 
-### AI Usage 詳細ページ
+`更新` を押すと、AI 使用量の再取得を background worker に要求します。取得処理は画面操作とは別に裏側で行われます。連打しても多重取得しないよう制御されます。
 
-詳細ページでは、使用率バー、状態、基本設定、Advanced 設定を確認 / 編集できます。
+使用率バーは「使用済み」の割合です。80% 以上でオレンジ、90% 以上で赤になります。値が取れていない場合は `no data` と表示されます。
 
-基本設定:
+### AI Usage の状態表示
 
-| UI | Config | Description |
+AI Usage では provider ごとに状態が表示されます。
+
+| 表示 | 意味 | ユーザーが見るべきこと |
 | --- | --- | --- |
-| AI Usage | `ai_usage.enabled` | AI usage の取得と送信を有効化 |
-| Poll interval | `ai_usage.poll_interval_sec` | provider を取得する間隔 |
-| Stale threshold | `ai_usage.stale_after_sec` | snapshot を stale とみなす秒数 |
-| Codex enabled | `ai_usage.codex.enabled` | Codex provider の有効化 |
-| Claude Code enabled | `ai_usage.claude_code.enabled` | Claude Code provider の有効化 |
+| `ok` | 最新の使用量を取得できています。 | 通常状態です。 |
+| `stale` | 前回取得した値を表示していますが、一定時間以上更新できていません。 | 表示値は古い可能性があります。次回更新や `更新` を試してください。 |
+| `no data` | まだ使用量として使えるデータがありません。 | Codex / Claude Code を使用した後に更新してください。 |
+| `missing credentials` | Claude Code の認証情報が見つかりません。 | Claude Code でログインしている環境を確認してください。 |
+| `expired credentials` | 認証情報はありますが期限切れです。 | Claude Code のログイン状態を更新してください。 |
+| `auth failed` | 認証情報で API にアクセスできませんでした。 | ログインし直す、または別環境の認証情報を確認してください。 |
+| `rate limited` | API 側で一時的に制限されています。 | 少し待ってから再試行してください。 |
+| `fetch failed` | API 通信または取得処理に失敗しました。 | ネットワークや Claude Code 側の状態を確認してください。 |
+| `parse failed` | 取得した情報の形式を解釈できませんでした。 | schema 変更や未対応形式の可能性があります。 |
+| `disabled` | provider が無効です。 | 必要ならトグルを有効にしてください。 |
 
-Advanced:
+`stale` は「完全に失敗」ではありません。過去に成功した値を保持したまま、現在は新しい値を取得できていない状態です。キーボード側へ送る packet にも stale 情報が含まれます。
 
-| UI | Config | Description |
-| --- | --- | --- |
-| Codex sessions dir | `ai_usage.codex.sessions_dir` | 空欄なら Core default。通常は `%USERPROFILE%\\.codex\\sessions` |
-| History fallback | `ai_usage.codex.history_fallback_enabled` | `rate_limits` がない場合に local history を読む |
-| Allow activity baseline | `ai_usage.codex.allow_activity_baseline` | fallback を割合表示するための baseline 使用を許可 |
-| 5h activity baseline | `activity_five_hour_token_baseline` | fallback 用の仮分母。実 quota limit ではない |
-| 7d activity baseline | `activity_seven_day_token_baseline` | fallback 用の仮分母。実 quota limit ではない |
-| Claude credentials path | `ai_usage.claude_code.credentials_path` | 空欄なら Core default。通常は `%USERPROFILE%\\.claude\\.credentials.json` |
-| API timeout | `ai_usage.claude_code.api_timeout_sec` | Claude OAuth usage API の timeout |
+### Source 表示
 
-Codex は session history の `rate_limits` を優先します。取れた場合は quota source です。local history fallback は activity estimate であり、実 quota ではありません。そのため fallback 時は reset 時刻を表示しません。
+`Source` は、その使用率がどこから来たかを表します。
 
-Claude Code OAuth usage API は experimental / best-effort source です。`.credentials.json` が存在しない環境や、schema 変更、認証失敗、token 期限切れがあり得ます。UI には access token、credentials JSON、API response、raw error は表示しません。
+| Source | 意味 |
+| --- | --- |
+| `Codex rate_limits` | Codex の local history から rate_limits を取得できた状態です。quota 情報として扱えます。 |
+| `Codex local history estimate` | rate_limits が取れず、履歴から activity estimate を出している状態です。実 quota ではありません。reset 時刻は表示しません。 |
+| `Claude OAuth API` | Claude Code の OAuth usage API から取得できた状態です。experimental / best-effort として扱います。 |
+| `source なし` | 使用量の取得元として使える情報がまだありません。 |
 
-使用率バーは `used` です。80% 以上でオレンジ、90% 以上で赤になります。値が invalid の場合は `no data` と表示します。
+Claude Code の access token、credentials JSON、API response、raw error は画面に表示しません。
 
-`更新` ボタンは監視中のみ使えます。押すと worker に更新要求を送り、取得処理は背景で行われます。要求直後に表示される「更新を要求しました。」は、AI 使用量の status / updated time / error などが更新されたら自動で消えます。worker 側では多重取得を防ぎます。
+## キーマップ表示
 
-## Devices
+![Keymap Viewer](images/manual-keymap-viewer.svg)
 
-Raw HID 候補を列挙し、HELLO 検証を行います。
+キーマップ表示では、ZMK Studio 対応キーボードの現在のキーマップを表示専用で確認できます。
 
-- Usage Page / Usage が設定値と一致する HID を候補にします。
-- host は候補へ `HOST_HELLO` を送ります。
-- 同じ `seq` の `DEVICE_HELLO` が返った device だけが verified になります。
-- verified device だけが監視時の送信対象になります。
+左側には Studio 対応デバイスだけが表示されます。デバイスを選択すると、そのキーボードのキーマップを自動で読み取ります。
 
-HELLO 検証に失敗する場合は、ZMK 側の Raw HID、Usage Page / Usage、reserved bytes zero、`seq` の返し方を確認してください。
+画面では次のことができます。
 
-## Settings
+- Studio 対応デバイスの選択
+- レイヤー一覧の確認
+- レイヤーごとのキー割り当て確認
+- physical layout に近いキー配置での表示
+- physical layout が取れない場合のグリッド表示
 
-Polling と HID の基本設定を編集します。
+編集、保存、書き込み、unlock 操作は行いません。Studio が locked の場合は、キーマップを読み取らず、キーボード側で unlock が必要であることを表示します。
 
-| UI | Config | Default |
-| --- | --- | ---: |
-| Poll interval | `polling.interval_ms` | `500` ms |
-| Usage Page | `hid.usage_page` | `0xFF60` |
-| Usage | `hid.usage` | `0x61` |
-| HELLO timeout | `hid.hello_timeout_ms` | `200` ms |
+キー右下の `#0`、`#1` などは key position です。ZMK の keymap 上で、そのキーが何番目の position かを表します。
 
-`更新` は設定ファイルを再読み込みします。`保存` は現在の設定をファイルに書き込みます。
+## デバイス
 
-## System tray
+![Devices](images/manual-devices.svg)
 
-ウィンドウを閉じてもアプリは完全終了せず、システムトレイに残ります。完全に終了する場合はトレイメニューの `Quit` を使います。
+デバイス画面では、Host Link と ZMK Studio の対応状態を確認できます。
+
+Host Link は、RawHID Host 独自の packet protocol に対応しているかを表します。`OK` のデバイスは、AI_USAGE、TIME_SYNC、APP_LAYER などの送信対象になります。
+
+ZMK Studio は、ZMK Studio RPC に対応しているかを表します。Keymap Viewer では、この Studio 対応デバイスを使ってキーマップを読み取ります。
+
+Host Link 対応デバイスと Studio 対応デバイスは、必ずしも同じとは限りません。同じキーボードが両方に対応する場合もあります。
+
+## 設定
+
+![Settings](images/manual-settings.svg)
+
+設定画面では、アプリ全体の基本設定を変更できます。
+
+`更新` を押すと、保存済みの設定を読み直します。画面上の未保存変更がある場合は、保存済み設定で上書きされます。
+
+`保存` を押すと、現在の画面内容を設定ファイルへ保存します。成功時は何も表示しません。失敗時だけエラーを表示します。
+
+通常の操作では、細かい設定ファイルの場所や中身を意識する必要はありません。トラブルシュートや詳細調整が必要な場合だけ、設定ファイルを直接確認します。
+
+## システムトレイ
+
+ウィンドウを閉じても、アプリは完全終了せずシステムトレイに残ります。完全に終了する場合は、トレイメニューの `Quit` を使います。

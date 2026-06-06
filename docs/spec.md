@@ -183,3 +183,13 @@ Security policy:
 ## Public Artifacts
 
 GitHub には source、docs、examples、icon source、Tauri icons を含めます。`target/`、`ui/node_modules/`、`ui/dist/`、個人用 `rawhid-host.toml`、生成済み installer は含めません。
+
+## Current implementation notes
+
+- Host Link packet types are `0x01 HOST_HELLO`, `0x02 DEVICE_HELLO`, `0x03 ERROR`, `0x04 PING`, `0x05 PONG`, `0x10 AI_USAGE`, `0x20 TIME_SYNC`, and `0x30 APP_LAYER`.
+- `DEVICE_HELLO` capabilities gate sending: `APP_LAYER` packets are sent only to devices that advertise `APP_LAYER`.
+- `device_uid_hash = 0` is normalized to None. Internal device settings do not create `Some(0)`.
+- AI Usage providers update snapshots in a background worker. `Runner::tick()` sends latest snapshots but does not perform provider fetches.
+- Codex uses `rate_limits` as quota source when available. Local history is fallback/activity estimate only.
+- Claude OAuth usage API is experimental/best-effort. Credentials auto-detect can try explicit path, Windows default, WSL default, and extra paths.
+- Keymap Viewer uses a separate ZMK Studio RPC client module and is read-only in v1.

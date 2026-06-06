@@ -1,0 +1,64 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720">
+<defs>
+<style>
+  .bg{fill:#f3f4f6}.side{fill:#5f789c}.card{fill:#fff;stroke:#d7d7d7;stroke-width:1.5}.muted{fill:#8b95a6}.text{fill:#1f2937;font-family:'Segoe UI','Yu Gothic UI',sans-serif}.title{font-size:24px;font-weight:700}.sub{font-size:14px;fill:#667085}.nav{font-size:15px;fill:#e9eef7;font-weight:600}.label{font-size:13px}.small{font-size:11px}.btn{fill:#5f789c}.btn2{fill:#fff;stroke:#d1d5db}.pill{fill:#e5e7eb}.ok{fill:#bff7d7}.key{fill:#fff;stroke:#d1d5db}.panel{fill:#eeeeee;stroke:#d1d5db}.selected{fill:#eef3fa;stroke:#b7c3d7}.ghost{fill:#f1f1f1;stroke:#d0d0d0}.option{fill:#fff;stroke:#d1d5db}.optionSel{fill:#f3f7ff;stroke:#5f789c;stroke-width:1.5}.mono{font-family:'Segoe UI Mono','Consolas',monospace}
+</style>
+</defs>
+<rect class="bg" x="0" y="0" width="1200" height="720"/>
+<rect class="side" x="0" y="0" width="210" height="720"/>
+<rect x="20" y="28" width="48" height="48" rx="12" fill="#6f86a8" stroke="#8da0bd"/>
+<text class="text nav" x="82" y="59">RawHID Host</text>
+<text class="text nav" x="24" y="132">▦  ダッシュボード</text>
+<text class="text nav" x="24" y="174">☰  レイヤールール</text>
+<text class="text nav" x="24" y="216">◷  時刻同期</text>
+<text class="text nav" x="24" y="258">⌁  AI 使用量</text>
+<text class="text nav" x="24" y="300">⌨  キーマップ表示</text>
+<text class="text nav" x="24" y="342">🔧  デバイス</text>
+<text class="text nav" x="24" y="384">⚙  設定</text>
+<circle cx="24" cy="682" r="5" fill="#b7c3d7"/><text class="text nav" x="40" y="688">停止中</text>
+<text class="text title" x="260" y="64">キーマップ表示</text>
+<text class="text sub" x="260" y="88">ZMK Studio対応キーボードのキーマップを表示します。</text>
+<rect class="btn2" x="1030" y="42" width="88" height="44" rx="8"/><text class="text" x="1060" y="70" font-size="15" font-weight="700">更新</text>
+
+<rect class="card" x="260" y="126" width="850" height="132" rx="12"/>
+<text class="text" x="286" y="160" font-size="17" font-weight="700">Studioデバイス</text><text class="text sub" x="1080" y="160" text-anchor="end">2</text>
+<rect class="selected" x="286" y="180" width="260" height="58" rx="8"/><text class="text" x="306" y="205" font-size="15" font-weight="700">KeyboardA</text><text class="text sub" x="306" y="226">USB Serial</text><rect class="ok" x="460" y="194" width="68" height="24" rx="12"/><text class="text small" x="476" y="210" fill="#047857">Available</text>
+<rect class="ghost" x="558" y="180" width="260" height="58" rx="8"/><text class="text" x="578" y="205" font-size="15" font-weight="700">KeyboardB</text><text class="text sub" x="578" y="226">USB Serial</text><rect class="ok" x="732" y="194" width="68" height="24" rx="12"/><text class="text small" x="748" y="210" fill="#047857">Available</text>
+
+<rect class="card" x="260" y="286" width="850" height="360" rx="12"/>
+<text class="text" x="286" y="322" font-size="18" font-weight="700">KeyboardA</text>
+<rect class="btn" x="286" y="348" width="58" height="36" rx="8"/><text x="306" y="371" fill="#fff" font-size="14" font-weight="700">Base</text><rect class="btn2" x="354" y="348" width="70" height="36" rx="8"/><text class="text" x="372" y="371" font-size="14">Layer1</text><rect class="btn2" x="434" y="348" width="70" height="36" rx="8"/><text class="text" x="452" y="371" font-size="14">Layer2</text>
+<rect class="panel" x="286" y="404" width="790" height="210" rx="12"/>
+<g transform="translate(330 430) scale(1.2)">
+<rect class="key" x="0" y="0" width="42" height="34" rx="6"/><text class="text small" x="21" y="20" text-anchor="middle" font-weight="700">ESC</text><text class="text small" x="36" y="30" text-anchor="end" fill="#667085">#0</text>
+<rect class="key" x="48" y="0" width="42" height="34" rx="6"/><text class="text small" x="69" y="20" text-anchor="middle" font-weight="700">1</text><text class="text small" x="84" y="30" text-anchor="end" fill="#667085">#1</text>
+<rect class="key" x="96" y="0" width="42" height="34" rx="6"/><text class="text small" x="117" y="20" text-anchor="middle" font-weight="700">2</text><text class="text small" x="132" y="30" text-anchor="end" fill="#667085">#2</text>
+<rect class="key" x="144" y="0" width="42" height="34" rx="6"/><text class="text small" x="165" y="20" text-anchor="middle" font-weight="700">3</text><text class="text small" x="180" y="30" text-anchor="end" fill="#667085">#3</text>
+<rect class="key" x="192" y="0" width="42" height="34" rx="6"/><text class="text small" x="213" y="20" text-anchor="middle" font-weight="700">4</text><text class="text small" x="228" y="30" text-anchor="end" fill="#667085">#4</text>
+<rect class="key" x="240" y="0" width="42" height="34" rx="6"/><text class="text small" x="261" y="20" text-anchor="middle" font-weight="700">5</text><text class="text small" x="276" y="30" text-anchor="end" fill="#667085">#5</text>
+<rect class="key" x="288" y="0" width="42" height="34" rx="6"/><text class="text small" x="309" y="20" text-anchor="middle" font-weight="700">6</text><text class="text small" x="324" y="30" text-anchor="end" fill="#667085">#6</text>
+<rect class="key" x="336" y="0" width="42" height="34" rx="6"/><text class="text small" x="357" y="20" text-anchor="middle" font-weight="700">7</text><text class="text small" x="372" y="30" text-anchor="end" fill="#667085">#7</text>
+<rect class="key" x="384" y="0" width="42" height="34" rx="6"/><text class="text small" x="405" y="20" text-anchor="middle" font-weight="700">8</text><text class="text small" x="420" y="30" text-anchor="end" fill="#667085">#8</text>
+<rect class="key" x="432" y="0" width="66" height="34" rx="6"/><text class="text small" x="465" y="20" text-anchor="middle" font-weight="700">BSPC</text><text class="text small" x="492" y="30" text-anchor="end" fill="#667085">#9</text>
+<rect class="key" x="0" y="40" width="62" height="34" rx="6"/><text class="text small" x="31" y="60" text-anchor="middle" font-weight="700">TAB</text><text class="text small" x="56" y="70" text-anchor="end" fill="#667085">#10</text>
+<rect class="key" x="68" y="40" width="42" height="34" rx="6"/><text class="text small" x="89" y="60" text-anchor="middle" font-weight="700">Q</text><text class="text small" x="104" y="70" text-anchor="end" fill="#667085">#11</text>
+<rect class="key" x="116" y="40" width="42" height="34" rx="6"/><text class="text small" x="137" y="60" text-anchor="middle" font-weight="700">W</text><text class="text small" x="152" y="70" text-anchor="end" fill="#667085">#12</text>
+<rect class="key" x="164" y="40" width="42" height="34" rx="6"/><text class="text small" x="185" y="60" text-anchor="middle" font-weight="700">E</text><text class="text small" x="200" y="70" text-anchor="end" fill="#667085">#13</text>
+<rect class="key" x="212" y="40" width="42" height="34" rx="6"/><text class="text small" x="233" y="60" text-anchor="middle" font-weight="700">R</text><text class="text small" x="248" y="70" text-anchor="end" fill="#667085">#14</text>
+<rect class="key" x="260" y="40" width="42" height="34" rx="6"/><text class="text small" x="281" y="60" text-anchor="middle" font-weight="700">T</text><text class="text small" x="296" y="70" text-anchor="end" fill="#667085">#15</text>
+<rect class="key" x="308" y="40" width="42" height="34" rx="6"/><text class="text small" x="329" y="60" text-anchor="middle" font-weight="700">Y</text><text class="text small" x="344" y="70" text-anchor="end" fill="#667085">#16</text>
+<rect class="key" x="356" y="40" width="42" height="34" rx="6"/><text class="text small" x="377" y="60" text-anchor="middle" font-weight="700">U</text><text class="text small" x="392" y="70" text-anchor="end" fill="#667085">#17</text>
+<rect class="key" x="404" y="40" width="42" height="34" rx="6"/><text class="text small" x="425" y="60" text-anchor="middle" font-weight="700">I</text><text class="text small" x="440" y="70" text-anchor="end" fill="#667085">#18</text>
+<rect class="key" x="452" y="40" width="42" height="34" rx="6"/><text class="text small" x="473" y="60" text-anchor="middle" font-weight="700">O</text><text class="text small" x="488" y="70" text-anchor="end" fill="#667085">#19</text>
+<rect class="key" x="0" y="80" width="70" height="34" rx="6"/><text class="text small" x="35" y="100" text-anchor="middle" font-weight="700">LCTRL</text><text class="text small" x="64" y="110" text-anchor="end" fill="#667085">#20</text>
+<rect class="key" x="76" y="80" width="42" height="34" rx="6"/><text class="text small" x="97" y="100" text-anchor="middle" font-weight="700">A</text><text class="text small" x="112" y="110" text-anchor="end" fill="#667085">#21</text>
+<rect class="key" x="124" y="80" width="42" height="34" rx="6"/><text class="text small" x="145" y="100" text-anchor="middle" font-weight="700">S</text><text class="text small" x="160" y="110" text-anchor="end" fill="#667085">#22</text>
+<rect class="key" x="172" y="80" width="42" height="34" rx="6"/><text class="text small" x="193" y="100" text-anchor="middle" font-weight="700">D</text><text class="text small" x="208" y="110" text-anchor="end" fill="#667085">#23</text>
+<rect class="key" x="220" y="80" width="42" height="34" rx="6"/><text class="text small" x="241" y="100" text-anchor="middle" font-weight="700">F</text><text class="text small" x="256" y="110" text-anchor="end" fill="#667085">#24</text>
+<rect class="key" x="268" y="80" width="42" height="34" rx="6"/><text class="text small" x="289" y="100" text-anchor="middle" font-weight="700">G</text><text class="text small" x="304" y="110" text-anchor="end" fill="#667085">#25</text>
+<rect class="key" x="316" y="80" width="42" height="34" rx="6"/><text class="text small" x="337" y="100" text-anchor="middle" font-weight="700">H</text><text class="text small" x="352" y="110" text-anchor="end" fill="#667085">#26</text>
+<rect class="key" x="364" y="80" width="42" height="34" rx="6"/><text class="text small" x="385" y="100" text-anchor="middle" font-weight="700">J</text><text class="text small" x="400" y="110" text-anchor="end" fill="#667085">#27</text>
+<rect class="key" x="412" y="80" width="42" height="34" rx="6"/><text class="text small" x="433" y="100" text-anchor="middle" font-weight="700">K</text><text class="text small" x="448" y="110" text-anchor="end" fill="#667085">#28</text>
+<rect class="key" x="460" y="80" width="54" height="34" rx="6"/><text class="text small" x="487" y="100" text-anchor="middle" font-weight="700">ENTER</text><text class="text small" x="508" y="110" text-anchor="end" fill="#667085">#29</text>
+</g>
+</svg>

@@ -1,0 +1,23 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='720' viewBox='0 0 1200 720'>
+<defs>
+<style>
+  .bg{fill:#f3f4f6}.side{fill:#5f789c}.card{fill:#fff;stroke:#d7d7d7;stroke-width:1.5}.muted{fill:#8b95a6}.text{fill:#1f2937;font-family:'Segoe UI','Yu Gothic UI',sans-serif}.title{font-size:24px;font-weight:700}.sub{font-size:14px;fill:#667085}.nav{font-size:15px;fill:#e9eef7;font-weight:600}.label{font-size:13px}.small{font-size:11px}.btn{fill:#5f789c}.btn2{fill:#fff;stroke:#d1d5db}.pill{fill:#e5e7eb}.ok{fill:#bff7d7}.warn{fill:#fff3cd;stroke:#f1c36d}.err{fill:#fff7ed;stroke:#f59e0b}.barbg{fill:#ddd9d2}.barok{fill:#5f789c}.barwarn{fill:#f59e0b}.barerr{fill:#ef4444}.key{fill:#fff;stroke:#d1d5db}.panel{fill:#eeeeee;stroke:#d1d5db}.bluebox{fill:#eff6ff;stroke:#bfdbfe}.selected{fill:#eef3fa;stroke:#b7c3d7}.ghost{fill:#f1f1f1;stroke:#d0d0d0}.mono{font-family:'Segoe UI Mono','Consolas',monospace}
+</style>
+</defs>
+<rect class="bg" x="0" y="0" width="1200" height="720"/>
+<rect class="side" x="0" y="0" width="210" height="720"/>
+<rect x="20" y="28" width="48" height="48" rx="12" fill="#6f86a8" stroke="#8da0bd"/>
+<text class="text nav" x="82" y="59">RawHID Host</text>
+<text class="text nav" x="24" y="132">▦  ダッシュボード</text>
+<text class="text nav" x="24" y="174">☰  レイヤールール</text>
+<text class="text nav" x="24" y="216">◷  時刻同期</text>
+<text class="text nav" x="24" y="258">⌁  AI 使用量</text>
+<text class="text nav" x="24" y="300">⌨  キーマップ表示</text>
+<text class="text nav" x="24" y="342">🔧  デバイス</text>
+<text class="text nav" x="24" y="384">⚙  設定</text>
+<circle cx="24" cy="682" r="5" fill="#b7c3d7"/><text class="text nav" x="40" y="688">停止中</text>
+<text class="text title" x="260" y="64">AI 使用量</text><text class="text sub" x="260" y="88">Codex / Claude Code の使用率を取得して送信します</text><rect class="btn2" x="954" y="42" width="82" height="44" rx="8"/><text class="text" x="984" y="70" font-size="15" font-weight="700">更新</text><rect class="btn" x="1050" y="42" width="88" height="44" rx="8"/><text x="1080" y="70" fill="#fff" font-size="15" font-weight="700">保存</text>
+<rect class="card" x="260" y="126" width="860" height="92" rx="12"/><text class="text" x="292" y="166" font-size="18" font-weight="700">基本設定</text><text class="text sub" x="292" y="194">Polling: 300s / Stale: 900s</text><rect x="1020" y="150" width="48" height="24" rx="12" fill="#5f789c"/><circle cx="1054" cy="162" r="10" fill="#fff"/>
+<rect class="card" x="260" y="244" width="420" height="338" rx="12"/><rect x="260" y="244" width="420" height="58" rx="12" fill="#fffaf2"/><text class="text" x="306" y="281" font-size="19" font-weight="700">Codex</text><rect class="ok" x="396" y="262" width="62" height="24" rx="12"/><text class="text small" x="411" y="278" fill="#047857">ok</text><text class="text sub" x="292" y="330">Codex rate_limits</text><text class="text label" x="292" y="378">5h 使用済み</text><text class="text label" x="628" y="378" text-anchor="end">44.00%</text><rect class="barbg" x="292" y="392" width="336" height="10" rx="5"/><rect class="barok" x="292" y="392" width="148" height="10" rx="5"/><text class="text sub" x="292" y="424">Reset: 23:10</text><text class="text label" x="292" y="474">7d 使用済み</text><text class="text label" x="628" y="474" text-anchor="end">82.50%</text><rect class="barbg" x="292" y="488" width="336" height="10" rx="5"/><rect class="barwarn" x="292" y="488" width="277" height="10" rx="5"/><text class="text sub" x="292" y="520">Reset: 金 13:00</text>
+<rect class="card" x="700" y="244" width="420" height="338" rx="12"/><rect x="700" y="244" width="420" height="58" rx="12" fill="#fffaf2"/><text class="text" x="746" y="281" font-size="19" font-weight="700">Claude Code</text><rect class="pill" x="878" y="262" width="134" height="24" rx="12"/><text class="text small" x="894" y="278">expired credentials</text><text class="text sub" x="732" y="330">OAuth usage API / experimental</text><text class="text label" x="732" y="378">5h 使用済み</text><text class="text sub" x="1068" y="378" text-anchor="end">-- no data</text><rect class="barbg" x="732" y="392" width="336" height="10" rx="5"/><text class="text label" x="732" y="474">7d 使用済み</text><text class="text sub" x="1068" y="474" text-anchor="end">-- no data</text><rect class="barbg" x="732" y="488" width="336" height="10" rx="5"/><rect class="err" x="732" y="526" width="336" height="44" rx="8"/><text class="text" x="760" y="554" font-size="13" fill="#b45309">expired credentials。次回ポーリングで再試行します。</text>
+</svg>

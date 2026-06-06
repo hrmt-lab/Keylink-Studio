@@ -1,4 +1,4 @@
-// ─── Config Types ─────────────────────────────────────────────────────────────
+// 笏笏笏 Config Types 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
 export interface PollingConfig {
   interval_ms: number;
@@ -8,6 +8,7 @@ export interface HidConfig {
   usage_page: number;
   usage: number;
   hello_timeout_ms: number;
+  rescan_interval_sec: number;
 }
 
 export interface RuleConfig {
@@ -36,6 +37,11 @@ export interface TimeConfig {
   tz_offset_min: number | null;
 }
 
+export interface StudioConfig {
+  probe_timeout_ms: number;
+  keymap_read_timeout_ms: number;
+}
+
 export interface AiUsageConfig {
   enabled: boolean;
   poll_interval_sec: number;
@@ -56,12 +62,26 @@ export interface CodexAiUsageConfig {
 export interface ClaudeCodeAiUsageConfig {
   enabled: boolean;
   credentials_path: string | null;
+  credentials_auto_detect: boolean;
+  include_wsl_credentials: boolean;
+  extra_credentials_paths: string[];
   api_timeout_sec: number;
+}
+
+export type UnmatchedAction = "clear_managed" | "keep";
+
+export interface DeviceLayerSwitchConfig {
+  display_name: string | null;
+  enabled: boolean;
+  rules: RuleConfig[];
+  unmatched_action: UnmatchedAction | null;
 }
 
 export interface LayerSwitchConfig {
   enabled: boolean;
+  unmatched_action: UnmatchedAction;
   rules: RuleConfig[];
+  devices: Record<string, DeviceLayerSwitchConfig>;
 }
 
 export interface AppConfig {
@@ -70,14 +90,16 @@ export interface AppConfig {
   layer_switch: LayerSwitchConfig;
   time: TimeConfig;
   ai_usage: AiUsageConfig;
+  studio: StudioConfig;
 }
 
-// ─── Runtime Types ────────────────────────────────────────────────────────────
+// 笏笏笏 Runtime Types 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
 export interface MonitorStatus {
   running: boolean;
   connected_devices: number;
   connected_device_names: string[];
+  host_link_devices: DeviceInfo[];
   current_layer: number | null;
   current_rule: string | null;
   last_error: string | null;
@@ -99,6 +121,12 @@ export type AiUsageStatusKind =
 
 export type AiUsageSourceKind = "none" | "quota" | "local_history";
 
+export type AiUsageCredentialSourceKind =
+  | "explicit_path"
+  | "windows_default"
+  | "wsl"
+  | "extra_path";
+
 export interface AiUsageProviderStatus {
   provider: string;
   status: AiUsageStatusKind;
@@ -117,6 +145,7 @@ export interface AiUsageProviderStatus {
   local_history_source: boolean;
   fallback_limit: boolean;
   error_present: boolean;
+  credential_source: AiUsageCredentialSourceKind | null;
 }
 
 export interface LogEntry {
@@ -135,14 +164,104 @@ export interface DeviceInfo {
   manufacturer: string | null;
   product: string | null;
   serial_number: string | null;
+  capabilities: number;
+  device_uid_hash: string | null;
 }
 
+
+export type StudioRpcStatus = "ok" | "failed" | "timeout" | "unavailable";
+export type StudioLockState = "locked" | "unlocked" | "unknown";
+export type KeymapViewerStatus = "available" | "locked" | "unsupported" | "failed";
+export type StudioErrorCode =
+  | "none"
+  | "no_serial_ports"
+  | "open_failed"
+  | "rpc_timeout"
+  | "rpc_failed"
+  | "protocol_mismatch"
+  | "locked"
+  | "device_not_found"
+  | "keymap_read_failed";
+
+export interface StudioDeviceStatus {
+  id: string;
+  connection_type: string;
+  port_name: string;
+  display_name: string;
+  vid: number | null;
+  pid: number | null;
+  serial_number: string | null;
+  manufacturer: string | null;
+  product: string | null;
+  transport_detected: boolean;
+  rpc_status: StudioRpcStatus;
+  lock_state: StudioLockState;
+  keymap_viewer_status: KeymapViewerStatus;
+  error_code: StudioErrorCode;
+}
+
+export type StudioLayoutSource = "studio_physical_layout" | "grid_fallback";
+
+export interface StudioKeymapSnapshot {
+  device_id: string;
+  device_name: string;
+  connection_type: string;
+  lock_state: StudioLockState;
+  physical_layouts: StudioPhysicalLayout[];
+  selected_physical_layout_index: number | null;
+  selected_physical_layout_name: string | null;
+  layout_source: StudioLayoutSource;
+  selected_layout_keys: StudioPhysicalKey[];
+  layers: StudioLayer[];
+  updated_ms: number;
+}
+
+export interface StudioPhysicalLayout {
+  index: number;
+  name: string;
+  keys: StudioPhysicalKey[];
+}
+
+export interface StudioPhysicalKey {
+  position: number;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  r: number;
+  rx: number;
+  ry: number;
+}
+
+export interface StudioLayer {
+  index: number;
+  id: number;
+  name: string;
+  bindings: StudioBinding[];
+}
+
+export interface StudioBinding {
+  position: number;
+  binding_label: string;
+  primary_label: string;
+  secondary_label: string;
+  full_label: string;
+  behavior: string;
+  params: number[];
+  raw: StudioRawBinding;
+}
+
+export interface StudioRawBinding {
+  behavior_id: number;
+  param1: number;
+  param2: number;
+}
 export interface ProbeResult {
   device: DeviceInfo;
   verified: boolean;
   error: string | null;
 }
 
-// ─── Page Types ───────────────────────────────────────────────────────────────
+// 笏笏笏 Page Types 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
-export type Page = "dashboard" | "rules" | "timesync" | "ai_usage" | "devices" | "settings";
+export type Page = "dashboard" | "rules" | "timesync" | "ai_usage" | "keymap_viewer" | "devices" | "settings";

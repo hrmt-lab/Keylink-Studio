@@ -2,6 +2,7 @@ use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::{
         atomic::{AtomicBool, Ordering},
         mpsc, Arc, Mutex,
@@ -48,6 +49,15 @@ pub enum AiUsageSourceKind {
     LocalHistory,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AiUsageCredentialSourceKind {
+    ExplicitPath,
+    WindowsDefault,
+    Wsl,
+    ExtraPath,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AiUsageProviderStatus {
     pub provider: String,
@@ -67,6 +77,7 @@ pub struct AiUsageProviderStatus {
     pub local_history_source: bool,
     pub fallback_limit: bool,
     pub error_present: bool,
+    pub credential_source: Option<AiUsageCredentialSourceKind>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,6 +98,7 @@ pub struct AiUsageSnapshot {
     pub fallback_limit: bool,
     pub force_stale: bool,
     pub error_code: AiUsageErrorCode,
+    pub credential_source: Option<AiUsageCredentialSourceKind>,
 }
 
 impl AiUsageSnapshot {
@@ -102,6 +114,7 @@ impl AiUsageSnapshot {
             fallback_limit: false,
             force_stale: false,
             error_code,
+            credential_source: None,
         }
     }
 
@@ -174,6 +187,7 @@ impl AiUsageSnapshot {
             local_history_source: self.local_history_source,
             fallback_limit: self.fallback_limit,
             error_present: self.error_code != AiUsageErrorCode::None,
+            credential_source: self.credential_source,
         }
     }
 }
@@ -494,6 +508,7 @@ fn codex_rate_limits_snapshot(sessions_dir: &Path) -> Option<AiUsageSnapshot> {
                     fallback_limit: false,
                     force_stale: false,
                     error_code: AiUsageErrorCode::None,
+                    credential_source: None,
                 });
             }
         }
@@ -555,6 +570,7 @@ fn codex_history_snapshot(sessions_dir: &Path, config: &CodexAiUsageConfig) -> A
         fallback_limit: true,
         force_stale: false,
         error_code: AiUsageErrorCode::None,
+        credential_source: None,
     }
 }
 
@@ -658,69 +674,322 @@ fn token_usage_total(value: &Value) -> Option<u64> {
 }
 
 fn collect_claude(config: &ClaudeCodeAiUsageConfig) -> Result<AiUsageSnapshot, AiUsageErrorCode> {
-    let credentials_path = config
-        .credentials_path
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(default_claude_credentials_path);
-    let text =
-        fs::read_to_string(credentials_path).map_err(|_| AiUsageErrorCode::MissingCredentials)?;
-    let value: Value = serde_json::from_str(&text).map_err(|_| AiUsageErrorCode::ParseFailed)?;
-    let oauth = value
-        .get("claudeAiOauth")
-        .ok_or(AiUsageErrorCode::MissingCredentials)?;
-    if let Some(expires_at) = oauth.get("expiresAt").and_then(Value::as_u64) {
-        let now_ms = unix_now().saturating_mul(1000);
-        if expires_at <= now_ms {
-            return Err(AiUsageErrorCode::ExpiredCredentials);
-        }
-    }
-    let access_token = oauth
-        .get("accessToken")
-        .and_then(Value::as_str)
-        .filter(|token| !token.is_empty())
-        .ok_or(AiUsageErrorCode::MissingCredentials)?;
+    collect_claude_with_url(config, CLAUDE_USAGE_URL)
+}
 
+fn collect_claude_with_url(
+    config: &ClaudeCodeAiUsageConfig,
+    usage_url: &str,
+) -> Result<AiUsageSnapshot, AiUsageErrorCode> {
+    let candidates = claude_credentials_candidates(config);
+    let credentials = select_claude_credentials(candidates, unix_now().saturating_mul(1000))?;
     let client = reqwest::blocking::Client::builder()
         .timeout(Duration::from_secs(config.api_timeout_sec.max(1)))
         .build()
         .map_err(|_| AiUsageErrorCode::FetchFailed)?;
-    let response = client
-        .get(CLAUDE_USAGE_URL)
-        .bearer_auth(access_token)
-        .header("anthropic-beta", "oauth-2025-04-20")
-        .send()
-        .map_err(|_| AiUsageErrorCode::FetchFailed)?;
-    let status = response.status();
-    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
-        return Err(AiUsageErrorCode::AuthFailed);
+
+    let mut auth_failed = false;
+    for credential in credentials {
+        match fetch_claude_usage(&client, usage_url, &credential.access_token) {
+            Ok(value) => {
+                let five_hour = claude_window(value.get("five_hour"));
+                let seven_day = claude_window(value.get("seven_day"));
+                if five_hour.is_none() && seven_day.is_none() {
+                    return Err(AiUsageErrorCode::NoUsageData);
+                }
+                return Ok(AiUsageSnapshot {
+                    provider: AiUsageProvider::ClaudeCode,
+                    five_hour,
+                    seven_day,
+                    updated_unix: unix_now(),
+                    estimated: false,
+                    local_history_source: false,
+                    quota_source: true,
+                    fallback_limit: false,
+                    force_stale: false,
+                    error_code: AiUsageErrorCode::None,
+                    credential_source: Some(credential.source),
+                });
+            }
+            Err(ClaudeUsageFetchError::AuthFailed) => {
+                auth_failed = true;
+            }
+            Err(ClaudeUsageFetchError::RateLimited) => return Err(AiUsageErrorCode::RateLimited),
+            Err(ClaudeUsageFetchError::Other(error)) => return Err(error),
+        }
     }
-    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
-        return Err(AiUsageErrorCode::RateLimited);
+
+    if auth_failed {
+        Err(AiUsageErrorCode::AuthFailed)
+    } else {
+        Err(AiUsageErrorCode::MissingCredentials)
     }
-    if !status.is_success() {
-        return Err(AiUsageErrorCode::FetchFailed);
+}
+
+#[derive(Debug, Clone)]
+struct ClaudeCredentialsCandidate {
+    path: PathBuf,
+    source: AiUsageCredentialSourceKind,
+    explicit: bool,
+    order: usize,
+}
+
+#[derive(Debug, Clone)]
+struct ClaudeCredentials {
+    access_token: String,
+    expires_at: Option<u64>,
+    mtime: SystemTime,
+    source: AiUsageCredentialSourceKind,
+    explicit: bool,
+    order: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ClaudeCandidateFailure {
+    Missing,
+    ParseFailed,
+    MissingToken,
+    Expired,
+}
+
+#[derive(Debug)]
+enum ClaudeUsageFetchError {
+    AuthFailed,
+    RateLimited,
+    Other(AiUsageErrorCode),
+}
+
+fn claude_credentials_candidates(
+    config: &ClaudeCodeAiUsageConfig,
+) -> Vec<ClaudeCredentialsCandidate> {
+    let mut candidates = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(path) = &config.credentials_path {
+        push_claude_candidate(
+            &mut candidates,
+            &mut seen,
+            PathBuf::from(path),
+            AiUsageCredentialSourceKind::ExplicitPath,
+            true,
+        );
     }
-    let value: Value = response.json().map_err(|_| AiUsageErrorCode::ParseFailed)?;
-    let five_hour = claude_window(value.get("five_hour"));
-    let seven_day = claude_window(value.get("seven_day"));
-    if five_hour.is_none() && seven_day.is_none() {
-        return Err(AiUsageErrorCode::NoUsageData);
+    if config.credentials_auto_detect {
+        push_claude_candidate(
+            &mut candidates,
+            &mut seen,
+            default_claude_credentials_path(),
+            AiUsageCredentialSourceKind::WindowsDefault,
+            false,
+        );
+        if config.include_wsl_credentials {
+            for path in wsl_claude_credentials_paths() {
+                push_claude_candidate(
+                    &mut candidates,
+                    &mut seen,
+                    path,
+                    AiUsageCredentialSourceKind::Wsl,
+                    false,
+                );
+            }
+        }
+        for path in &config.extra_credentials_paths {
+            push_claude_candidate(
+                &mut candidates,
+                &mut seen,
+                PathBuf::from(path),
+                AiUsageCredentialSourceKind::ExtraPath,
+                false,
+            );
+        }
     }
-    Ok(AiUsageSnapshot {
-        provider: AiUsageProvider::ClaudeCode,
-        five_hour,
-        seven_day,
-        updated_unix: unix_now(),
-        estimated: false,
-        local_history_source: false,
-        quota_source: true,
-        fallback_limit: false,
-        force_stale: false,
-        error_code: AiUsageErrorCode::None,
+    candidates
+}
+
+fn push_claude_candidate(
+    candidates: &mut Vec<ClaudeCredentialsCandidate>,
+    seen: &mut HashSet<String>,
+    path: PathBuf,
+    source: AiUsageCredentialSourceKind,
+    explicit: bool,
+) {
+    let key = path.to_string_lossy().to_ascii_lowercase();
+    if seen.insert(key) {
+        let order = candidates.len();
+        candidates.push(ClaudeCredentialsCandidate {
+            path,
+            source,
+            explicit,
+            order,
+        });
+    }
+}
+
+fn wsl_claude_credentials_paths() -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut distro_paths = Vec::new();
+    for root in [PathBuf::from(r"\\wsl$"), PathBuf::from(r"\\wsl.localhost")] {
+        let Ok(distros) = fs::read_dir(&root) else {
+            continue;
+        };
+        for distro in distros.flatten() {
+            distro_paths.push(distro.path());
+        }
+    }
+    for distro in wsl_distro_names_from_command() {
+        distro_paths.push(PathBuf::from(format!(r"\\wsl$\{distro}")));
+        distro_paths.push(PathBuf::from(format!(r"\\wsl.localhost\{distro}")));
+    }
+
+    let mut seen = HashSet::new();
+    for distro_path in distro_paths {
+        let key = distro_path.to_string_lossy().to_ascii_lowercase();
+        if !seen.insert(key) {
+            continue;
+        }
+        let home = distro_path.join("home");
+        let Ok(users) = fs::read_dir(home) else {
+            continue;
+        };
+        for user in users.flatten() {
+            let Ok(meta) = user.metadata() else {
+                continue;
+            };
+            if meta.is_dir() {
+                paths.push(user.path().join(".claude").join(".credentials.json"));
+            }
+        }
+    }
+    paths
+}
+
+fn wsl_distro_names_from_command() -> Vec<String> {
+    let Ok(output) = Command::new("wsl.exe").args(["-l", "-q"]).output() else {
+        return Vec::new();
+    };
+    parse_wsl_distro_names(&output.stdout)
+}
+
+fn parse_wsl_distro_names(bytes: &[u8]) -> Vec<String> {
+    let looks_utf16_le = bytes.starts_with(&[0xff, 0xfe])
+        || bytes
+            .iter()
+            .skip(1)
+            .step_by(2)
+            .filter(|byte| **byte == 0)
+            .count()
+            > bytes.len() / 4;
+    let text = if looks_utf16_le {
+        let chunks = bytes
+            .strip_prefix(&[0xff, 0xfe])
+            .unwrap_or(bytes)
+            .chunks_exact(2);
+        let utf16: Vec<u16> = chunks
+            .map(|chunk| u16::from_le_bytes([chunk[0], chunk[1]]))
+            .collect();
+        String::from_utf16_lossy(&utf16)
+    } else {
+        String::from_utf8_lossy(bytes).into_owned()
+    };
+    text.lines()
+        .map(|line| line.trim_matches(|ch: char| ch == '\0' || ch.is_whitespace()))
+        .filter(|line| !line.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn select_claude_credentials(
+    candidates: Vec<ClaudeCredentialsCandidate>,
+    now_ms: u64,
+) -> Result<Vec<ClaudeCredentials>, AiUsageErrorCode> {
+    if candidates.is_empty() {
+        return Err(AiUsageErrorCode::MissingCredentials);
+    }
+
+    let mut credentials = Vec::new();
+    let mut failures = Vec::new();
+    for candidate in candidates {
+        match read_claude_credentials(candidate, now_ms) {
+            Ok(credential) => credentials.push(credential),
+            Err(failure) => failures.push(failure),
+        }
+    }
+
+    if !credentials.is_empty() {
+        credentials.sort_by(|a, b| {
+            b.explicit
+                .cmp(&a.explicit)
+                .then_with(|| b.expires_at.unwrap_or(0).cmp(&a.expires_at.unwrap_or(0)))
+                .then_with(|| b.mtime.cmp(&a.mtime))
+                .then_with(|| a.order.cmp(&b.order))
+        });
+        return Ok(credentials);
+    }
+
+    if failures.contains(&ClaudeCandidateFailure::Expired) {
+        return Err(AiUsageErrorCode::ExpiredCredentials);
+    }
+    if failures.contains(&ClaudeCandidateFailure::ParseFailed) {
+        return Err(AiUsageErrorCode::ParseFailed);
+    }
+    Err(AiUsageErrorCode::MissingCredentials)
+}
+
+fn read_claude_credentials(
+    candidate: ClaudeCredentialsCandidate,
+    now_ms: u64,
+) -> Result<ClaudeCredentials, ClaudeCandidateFailure> {
+    let text = fs::read_to_string(&candidate.path).map_err(|_| ClaudeCandidateFailure::Missing)?;
+    let value: Value =
+        serde_json::from_str(&text).map_err(|_| ClaudeCandidateFailure::ParseFailed)?;
+    let oauth = value
+        .get("claudeAiOauth")
+        .ok_or(ClaudeCandidateFailure::MissingToken)?;
+    let access_token = oauth
+        .get("accessToken")
+        .and_then(Value::as_str)
+        .filter(|token| !token.is_empty())
+        .ok_or(ClaudeCandidateFailure::MissingToken)?
+        .to_string();
+    let expires_at = oauth.get("expiresAt").and_then(Value::as_u64);
+    if expires_at.is_some_and(|expires_at| expires_at <= now_ms) {
+        return Err(ClaudeCandidateFailure::Expired);
+    }
+    let mtime = file_mtime(&candidate.path);
+    Ok(ClaudeCredentials {
+        access_token,
+        expires_at,
+        mtime,
+        source: candidate.source,
+        explicit: candidate.explicit,
+        order: candidate.order,
     })
 }
 
+fn fetch_claude_usage(
+    client: &reqwest::blocking::Client,
+    usage_url: &str,
+    access_token: &str,
+) -> Result<Value, ClaudeUsageFetchError> {
+    let response = client
+        .get(usage_url)
+        .bearer_auth(access_token)
+        .header("anthropic-beta", "oauth-2025-04-20")
+        .send()
+        .map_err(|_| ClaudeUsageFetchError::Other(AiUsageErrorCode::FetchFailed))?;
+    let status = response.status();
+    if status == reqwest::StatusCode::UNAUTHORIZED || status == reqwest::StatusCode::FORBIDDEN {
+        return Err(ClaudeUsageFetchError::AuthFailed);
+    }
+    if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+        return Err(ClaudeUsageFetchError::RateLimited);
+    }
+    if !status.is_success() {
+        return Err(ClaudeUsageFetchError::Other(AiUsageErrorCode::FetchFailed));
+    }
+    response
+        .json()
+        .map_err(|_| ClaudeUsageFetchError::Other(AiUsageErrorCode::ParseFailed))
+}
 fn claude_window(value: Option<&Value>) -> Option<AiUsageWindow> {
     let value = value?;
     let percent = value
@@ -937,5 +1206,194 @@ mod tests {
         assert!(snapshot.local_history_source);
         assert!(!snapshot.quota_source);
         assert_eq!(snapshot.five_hour.unwrap().reset_unix, 0);
+    }
+    fn write_claude_credentials(path: &Path, token: &str, expires_at: u64) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(
+            path,
+            format!(r#"{{"claudeAiOauth":{{"accessToken":"{token}","expiresAt":{expires_at}}}}}"#),
+        )
+        .unwrap();
+    }
+
+    fn claude_candidate(
+        path: PathBuf,
+        source: AiUsageCredentialSourceKind,
+        explicit: bool,
+        order: usize,
+    ) -> ClaudeCredentialsCandidate {
+        ClaudeCredentialsCandidate {
+            path,
+            source,
+            explicit,
+            order,
+        }
+    }
+
+    #[test]
+    fn claude_credentials_explicit_path_only_when_auto_detect_disabled() {
+        let config = ClaudeCodeAiUsageConfig {
+            credentials_path: Some("C:\\Users\\me\\.claude\\.credentials.json".to_string()),
+            credentials_auto_detect: false,
+            ..ClaudeCodeAiUsageConfig::default()
+        };
+
+        let candidates = claude_credentials_candidates(&config);
+
+        assert_eq!(candidates.len(), 1);
+        assert!(candidates[0].explicit);
+        assert_eq!(
+            candidates[0].source,
+            AiUsageCredentialSourceKind::ExplicitPath
+        );
+    }
+
+    #[test]
+    fn claude_credentials_missing_when_no_path_and_auto_detect_disabled() {
+        let config = ClaudeCodeAiUsageConfig {
+            credentials_auto_detect: false,
+            ..ClaudeCodeAiUsageConfig::default()
+        };
+
+        let error = select_claude_credentials(claude_credentials_candidates(&config), unix_now())
+            .unwrap_err();
+
+        assert_eq!(error, AiUsageErrorCode::MissingCredentials);
+    }
+
+    #[test]
+    fn claude_credentials_valid_candidate_wins_over_parse_failed_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.json");
+        let good = dir.path().join("good.json");
+        fs::write(&bad, "not json").unwrap();
+        write_claude_credentials(&good, "good-token", 4_000_000_000_000);
+
+        let credentials = select_claude_credentials(
+            vec![
+                claude_candidate(bad, AiUsageCredentialSourceKind::WindowsDefault, false, 0),
+                claude_candidate(good, AiUsageCredentialSourceKind::Wsl, false, 1),
+            ],
+            3_000_000_000_000,
+        )
+        .unwrap();
+
+        assert_eq!(credentials.len(), 1);
+        assert_eq!(credentials[0].access_token, "good-token");
+        assert_eq!(credentials[0].source, AiUsageCredentialSourceKind::Wsl);
+    }
+
+    #[test]
+    fn claude_credentials_prefers_explicit_valid_candidate() {
+        let dir = tempfile::tempdir().unwrap();
+        let explicit = dir.path().join("explicit.json");
+        let wsl = dir.path().join("wsl.json");
+        write_claude_credentials(&explicit, "explicit-token", 3_100_000_000_000);
+        write_claude_credentials(&wsl, "wsl-token", 4_000_000_000_000);
+
+        let credentials = select_claude_credentials(
+            vec![
+                claude_candidate(explicit, AiUsageCredentialSourceKind::ExplicitPath, true, 0),
+                claude_candidate(wsl, AiUsageCredentialSourceKind::Wsl, false, 1),
+            ],
+            3_000_000_000_000,
+        )
+        .unwrap();
+
+        assert_eq!(credentials[0].access_token, "explicit-token");
+        assert_eq!(
+            credentials[0].source,
+            AiUsageCredentialSourceKind::ExplicitPath
+        );
+    }
+
+    #[test]
+    fn claude_credentials_prefers_furthest_expiry_for_auto_candidates() {
+        let dir = tempfile::tempdir().unwrap();
+        let windows = dir.path().join("windows.json");
+        let wsl = dir.path().join("wsl.json");
+        write_claude_credentials(&windows, "windows-token", 3_500_000_000_000);
+        write_claude_credentials(&wsl, "wsl-token", 4_000_000_000_000);
+
+        let credentials = select_claude_credentials(
+            vec![
+                claude_candidate(
+                    windows,
+                    AiUsageCredentialSourceKind::WindowsDefault,
+                    false,
+                    0,
+                ),
+                claude_candidate(wsl, AiUsageCredentialSourceKind::Wsl, false, 1),
+            ],
+            3_000_000_000_000,
+        )
+        .unwrap();
+
+        assert_eq!(credentials[0].access_token, "wsl-token");
+    }
+
+    #[test]
+    fn claude_credentials_all_expired_returns_expired_credentials() {
+        let dir = tempfile::tempdir().unwrap();
+        let expired = dir.path().join("expired.json");
+        write_claude_credentials(&expired, "expired-token", 2_000_000_000_000);
+
+        let error = select_claude_credentials(
+            vec![claude_candidate(
+                expired,
+                AiUsageCredentialSourceKind::WindowsDefault,
+                false,
+                0,
+            )],
+            3_000_000_000_000,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, AiUsageErrorCode::ExpiredCredentials);
+    }
+
+    #[test]
+    fn claude_credentials_parse_failed_only_returns_parse_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let bad = dir.path().join("bad.json");
+        fs::write(&bad, "not json").unwrap();
+
+        let error = select_claude_credentials(
+            vec![claude_candidate(
+                bad,
+                AiUsageCredentialSourceKind::WindowsDefault,
+                false,
+                0,
+            )],
+            3_000_000_000_000,
+        )
+        .unwrap_err();
+
+        assert_eq!(error, AiUsageErrorCode::ParseFailed);
+    }
+
+    #[test]
+    fn parse_wsl_distro_names_handles_utf16le_output() {
+        let bytes: Vec<u8> = "Ubuntu
+"
+        .encode_utf16()
+        .flat_map(u16::to_le_bytes)
+        .collect();
+
+        assert_eq!(parse_wsl_distro_names(&bytes), vec!["Ubuntu"]);
+    }
+
+    #[test]
+    fn parse_wsl_distro_names_handles_utf8_output() {
+        assert_eq!(
+            parse_wsl_distro_names(
+                b"Ubuntu
+Debian
+"
+            ),
+            vec!["Ubuntu", "Debian"]
+        );
     }
 }

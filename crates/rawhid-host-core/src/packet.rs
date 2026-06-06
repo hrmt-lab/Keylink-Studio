@@ -6,6 +6,10 @@ pub const MAGIC: [u8; 2] = *b"HL";
 pub const VERSION: u8 = 0x01;
 pub const MAX_LAYER: u8 = 31;
 pub const AI_USAGE_MAX_BASIS_POINTS: u16 = 10_000;
+pub const CAPABILITY_APP_LAYER: u32 = 1 << 0;
+pub const CAPABILITY_TIME_SYNC: u32 = 1 << 1;
+pub const CAPABILITY_AI_USAGE: u32 = 1 << 2;
+pub const CAPABILITY_THEME: u32 = 1 << 3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -234,6 +238,52 @@ pub struct Packet {
     pub seq: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeviceHello {
+    pub protocol_min: u8,
+    pub protocol_max: u8,
+    pub seq: u8,
+    pub capabilities: u32,
+    pub device_uid_hash: Option<u64>,
+}
+
+impl DeviceHello {
+    pub fn decode_payload(bytes: &[u8]) -> Result<Self, PacketError> {
+        if bytes.len() != PACKET_SIZE {
+            return Err(PacketError::InvalidLength {
+                expected: PACKET_SIZE,
+                actual: bytes.len(),
+            });
+        }
+        if bytes[0..2] != MAGIC {
+            return Err(PacketError::InvalidMagic);
+        }
+        if bytes[2] != VERSION {
+            return Err(PacketError::UnsupportedVersion(bytes[2]));
+        }
+        let packet_type = PacketType::try_from(bytes[3])?;
+        if packet_type != PacketType::DeviceHello {
+            return Err(PacketError::DecodeUnsupportedType(bytes[3]));
+        }
+        if bytes[6] != 0 || bytes[20..].iter().any(|b| *b != 0) {
+            return Err(PacketError::ReservedNotZero);
+        }
+
+        let capabilities = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        let raw_uid = u64::from_le_bytes(bytes[12..20].try_into().unwrap());
+        Ok(Self {
+            protocol_min: bytes[4],
+            protocol_max: bytes[5],
+            seq: bytes[7],
+            capabilities,
+            device_uid_hash: (raw_uid != 0).then_some(raw_uid),
+        })
+    }
+
+    pub fn supports_app_layer(self) -> bool {
+        self.capabilities & CAPABILITY_APP_LAYER != 0
+    }
+}
 impl Packet {
     pub fn set_layer(layer: u8, seq: u8) -> Result<Self, PacketError> {
         validate_layer(layer)?;
@@ -306,10 +356,7 @@ impl Packet {
         }
         let packet_type = PacketType::try_from(bytes[3])?;
         match packet_type {
-            PacketType::HostHello
-            | PacketType::DeviceHello
-            | PacketType::Ping
-            | PacketType::Pong => {
+            PacketType::HostHello | PacketType::Ping | PacketType::Pong => {
                 if bytes[4..7].iter().any(|b| *b != 0) || bytes[8..].iter().any(|b| *b != 0) {
                     return Err(PacketError::ReservedNotZero);
                 }
@@ -318,6 +365,15 @@ impl Packet {
                     action: 0,
                     layer: 0,
                     seq: bytes[7],
+                })
+            }
+            PacketType::DeviceHello => {
+                let hello = DeviceHello::decode_payload(bytes)?;
+                Ok(Self {
+                    packet_type,
+                    action: 0,
+                    layer: 0,
+                    seq: hello.seq,
                 })
             }
             PacketType::AppLayer => {
@@ -403,6 +459,40 @@ mod tests {
         assert_eq!(report[6], 3);
         assert_eq!(report[8], 7);
         assert!(report[9..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn decodes_device_hello_capabilities_and_uid() {
+        let mut payload = Packet::host_hello(9).encode_payload();
+        payload[3] = PacketType::DeviceHello as u8;
+        payload[4] = 1;
+        payload[5] = 1;
+        payload[8..12]
+            .copy_from_slice(&(CAPABILITY_APP_LAYER | CAPABILITY_TIME_SYNC).to_le_bytes());
+        payload[12..20].copy_from_slice(&0x7a91c3e4d102ab55u64.to_le_bytes());
+
+        let hello = DeviceHello::decode_payload(&payload).unwrap();
+
+        assert_eq!(hello.protocol_min, 1);
+        assert_eq!(hello.protocol_max, 1);
+        assert_eq!(hello.seq, 9);
+        assert_eq!(
+            hello.capabilities,
+            CAPABILITY_APP_LAYER | CAPABILITY_TIME_SYNC
+        );
+        assert_eq!(hello.device_uid_hash, Some(0x7a91c3e4d102ab55));
+        assert!(hello.supports_app_layer());
+    }
+
+    #[test]
+    fn device_hello_zero_uid_is_normalized_to_none() {
+        let mut payload = Packet::host_hello(3).encode_payload();
+        payload[3] = PacketType::DeviceHello as u8;
+        payload[8..12].copy_from_slice(&CAPABILITY_APP_LAYER.to_le_bytes());
+
+        let hello = DeviceHello::decode_payload(&payload).unwrap();
+
+        assert_eq!(hello.device_uid_hash, None);
     }
 
     #[test]

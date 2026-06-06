@@ -5,7 +5,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rawhid_host_core::{ai_usage::AiUsageProviderStatus, config::AppConfig};
+use rawhid_host_core::{
+    ai_usage::{AiUsageProviderStatus, AiUsageRuntime, AiUsageShared},
+    config::AppConfig,
+    hid::DeviceInfo,
+};
 
 pub const MAX_LOG_ENTRIES: usize = 200;
 
@@ -22,6 +26,7 @@ pub struct MonitorStatus {
     pub running: bool,
     pub connected_devices: usize,
     pub connected_device_names: Vec<String>,
+    pub host_link_devices: Vec<DeviceInfo>,
     pub current_layer: Option<u8>,
     pub current_rule: Option<String>,
     pub last_error: Option<String>,
@@ -34,6 +39,7 @@ impl Default for MonitorStatus {
             running: false,
             connected_devices: 0,
             connected_device_names: Vec::new(),
+            host_link_devices: Vec::new(),
             current_layer: None,
             current_rule: None,
             last_error: None,
@@ -50,25 +56,33 @@ pub struct AppState {
     pub log_counter: Arc<Mutex<u64>>,
     pub stop_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<MonitorCommand>>>>,
     pub ai_usage_refreshing: Arc<AtomicBool>,
+    pub ai_usage_runtime: Arc<Mutex<Option<AiUsageRuntime>>>,
 }
 
 #[derive(Debug, Clone)]
 pub enum MonitorCommand {
     Stop,
-    UpdateConfig(AppConfig),
-    RefreshAiUsage(std::sync::mpsc::Sender<Result<(), String>>),
+    UpdateConfig(AppConfig, Option<AiUsageShared>),
 }
 
 impl AppState {
     pub fn new(config: AppConfig, config_path: Option<PathBuf>) -> Self {
+        let ai_usage_runtime = AiUsageRuntime::start(config.ai_usage.clone());
+        let ai_usage_statuses = ai_usage_runtime
+            .as_ref()
+            .map(|runtime| runtime.statuses(config.ai_usage.stale_after_sec))
+            .unwrap_or_default();
+        let mut status = MonitorStatus::default();
+        status.ai_usage = ai_usage_statuses;
         Self {
             config: Arc::new(Mutex::new(config)),
             config_path: Arc::new(Mutex::new(config_path)),
-            status: Arc::new(Mutex::new(MonitorStatus::default())),
+            status: Arc::new(Mutex::new(status)),
             log_entries: Arc::new(Mutex::new(VecDeque::new())),
             log_counter: Arc::new(Mutex::new(0)),
             stop_tx: Arc::new(Mutex::new(None)),
             ai_usage_refreshing: Arc::new(AtomicBool::new(false)),
+            ai_usage_runtime: Arc::new(Mutex::new(ai_usage_runtime)),
         }
     }
 }

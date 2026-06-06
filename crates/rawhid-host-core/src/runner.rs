@@ -1,13 +1,15 @@
-use std::{thread, time::Duration};
+use std::{collections::HashMap, thread, time::Duration};
 
 use tracing::{debug, info, warn};
 
 use crate::{
     active_app::{ActiveAppError, ActiveAppProvider},
-    ai_usage::{AiUsageProviderStatus, AiUsageRefreshError, AiUsageRuntime, AiUsageSendState},
+    ai_usage::{
+        AiUsageProviderStatus, AiUsageRefreshError, AiUsageRuntime, AiUsageSendState, AiUsageShared,
+    },
     app_match::{match_action, LayerAction},
-    config::AppConfig,
-    hid::{HidDeviceManager, HidError, HidTransport},
+    config::{AppConfig, UnmatchedAction},
+    hid::{DeviceInfo, HidDeviceManager, HidError, HidTransport},
     time::{Clock, SystemClock, TimeError, TimeSyncState},
 };
 
@@ -25,9 +27,10 @@ pub struct Runner<P, T, C = SystemClock> {
     hid: HidDeviceManager<T>,
     clock: C,
     time_sync: TimeSyncState,
-    ai_usage: Option<AiUsageRuntime>,
+    ai_usage_shared: Option<AiUsageShared>,
+    owned_ai_usage_runtime: Option<AiUsageRuntime>,
     ai_usage_send: AiUsageSendState,
-    last_action: Option<LayerAction>,
+    managed_layers: HashMap<String, ManagedLayerState>,
     last_device_generation: u64,
 }
 
@@ -53,16 +56,39 @@ where
         hid: HidDeviceManager<T>,
         clock: C,
     ) -> Self {
-        let ai_usage = AiUsageRuntime::start(config.ai_usage.clone());
+        let owned_ai_usage_runtime = AiUsageRuntime::start(config.ai_usage.clone());
+        let ai_usage_shared = owned_ai_usage_runtime.as_ref().map(AiUsageRuntime::shared);
         Self {
             config,
             app_provider,
             hid,
             clock,
             time_sync: TimeSyncState::default(),
-            ai_usage,
+            ai_usage_shared,
+            owned_ai_usage_runtime,
             ai_usage_send: AiUsageSendState::default(),
-            last_action: None,
+            managed_layers: HashMap::new(),
+            last_device_generation: 0,
+        }
+    }
+
+    pub fn new_with_ai_usage_shared(
+        config: AppConfig,
+        app_provider: P,
+        hid: HidDeviceManager<T>,
+        clock: C,
+        ai_usage_shared: Option<AiUsageShared>,
+    ) -> Self {
+        Self {
+            config,
+            app_provider,
+            hid,
+            clock,
+            time_sync: TimeSyncState::default(),
+            ai_usage_shared,
+            owned_ai_usage_runtime: None,
+            ai_usage_send: AiUsageSendState::default(),
+            managed_layers: HashMap::new(),
             last_device_generation: 0,
         }
     }
@@ -77,37 +103,9 @@ where
             Err(ActiveAppError::NoForegroundWindow) => return Ok(RunEvent::Unchanged),
             Err(error) => return Err(error.into()),
         };
-        let (action, matched) = if self.config.layer_switch.enabled {
-            match_action(&app, &self.config.layer_switch.rules)
-        } else {
-            (LayerAction::Clear, None)
-        };
-        if self.last_action == Some(action) && self.last_device_generation == device_generation {
-            return Ok(RunEvent::Unchanged);
-        }
-
-        match action {
-            LayerAction::Set(layer) => {
-                let sent = self.hid.send_set_layer(layer)?;
-                let rule_name = matched
-                    .map(|matched| matched.rule.name.clone())
-                    .unwrap_or_else(|| "<unknown>".to_string());
-                info!(
-                    "set layer {} by rule {} for {} devices",
-                    layer, rule_name, sent
-                );
-                self.last_action = Some(action);
-                self.last_device_generation = self.hid.device_generation();
-                Ok(RunEvent::SetLayer { layer, rule_name })
-            }
-            LayerAction::Clear => {
-                let sent = self.hid.send_clear()?;
-                debug!("clear layer for {} devices", sent);
-                self.last_action = Some(action);
-                self.last_device_generation = self.hid.device_generation();
-                Ok(RunEvent::Clear)
-            }
-        }
+        let event = self.sync_app_layers(&app, device_generation)?;
+        self.last_device_generation = self.hid.device_generation();
+        Ok(event)
     }
 
     pub fn verified_device_count(&self) -> usize {
@@ -127,15 +125,19 @@ where
             .collect()
     }
 
+    pub fn verified_devices(&self) -> Vec<DeviceInfo> {
+        self.hid.verified_devices().to_vec()
+    }
+
     pub fn ai_usage_statuses(&self) -> Vec<AiUsageProviderStatus> {
-        self.ai_usage
+        self.ai_usage_shared
             .as_ref()
-            .map(|runtime| runtime.statuses(self.config.ai_usage.stale_after_sec))
+            .map(|shared| shared.statuses(self.config.ai_usage.stale_after_sec))
             .unwrap_or_default()
     }
 
     pub fn refresh_ai_usage(&self) -> Result<(), AiUsageRefreshError> {
-        self.ai_usage
+        self.owned_ai_usage_runtime
             .as_ref()
             .ok_or(AiUsageRefreshError::Stopped)
             .and_then(AiUsageRuntime::refresh)
@@ -151,6 +153,82 @@ where
         }
     }
 
+    fn sync_app_layers(
+        &mut self,
+        app: &crate::ActiveApp,
+        device_generation: u64,
+    ) -> Result<RunEvent, RunnerError> {
+        let devices = self.hid.verified_devices().to_vec();
+        let mut changed = false;
+        let mut first_set: Option<(u8, String)> = None;
+        let resend_due_to_generation = self.last_device_generation != device_generation;
+
+        for device in devices {
+            if !supports_app_layer(&device) {
+                continue;
+            }
+            let Some(uid) = device.device_uid_hash else {
+                continue;
+            };
+            let device_key = device_uid_key(uid);
+            let state = self.managed_layers.entry(device_key.clone()).or_default();
+
+            let (action, rule_name) = if self.config.layer_switch.enabled {
+                if let Some(device_config) = self.config.layer_switch.devices.get(&device_key) {
+                    if device_config.enabled {
+                        let (action, matched) = match_action(app, &device_config.rules);
+                        (action, matched.map(|m| m.rule.name.clone()))
+                    } else {
+                        (LayerAction::Clear, None)
+                    }
+                } else {
+                    let (action, matched) = match_action(app, &self.config.layer_switch.rules);
+                    (action, matched.map(|m| m.rule.name.clone()))
+                }
+            } else {
+                (LayerAction::Clear, None)
+            };
+
+            match action {
+                LayerAction::Set(layer) => {
+                    if state.active_layer != Some(layer) || resend_due_to_generation {
+                        self.hid.send_set_layer_to_device(&device, layer)?;
+                        state.active_layer = Some(layer);
+                        state.last_rule_id = rule_name.clone();
+                        let rule_name = rule_name.unwrap_or_else(|| "<unknown>".to_string());
+                        info!(
+                            "set layer {} by rule {} for {}",
+                            layer, rule_name, device_key
+                        );
+                        if first_set.is_none() {
+                            first_set = Some((layer, rule_name));
+                        }
+                        changed = true;
+                    }
+                }
+                LayerAction::Clear => {
+                    if state.active_layer.is_some()
+                        && self.config.layer_switch.unmatched_action
+                            == UnmatchedAction::ClearManaged
+                    {
+                        self.hid.send_clear_to_device(&device)?;
+                        state.active_layer = None;
+                        state.last_rule_id = None;
+                        debug!("clear layer for {}", device_key);
+                        changed = true;
+                    }
+                }
+            }
+        }
+
+        if let Some((layer, rule_name)) = first_set {
+            Ok(RunEvent::SetLayer { layer, rule_name })
+        } else if changed {
+            Ok(RunEvent::Clear)
+        } else {
+            Ok(RunEvent::Unchanged)
+        }
+    }
     fn sync_time_if_due(&mut self, device_generation: u64) -> Result<(), RunnerError> {
         if !self.config.time.enabled {
             return Ok(());
@@ -170,12 +248,11 @@ where
         if !self.config.ai_usage.enabled {
             return Ok(());
         }
-        let Some(runtime) = &self.ai_usage else {
+        let Some(shared) = &self.ai_usage_shared else {
             return Ok(());
         };
-        let shared = runtime.shared();
         for packet in self.ai_usage_send.due_packets(
-            &shared,
+            shared,
             self.config.ai_usage.stale_after_sec,
             device_generation,
         ) {
@@ -186,6 +263,19 @@ where
     }
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ManagedLayerState {
+    active_layer: Option<u8>,
+    last_rule_id: Option<String>,
+}
+
+fn supports_app_layer(device: &DeviceInfo) -> bool {
+    device.capabilities & crate::packet::CAPABILITY_APP_LAYER != 0
+}
+
+fn device_uid_key(uid: u64) -> String {
+    format!("uid:{uid:016x}")
+}
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
     #[error("active app error: {0}")]
@@ -200,7 +290,7 @@ pub enum RunnerError {
 mod tests {
     use super::*;
     use crate::{hid::DeviceInfo, HidConfig, HidTransport, Packet, RuleConfig};
-    use std::{cell::RefCell, path::PathBuf};
+    use std::{cell::RefCell, path::PathBuf, rc::Rc};
 
     #[derive(Debug)]
     struct MockAppProvider {
@@ -235,10 +325,16 @@ mod tests {
         fn hello(
             &self,
             _device: &DeviceInfo,
-            _packet: Packet,
+            packet: Packet,
             _timeout_ms: i32,
-        ) -> Result<bool, HidError> {
-            Ok(true)
+        ) -> Result<Option<crate::packet::DeviceHello>, HidError> {
+            Ok(Some(crate::packet::DeviceHello {
+                protocol_min: 0,
+                protocol_max: 0,
+                seq: packet.seq,
+                capabilities: crate::packet::CAPABILITY_APP_LAYER,
+                device_uid_hash: Some(1),
+            }))
         }
 
         fn write_report(
@@ -272,6 +368,8 @@ mod tests {
             manufacturer: None,
             product: None,
             serial_number: None,
+            capabilities: crate::packet::CAPABILITY_APP_LAYER,
+            device_uid_hash: Some(1),
         }
     }
 
@@ -280,6 +378,8 @@ mod tests {
         let config = AppConfig {
             layer_switch: crate::config::LayerSwitchConfig {
                 enabled: true,
+                unmatched_action: crate::config::UnmatchedAction::ClearManaged,
+                devices: std::collections::BTreeMap::new(),
                 rules: vec![RuleConfig {
                     name: "notepad".to_string(),
                     layer: 1,
@@ -310,6 +410,8 @@ mod tests {
         let config = AppConfig {
             layer_switch: crate::config::LayerSwitchConfig {
                 enabled: true,
+                unmatched_action: crate::config::UnmatchedAction::ClearManaged,
+                devices: std::collections::BTreeMap::new(),
                 rules: vec![RuleConfig {
                     name: "notepad".to_string(),
                     layer: 1,
@@ -325,6 +427,179 @@ mod tests {
         let mut runner = Runner::new(config, NoForegroundProvider, hid);
 
         assert_eq!(runner.tick().unwrap(), RunEvent::Unchanged);
+    }
+
+    #[derive(Debug, Default)]
+    struct MultiMockTransport {
+        devices: Vec<DeviceInfo>,
+        writes: Rc<RefCell<Vec<(String, [u8; crate::REPORT_SIZE])>>>,
+    }
+
+    impl HidTransport for MultiMockTransport {
+        fn candidates(&self, _usage_page: u16, _usage: u16) -> Result<Vec<DeviceInfo>, HidError> {
+            Ok(self.devices.clone())
+        }
+
+        fn hello(
+            &self,
+            device: &DeviceInfo,
+            packet: Packet,
+            _timeout_ms: i32,
+        ) -> Result<Option<crate::packet::DeviceHello>, HidError> {
+            Ok(Some(crate::packet::DeviceHello {
+                protocol_min: 0,
+                protocol_max: 0,
+                seq: packet.seq,
+                capabilities: device.capabilities,
+                device_uid_hash: device.device_uid_hash,
+            }))
+        }
+
+        fn write_report(
+            &self,
+            device: &DeviceInfo,
+            report: &[u8; crate::REPORT_SIZE],
+        ) -> Result<(), HidError> {
+            self.writes
+                .borrow_mut()
+                .push((device.path.clone(), *report));
+            Ok(())
+        }
+    }
+
+    fn device_with_uid(path: &str, uid: u64, capabilities: u32) -> DeviceInfo {
+        DeviceInfo {
+            path: path.to_string(),
+            vendor_id: 1,
+            product_id: 2,
+            usage_page: 0xFF60,
+            usage: 0x61,
+            manufacturer: None,
+            product: None,
+            serial_number: None,
+            capabilities,
+            device_uid_hash: Some(uid),
+        }
+    }
+
+    fn code_app_provider() -> MockAppProvider {
+        MockAppProvider {
+            app: crate::ActiveApp {
+                process_path: Some(PathBuf::from("C:\\Apps\\Code.exe")),
+                exe: Some("Code.exe".to_string()),
+                title: None,
+            },
+        }
+    }
+
+    fn code_rule(name: &str, layer: u8) -> RuleConfig {
+        RuleConfig {
+            name: name.to_string(),
+            layer,
+            path: None,
+            exe: Some("Code.exe".to_string()),
+            title: None,
+        }
+    }
+
+    #[test]
+    fn device_config_rules_override_global_rules_per_uid() {
+        let mut devices = std::collections::BTreeMap::new();
+        devices.insert(
+            "uid:00000000000000aa".to_string(),
+            crate::config::DeviceLayerSwitchConfig {
+                rules: vec![code_rule("device-a", 3)],
+                ..Default::default()
+            },
+        );
+        devices.insert(
+            "uid:00000000000000bb".to_string(),
+            crate::config::DeviceLayerSwitchConfig::default(),
+        );
+        let config = AppConfig {
+            layer_switch: crate::config::LayerSwitchConfig {
+                enabled: true,
+                unmatched_action: crate::config::UnmatchedAction::ClearManaged,
+                rules: vec![code_rule("global", 2)],
+                devices,
+            },
+            ..AppConfig::default()
+        };
+        let transport = MultiMockTransport {
+            devices: vec![
+                device_with_uid("a", 0xaa, crate::packet::CAPABILITY_APP_LAYER),
+                device_with_uid("b", 0xbb, crate::packet::CAPABILITY_APP_LAYER),
+            ],
+            writes: Rc::new(RefCell::new(Vec::new())),
+        };
+        let writes = transport.writes.clone();
+        let hid = HidDeviceManager::new(HidConfig::default(), transport);
+        let mut runner = Runner::new(config, code_app_provider(), hid);
+
+        assert!(matches!(
+            runner.tick().unwrap(),
+            RunEvent::SetLayer { layer: 3, .. }
+        ));
+        let writes = writes.borrow();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, "a");
+        assert_eq!(writes[0].1[6], 3);
+    }
+
+    #[test]
+    fn missing_device_config_uses_global_fallback() {
+        let config = AppConfig {
+            layer_switch: crate::config::LayerSwitchConfig {
+                enabled: true,
+                unmatched_action: crate::config::UnmatchedAction::ClearManaged,
+                rules: vec![code_rule("global", 2)],
+                devices: std::collections::BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+        let transport = MultiMockTransport {
+            devices: vec![device_with_uid(
+                "a",
+                0xaa,
+                crate::packet::CAPABILITY_APP_LAYER,
+            )],
+            writes: Rc::new(RefCell::new(Vec::new())),
+        };
+        let writes = transport.writes.clone();
+        let hid = HidDeviceManager::new(HidConfig::default(), transport);
+        let mut runner = Runner::new(config, code_app_provider(), hid);
+
+        assert!(matches!(
+            runner.tick().unwrap(),
+            RunEvent::SetLayer { layer: 2, .. }
+        ));
+        let writes = writes.borrow();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, "a");
+        assert_eq!(writes[0].1[6], 2);
+    }
+
+    #[test]
+    fn app_layer_capability_is_required_for_sending() {
+        let config = AppConfig {
+            layer_switch: crate::config::LayerSwitchConfig {
+                enabled: true,
+                unmatched_action: crate::config::UnmatchedAction::ClearManaged,
+                rules: vec![code_rule("global", 2)],
+                devices: std::collections::BTreeMap::new(),
+            },
+            ..AppConfig::default()
+        };
+        let transport = MultiMockTransport {
+            devices: vec![device_with_uid("a", 0xaa, 0)],
+            writes: Rc::new(RefCell::new(Vec::new())),
+        };
+        let writes = transport.writes.clone();
+        let hid = HidDeviceManager::new(HidConfig::default(), transport);
+        let mut runner = Runner::new(config, code_app_provider(), hid);
+
+        assert_eq!(runner.tick().unwrap(), RunEvent::Unchanged);
+        assert!(writes.borrow().is_empty());
     }
 
     #[test]

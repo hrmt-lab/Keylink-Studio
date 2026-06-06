@@ -4,6 +4,7 @@ import Dashboard from "./pages/Dashboard";
 import Rules from "./pages/Rules";
 import TimeSync from "./pages/TimeSync";
 import AiUsage from "./pages/AiUsage";
+import KeymapViewer from "./pages/KeymapViewer";
 import Devices from "./pages/Devices";
 import Settings from "./pages/Settings";
 import {
@@ -12,8 +13,16 @@ import {
   getLogEntries,
   onStatusUpdate,
   onLogAdded,
+  probeStudioDevices,
 } from "./api";
-import type { AppConfig, MonitorStatus, LogEntry, Page } from "./types";
+import type {
+  AppConfig,
+  MonitorStatus,
+  LogEntry,
+  Page,
+  StudioDeviceStatus,
+  StudioKeymapSnapshot,
+} from "./types";
 import { LangProvider, useLang } from "./i18n";
 
 const MAX_LOGS = 200;
@@ -33,12 +42,17 @@ function AppInner() {
     running: false,
     connected_devices: 0,
     connected_device_names: [],
+    host_link_devices: [],
     current_layer: null,
     current_rule: null,
     last_error: null,
     ai_usage: [],
   });
   const [logs, setLogs] = useState<LogEntry[]>([]);
+  const [studioDevices, setStudioDevices] = useState<StudioDeviceStatus[]>([]);
+  const [studioScanning, setStudioScanning] = useState(false);
+  const [studioError, setStudioError] = useState<string | null>(null);
+  const [keymapSnapshotsByDeviceId, setKeymapSnapshotsByDeviceId] = useState<Record<string, StudioKeymapSnapshot>>({});
   const [loading, setLoading] = useState(true);
 
   const addLog = useCallback((entry: LogEntry) => {
@@ -46,6 +60,29 @@ function AppInner() {
       const next = [...prev, entry];
       return next.length > MAX_LOGS ? next.slice(next.length - MAX_LOGS) : next;
     });
+  }, []);
+
+  const refreshStudioDevices = useCallback(async () => {
+    setStudioScanning(true);
+    setStudioError(null);
+    try {
+      const devices = await probeStudioDevices();
+      const ids = new Set(devices.map((device) => device.id));
+      setStudioDevices(devices);
+      setKeymapSnapshotsByDeviceId((current) => {
+        const next: Record<string, StudioKeymapSnapshot> = {};
+        for (const [id, snapshot] of Object.entries(current)) {
+          if (ids.has(id)) next[id] = snapshot;
+        }
+        return next;
+      });
+      return devices;
+    } catch (e) {
+      setStudioError(String(e));
+      throw e;
+    } finally {
+      setStudioScanning(false);
+    }
   }, []);
 
   useEffect(() => {
@@ -75,6 +112,10 @@ function AppInner() {
       unlisten2?.();
     };
   }, [addLog]);
+
+  useEffect(() => {
+    void refreshStudioDevices().catch(() => {});
+  }, [refreshStudioDevices]);
 
   const { t } = useLang();
 
@@ -112,7 +153,24 @@ function AppInner() {
         {page === "ai_usage" && (
           <AiUsage config={config} setConfig={updateConfig} status={status} />
         )}
-        {page === "devices" && <Devices />}
+        {page === "keymap_viewer" && (
+          <KeymapViewer
+            studioDevices={studioDevices}
+            studioScanning={studioScanning}
+            studioError={studioError}
+            refreshStudioDevices={refreshStudioDevices}
+            snapshotsByDeviceId={keymapSnapshotsByDeviceId}
+            setSnapshotsByDeviceId={setKeymapSnapshotsByDeviceId}
+          />
+        )}
+        {page === "devices" && (
+          <Devices
+            studioDevices={studioDevices}
+            studioScanning={studioScanning}
+            studioError={studioError}
+            refreshStudioDevices={refreshStudioDevices}
+          />
+        )}
         {page === "settings" && (
           <Settings config={config} setConfig={updateConfig} />
         )}

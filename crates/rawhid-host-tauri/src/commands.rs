@@ -10,10 +10,14 @@ use std::{
 
 use rawhid_host_core::{
     active_app::SystemActiveAppProvider,
-    ai_usage::AiUsageRefreshError,
+    ai_usage::{AiUsageRefreshError, AiUsageRuntime, AiUsageShared},
     config::{load_config, AppConfig, ConfigPaths},
     hid::{HidDeviceManager, ProbeResult},
     runner::{RunEvent, Runner},
+    studio::{
+        probe_usb_serial_devices, read_keymap_for_device, StudioDeviceStatus, StudioError,
+        StudioKeymapSnapshot,
+    },
 };
 use tauri::{AppHandle, Emitter, State};
 
@@ -241,8 +245,12 @@ pub fn save_config(config: AppConfig, state: State<AppState>) -> Result<(), Stri
     *state.config.lock().unwrap() = config.clone();
     *state.config_path.lock().unwrap() = Some(path);
 
+    let ai_usage_shared = restart_ai_usage_runtime(&state, &config);
+
     if let Some(tx) = state.stop_tx.lock().unwrap().as_ref() {
-        let _ = tx.send(MonitorCommand::UpdateConfig(config));
+        let _ = tx.send(MonitorCommand::UpdateConfig(config, ai_usage_shared));
+    } else {
+        update_ai_usage_status(&state);
     }
 
     Ok(())
@@ -254,6 +262,8 @@ pub fn reload_config(state: State<AppState>) -> Result<AppConfig, String> {
         load_config(preferred_existing_config_path()).map_err(|e| e.to_string())?;
     *state.config.lock().unwrap() = config.clone();
     *state.config_path.lock().unwrap() = path;
+    restart_ai_usage_runtime(&state, &config);
+    update_ai_usage_status(&state);
     Ok(config)
 }
 
@@ -294,6 +304,7 @@ fn reveal_config_path(_path: &std::path::Path) -> bool {
 
 #[tauri::command]
 pub fn get_status(state: State<AppState>) -> MonitorStatus {
+    update_ai_usage_status(&state);
     state.status.lock().unwrap().clone()
 }
 
@@ -303,21 +314,48 @@ pub fn get_log_entries(state: State<AppState>) -> Vec<LogEntry> {
 }
 
 #[tauri::command]
-pub fn probe_devices(state: State<AppState>) -> Result<Vec<ProbeResult>, String> {
+pub async fn probe_devices(state: State<'_, AppState>) -> Result<Vec<ProbeResult>, String> {
     let hid_config = state.config.lock().unwrap().hid.clone();
-    let (tx, rx) = mpsc::channel();
-
-    thread::spawn(move || {
-        let result = (|| -> Result<Vec<ProbeResult>, String> {
-            let mut manager = HidDeviceManager::real(hid_config).map_err(|e| e.to_string())?;
-            manager.probe().map_err(|e| e.to_string())
-        })();
-        let _ = tx.send(result);
-    });
-
-    rx.recv().map_err(|e| e.to_string())?
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut manager = HidDeviceManager::real(hid_config).map_err(|e| e.to_string())?;
+        manager.probe().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+pub async fn probe_studio_devices(
+    state: State<'_, AppState>,
+) -> Result<Vec<StudioDeviceStatus>, String> {
+    let studio_config = state.config.lock().unwrap().studio.clone();
+    tauri::async_runtime::spawn_blocking(move || probe_usb_serial_devices(&studio_config))
+        .await
+        .map_err(|_| "studio_probe_failed".to_string())
+}
+
+#[tauri::command]
+pub async fn read_studio_keymap(
+    device_id: String,
+    state: State<'_, AppState>,
+) -> Result<StudioKeymapSnapshot, String> {
+    let studio_config = state.config.lock().unwrap().studio.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        read_keymap_for_device(&device_id, &studio_config).map_err(studio_error_code)
+    })
+    .await
+    .map_err(|_| "studio_read_failed".to_string())?
+}
+
+fn studio_error_code(error: StudioError) -> String {
+    match error {
+        StudioError::DeviceNotFound => "device_not_found",
+        StudioError::Locked => "locked",
+        StudioError::Timeout => "timeout",
+        StudioError::RpcFailed => "rpc_failed",
+    }
+    .to_string()
+}
 #[tauri::command]
 pub fn start_monitoring(app: AppHandle, state: State<AppState>) -> Result<(), String> {
     let already_running = state.stop_tx.lock().unwrap().is_some();
@@ -330,12 +368,26 @@ pub fn start_monitoring(app: AppHandle, state: State<AppState>) -> Result<(), St
     let log_entries = Arc::clone(&state.log_entries);
     let log_counter = Arc::clone(&state.log_counter);
     let stop_tx_arc = Arc::clone(&state.stop_tx);
+    let ai_usage_shared = state
+        .ai_usage_runtime
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(AiUsageRuntime::shared);
 
     let (tx, rx) = mpsc::channel();
     *stop_tx_arc.lock().unwrap() = Some(tx);
 
     thread::spawn(move || {
-        run_monitor_loop(app, config, status, log_entries, log_counter, rx);
+        run_monitor_loop(
+            app,
+            config,
+            status,
+            log_entries,
+            log_counter,
+            rx,
+            ai_usage_shared,
+        );
         *stop_tx_arc.lock().unwrap() = None;
     });
 
@@ -364,16 +416,35 @@ pub fn refresh_ai_usage(state: State<AppState>) -> Result<(), String> {
         return Err("refresh_in_progress".to_string());
     }
     let _guard = RefreshGuard(Arc::clone(&state.ai_usage_refreshing));
-    let tx = state.stop_tx.lock().unwrap().clone();
-    let Some(tx) = tx else {
-        return Err("not_running".to_string());
-    };
-    let (reply_tx, reply_rx) = mpsc::channel();
-    tx.send(MonitorCommand::RefreshAiUsage(reply_tx))
-        .map_err(|_| "not_running".to_string())?;
-    reply_rx
-        .recv_timeout(Duration::from_secs(2))
-        .map_err(|_| "refresh_failed".to_string())?
+    {
+        let runtime = state.ai_usage_runtime.lock().unwrap();
+        let Some(runtime) = runtime.as_ref() else {
+            return Err("source_disabled".to_string());
+        };
+        runtime.refresh().map_err(refresh_error_code)?;
+    }
+    thread::sleep(Duration::from_millis(50));
+    update_ai_usage_status(&state);
+    Ok(())
+}
+
+fn restart_ai_usage_runtime(state: &AppState, config: &AppConfig) -> Option<AiUsageShared> {
+    let runtime = AiUsageRuntime::start(config.ai_usage.clone());
+    let shared = runtime.as_ref().map(AiUsageRuntime::shared);
+    *state.ai_usage_runtime.lock().unwrap() = runtime;
+    shared
+}
+
+fn update_ai_usage_status(state: &AppState) {
+    let config = state.config.lock().unwrap().clone();
+    let ai_usage = state
+        .ai_usage_runtime
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|runtime| runtime.statuses(config.ai_usage.stale_after_sec))
+        .unwrap_or_default();
+    state.status.lock().unwrap().ai_usage = ai_usage;
 }
 
 struct RefreshGuard(Arc<AtomicBool>);
@@ -386,9 +457,16 @@ impl Drop for RefreshGuard {
 
 fn rebuild_runner(
     config: &AppConfig,
+    ai_usage_shared: Option<AiUsageShared>,
 ) -> Result<Runner<SystemActiveAppProvider, rawhid_host_core::hid::RealHidTransport>, String> {
     let hid = HidDeviceManager::real(config.hid.clone()).map_err(|e| e.to_string())?;
-    Ok(Runner::new(config.clone(), SystemActiveAppProvider, hid))
+    Ok(Runner::new_with_ai_usage_shared(
+        config.clone(),
+        SystemActiveAppProvider,
+        hid,
+        rawhid_host_core::time::SystemClock,
+        ai_usage_shared,
+    ))
 }
 
 fn apply_monitor_config(
@@ -397,8 +475,9 @@ fn apply_monitor_config(
     runner: &mut Runner<SystemActiveAppProvider, rawhid_host_core::hid::RealHidTransport>,
     interval: &mut Duration,
     status: &Arc<std::sync::Mutex<MonitorStatus>>,
+    ai_usage_shared: Option<AiUsageShared>,
 ) -> Result<(), String> {
-    *runner = rebuild_runner(&next_config)?;
+    *runner = rebuild_runner(&next_config, ai_usage_shared)?;
     *interval = Duration::from_millis(next_config.polling.interval_ms);
 
     let mut s = status.lock().unwrap();
@@ -406,6 +485,7 @@ fn apply_monitor_config(
     s.current_rule = None;
     s.connected_devices = 0;
     s.connected_device_names = Vec::new();
+    s.host_link_devices = Vec::new();
     s.ai_usage = runner.ai_usage_statuses();
     s.last_error = None;
     let _ = app.emit("status-update", &*s);
@@ -420,8 +500,9 @@ fn run_monitor_loop(
     log_entries: Arc<std::sync::Mutex<std::collections::VecDeque<LogEntry>>>,
     log_counter: Arc<std::sync::Mutex<u64>>,
     rx: mpsc::Receiver<MonitorCommand>,
+    ai_usage_shared: Option<AiUsageShared>,
 ) {
-    let mut runner = match rebuild_runner(&config) {
+    let mut runner = match rebuild_runner(&config, ai_usage_shared) {
         Ok(runner) => runner,
         Err(e) => {
             let msg = format!("HID init error: {}", e);
@@ -456,13 +537,14 @@ fn run_monitor_loop(
                     should_stop = true;
                     break;
                 }
-                Ok(MonitorCommand::UpdateConfig(next_config)) => {
+                Ok(MonitorCommand::UpdateConfig(next_config, ai_usage_shared)) => {
                     match apply_monitor_config(
                         &app,
                         next_config,
                         &mut runner,
                         &mut interval,
                         &status,
+                        ai_usage_shared,
                     ) {
                         Ok(()) => {}
                         Err(e) => {
@@ -477,13 +559,6 @@ fn run_monitor_loop(
                         }
                     }
                 }
-                Ok(MonitorCommand::RefreshAiUsage(reply_tx)) => {
-                    let result = runner.refresh_ai_usage().map_err(refresh_error_code);
-                    let _ = reply_tx.send(result);
-                    let mut s = status.lock().unwrap();
-                    s.ai_usage = runner.ai_usage_statuses();
-                    let _ = app.emit("status-update", &*s);
-                }
                 Err(mpsc::TryRecvError::Empty) => break,
             }
         }
@@ -495,6 +570,7 @@ fn run_monitor_loop(
             Ok(RunEvent::SetLayer { layer, rule_name }) => {
                 let devices = runner.verified_device_count();
                 let device_names = runner.verified_device_names();
+                let host_link_devices = runner.verified_devices();
                 let ai_usage = runner.ai_usage_statuses();
                 {
                     let mut s = status.lock().unwrap();
@@ -502,6 +578,7 @@ fn run_monitor_loop(
                     s.current_rule = Some(rule_name.clone());
                     s.connected_devices = devices;
                     s.connected_device_names = device_names;
+                    s.host_link_devices = host_link_devices;
                     s.ai_usage = ai_usage;
                     s.last_error = None;
                     let _ = app.emit("status-update", &*s);
@@ -513,6 +590,7 @@ fn run_monitor_loop(
             Ok(RunEvent::Clear) => {
                 let devices = runner.verified_device_count();
                 let device_names = runner.verified_device_names();
+                let host_link_devices = runner.verified_devices();
                 let ai_usage = runner.ai_usage_statuses();
                 {
                     let mut s = status.lock().unwrap();
@@ -520,19 +598,23 @@ fn run_monitor_loop(
                     s.current_rule = None;
                     s.connected_devices = devices;
                     s.connected_device_names = device_names;
+                    s.host_link_devices = host_link_devices;
                     s.ai_usage = ai_usage;
                     let _ = app.emit("status-update", &*s);
                 }
             }
             Ok(RunEvent::Unchanged) => {
                 let devices = runner.verified_device_count();
+                let host_link_devices = runner.verified_devices();
                 let ai_usage = runner.ai_usage_statuses();
                 let mut s = status.lock().unwrap();
                 let ai_usage_changed = s.ai_usage != ai_usage;
-                if s.connected_devices != devices || ai_usage_changed {
+                let host_link_devices_changed = s.host_link_devices != host_link_devices;
+                if s.connected_devices != devices || ai_usage_changed || host_link_devices_changed {
                     let device_names = runner.verified_device_names();
                     s.connected_devices = devices;
                     s.connected_device_names = device_names;
+                    s.host_link_devices = host_link_devices;
                     s.ai_usage = ai_usage;
                     let _ = app.emit("status-update", &*s);
                 }
@@ -551,8 +633,15 @@ fn run_monitor_loop(
 
         match rx.recv_timeout(interval) {
             Ok(MonitorCommand::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Ok(MonitorCommand::UpdateConfig(next_config)) => {
-                match apply_monitor_config(&app, next_config, &mut runner, &mut interval, &status) {
+            Ok(MonitorCommand::UpdateConfig(next_config, ai_usage_shared)) => {
+                match apply_monitor_config(
+                    &app,
+                    next_config,
+                    &mut runner,
+                    &mut interval,
+                    &status,
+                    ai_usage_shared,
+                ) {
                     Ok(()) => {}
                     Err(e) => {
                         let msg = format!("HID init error: {}", e);
@@ -566,13 +655,6 @@ fn run_monitor_loop(
                     }
                 }
             }
-            Ok(MonitorCommand::RefreshAiUsage(reply_tx)) => {
-                let result = runner.refresh_ai_usage().map_err(refresh_error_code);
-                let _ = reply_tx.send(result);
-                let mut s = status.lock().unwrap();
-                s.ai_usage = runner.ai_usage_statuses();
-                let _ = app.emit("status-update", &*s);
-            }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
     }
@@ -582,9 +664,9 @@ fn run_monitor_loop(
         s.running = false;
         s.connected_devices = 0;
         s.connected_device_names = Vec::new();
+        s.host_link_devices = Vec::new();
         s.current_layer = None;
         s.current_rule = None;
-        s.ai_usage = Vec::new();
         let _ = app.emit("status-update", &*s);
     }
 

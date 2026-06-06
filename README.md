@@ -177,3 +177,13 @@ RawHID Host is a Windows host application for ZMK keyboards. It monitors the for
 This repository contains the host-side app only. The ZMK firmware side must implement the compatible `HL` packet receiver.
 
 See the documentation under `docs/` for setup, usage, architecture, and packet details.
+
+## Current implementation notes
+
+- `hid.rescan_interval_sec` controls periodic Host Link HID rescan while monitoring is running. The default is 5 seconds.
+- AI Usage collection runs independently from monitoring. The UI can refresh usage while monitoring is stopped; Raw HID sending still happens only while monitoring is running.
+- Dashboard quick toggles are auto-saved. On save failure, an error is shown and the UI state rolls back to the previous config.
+- Pages with a Save button do not show a success message. They only show an error when saving fails.
+- Claude Code credentials can be auto-detected from Windows default, WSL default, and extra credentials paths. On API 401 / 403, the next valid candidate is tried.
+- Keymap Viewer is a read-only ZMK Studio RPC viewer. It uses USB serial / CDC ACM transport in v1 and does not edit, write, save, restore, or unlock Studio state.
+- Device-specific App Layer rules use non-zero `device_uid_hash` and the `APP_LAYER` capability from `DEVICE_HELLO`. Devices without `APP_LAYER` are listed but do not receive `APP_LAYER` packets.

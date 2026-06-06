@@ -1,4 +1,10 @@
-use std::{cell::RefCell, collections::HashMap, ffi::CString, fmt};
+use std::{
+    cell::RefCell,
+    collections::HashMap,
+    ffi::CString,
+    fmt,
+    time::{Duration, Instant},
+};
 
 use hidapi::HidApi;
 use thiserror::Error;
@@ -6,7 +12,7 @@ use tracing::{debug, warn};
 
 use crate::{
     config::HidConfig,
-    packet::{AiUsagePacket, Packet, PacketType, TimeSyncPacket, PACKET_SIZE, REPORT_SIZE},
+    packet::{AiUsagePacket, DeviceHello, Packet, TimeSyncPacket, PACKET_SIZE, REPORT_SIZE},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -19,6 +25,34 @@ pub struct DeviceInfo {
     pub manufacturer: Option<String>,
     pub product: Option<String>,
     pub serial_number: Option<String>,
+    pub capabilities: u32,
+    #[serde(
+        serialize_with = "serialize_device_uid_hash",
+        deserialize_with = "deserialize_device_uid_hash"
+    )]
+    pub device_uid_hash: Option<u64>,
+}
+fn serialize_device_uid_hash<S>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(uid) => serializer.serialize_some(&format!("uid:{uid:016x}")),
+        None => serializer.serialize_none(),
+    }
+}
+
+fn deserialize_device_uid_hash<'de, D>(deserializer: D) -> Result<Option<u64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = <Option<String> as serde::Deserialize>::deserialize(deserializer)?;
+    value
+        .map(|value| {
+            let hex = value.strip_prefix("uid:").unwrap_or(&value);
+            u64::from_str_radix(hex, 16).map_err(serde::de::Error::custom)
+        })
+        .transpose()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
@@ -30,8 +64,12 @@ pub struct ProbeResult {
 
 pub trait HidTransport {
     fn candidates(&self, usage_page: u16, usage: u16) -> Result<Vec<DeviceInfo>, HidError>;
-    fn hello(&self, device: &DeviceInfo, packet: Packet, timeout_ms: i32)
-        -> Result<bool, HidError>;
+    fn hello(
+        &self,
+        device: &DeviceInfo,
+        packet: Packet,
+        timeout_ms: i32,
+    ) -> Result<Option<DeviceHello>, HidError>;
     fn write_report(&self, device: &DeviceInfo, report: &[u8; REPORT_SIZE])
         -> Result<(), HidError>;
     fn forget_device(&self, _device: &DeviceInfo) {}
@@ -80,6 +118,8 @@ impl HidTransport for RealHidTransport {
                 manufacturer: device.manufacturer_string().map(ToString::to_string),
                 product: device.product_string().map(ToString::to_string),
                 serial_number: device.serial_number().map(ToString::to_string),
+                capabilities: 0,
+                device_uid_hash: None,
             })
             .collect())
     }
@@ -89,7 +129,7 @@ impl HidTransport for RealHidTransport {
         device: &DeviceInfo,
         packet: Packet,
         timeout_ms: i32,
-    ) -> Result<bool, HidError> {
+    ) -> Result<Option<DeviceHello>, HidError> {
         let hid = self.open_device(&device.path)?;
         hid.write(&packet.encode_report()).map_err(HidError::Hid)?;
 
@@ -97,19 +137,15 @@ impl HidTransport for RealHidTransport {
         let read = hid
             .read_timeout(&mut buffer, timeout_ms)
             .map_err(HidError::Hid)?;
-        if read == 0 {
-            return Ok(false);
+        if read == 0 || read != PACKET_SIZE {
+            return Ok(None);
         }
-        if read != PACKET_SIZE {
-            return Ok(false);
+        let response = DeviceHello::decode_payload(&buffer).map_err(HidError::Packet)?;
+        if response.seq != packet.seq {
+            return Ok(None);
         }
-        let response = Packet::decode_payload(&buffer).map_err(HidError::Packet)?;
-        let device_hello_ok =
-            response.packet_type == PacketType::DeviceHello && response.seq == packet.seq;
-        if device_hello_ok {
-            self.handles.borrow_mut().insert(device.path.clone(), hid);
-        }
-        Ok(device_hello_ok)
+        self.handles.borrow_mut().insert(device.path.clone(), hid);
+        Ok(Some(response))
     }
 
     fn write_report(
@@ -140,6 +176,7 @@ pub struct HidDeviceManager<T = RealHidTransport> {
     verified: Vec<DeviceInfo>,
     seq: u8,
     generation: u64,
+    last_probe_at: Option<Instant>,
 }
 
 impl HidDeviceManager<RealHidTransport> {
@@ -156,6 +193,7 @@ impl<T: HidTransport> HidDeviceManager<T> {
             verified: Vec::new(),
             seq: 0,
             generation: 0,
+            last_probe_at: None,
         }
     }
 
@@ -168,6 +206,10 @@ impl<T: HidTransport> HidDeviceManager<T> {
     }
 
     pub fn probe(&mut self) -> Result<Vec<ProbeResult>, HidError> {
+        self.probe_at(Instant::now())
+    }
+
+    fn probe_at(&mut self, now: Instant) -> Result<Vec<ProbeResult>, HidError> {
         let candidates = self
             .transport
             .candidates(self.config.usage_page, self.config.usage)?;
@@ -181,16 +223,19 @@ impl<T: HidTransport> HidDeviceManager<T> {
                 .transport
                 .hello(&device, hello, self.config.hello_timeout_ms)
             {
-                Ok(true) => {
+                Ok(Some(hello)) => {
                     debug!("Raw HID HELLO succeeded for {}", device.path);
-                    verified.push(device.clone());
+                    let mut verified_device = device.clone();
+                    verified_device.capabilities = hello.capabilities;
+                    verified_device.device_uid_hash = hello.device_uid_hash;
+                    verified.push(verified_device.clone());
                     results.push(ProbeResult {
-                        device,
+                        device: verified_device,
                         verified: true,
                         error: None,
                     });
                 }
-                Ok(false) => {
+                Ok(None) => {
                     results.push(ProbeResult {
                         device,
                         verified: false,
@@ -218,12 +263,22 @@ impl<T: HidTransport> HidDeviceManager<T> {
             self.generation = self.generation.wrapping_add(1);
         }
         self.verified = verified;
+        self.last_probe_at = Some(now);
         Ok(results)
     }
 
     pub fn ensure_verified(&mut self) -> Result<(), HidError> {
-        if self.verified.is_empty() {
-            let _ = self.probe()?;
+        self.ensure_verified_at(Instant::now())
+    }
+
+    fn ensure_verified_at(&mut self, now: Instant) -> Result<(), HidError> {
+        let rescan_interval = Duration::from_secs(self.config.rescan_interval_sec.max(1));
+        let rescan_due = match self.last_probe_at {
+            Some(last_probe_at) => now.duration_since(last_probe_at) >= rescan_interval,
+            None => true,
+        };
+        if rescan_due {
+            let _ = self.probe_at(now)?;
         }
         Ok(())
     }
@@ -238,12 +293,40 @@ impl<T: HidTransport> HidDeviceManager<T> {
         self.send_report_to_verified(packet.encode_report())
     }
 
+    pub fn send_set_layer_to_device(
+        &mut self,
+        device: &DeviceInfo,
+        layer: u8,
+    ) -> Result<(), HidError> {
+        let packet = Packet::set_layer(layer, self.next_seq()).map_err(HidError::Packet)?;
+        self.send_report_to_device(device, packet.encode_report())
+    }
+
+    pub fn send_clear_to_device(&mut self, device: &DeviceInfo) -> Result<(), HidError> {
+        let packet = Packet::clear(self.next_seq());
+        self.send_report_to_device(device, packet.encode_report())
+    }
+
     pub fn send_time_sync(&mut self, packet: TimeSyncPacket) -> Result<usize, HidError> {
         self.send_report_to_verified(packet.encode_report())
     }
 
     pub fn send_ai_usage(&mut self, packet: AiUsagePacket) -> Result<usize, HidError> {
         self.send_report_to_verified(packet.encode_report())
+    }
+
+    fn send_report_to_device(
+        &mut self,
+        device: &DeviceInfo,
+        report: [u8; REPORT_SIZE],
+    ) -> Result<(), HidError> {
+        self.transport
+            .write_report(device, &report)
+            .inspect_err(|_| {
+                self.transport.forget_device(device);
+                self.verified.retain(|d| d.path != device.path);
+                self.generation = self.generation.wrapping_add(1);
+            })
     }
 
     pub fn send_report_to_verified(
@@ -299,7 +382,7 @@ mod tests {
 
     #[derive(Debug, Default)]
     struct MockTransport {
-        candidates: Vec<DeviceInfo>,
+        candidates: RefCell<Vec<DeviceInfo>>,
         hello_paths: RefCell<HashSet<String>>,
         failing_writes: RefCell<HashSet<String>>,
         writes: RefCell<Vec<(String, [u8; REPORT_SIZE])>>,
@@ -307,16 +390,26 @@ mod tests {
 
     impl HidTransport for MockTransport {
         fn candidates(&self, _usage_page: u16, _usage: u16) -> Result<Vec<DeviceInfo>, HidError> {
-            Ok(self.candidates.clone())
+            Ok(self.candidates.borrow().clone())
         }
 
         fn hello(
             &self,
             device: &DeviceInfo,
-            _packet: Packet,
+            packet: Packet,
             _timeout_ms: i32,
-        ) -> Result<bool, HidError> {
-            Ok(self.hello_paths.borrow().contains(&device.path))
+        ) -> Result<Option<DeviceHello>, HidError> {
+            Ok(self
+                .hello_paths
+                .borrow()
+                .contains(&device.path)
+                .then_some(DeviceHello {
+                    protocol_min: 0,
+                    protocol_max: 0,
+                    seq: packet.seq,
+                    capabilities: crate::packet::CAPABILITY_APP_LAYER,
+                    device_uid_hash: Some(1),
+                }))
         }
 
         fn write_report(
@@ -344,13 +437,15 @@ mod tests {
             manufacturer: None,
             product: None,
             serial_number: None,
+            capabilities: crate::packet::CAPABILITY_APP_LAYER,
+            device_uid_hash: Some(1),
         }
     }
 
     #[test]
     fn probe_keeps_only_hello_devices() {
         let transport = MockTransport {
-            candidates: vec![device("a"), device("b")],
+            candidates: RefCell::new(vec![device("a"), device("b")]),
             ..MockTransport::default()
         };
         transport.hello_paths.borrow_mut().insert("b".to_string());
@@ -365,7 +460,7 @@ mod tests {
     #[test]
     fn sends_to_multiple_verified_devices() {
         let transport = MockTransport {
-            candidates: vec![device("a"), device("b")],
+            candidates: RefCell::new(vec![device("a"), device("b")]),
             ..MockTransport::default()
         };
         transport.hello_paths.borrow_mut().insert("a".to_string());
@@ -379,7 +474,7 @@ mod tests {
     #[test]
     fn successful_write_does_not_change_device_generation() {
         let transport = MockTransport {
-            candidates: vec![device("a")],
+            candidates: RefCell::new(vec![device("a")]),
             ..MockTransport::default()
         };
         transport.hello_paths.borrow_mut().insert("a".to_string());
@@ -395,7 +490,7 @@ mod tests {
     #[test]
     fn write_failure_removes_device() {
         let transport = MockTransport {
-            candidates: vec![device("a"), device("b")],
+            candidates: RefCell::new(vec![device("a"), device("b")]),
             ..MockTransport::default()
         };
         transport.hello_paths.borrow_mut().insert("a".to_string());
@@ -411,5 +506,36 @@ mod tests {
 
         assert_eq!(manager.verified_devices(), &[device("b")]);
         assert_eq!(manager.device_generation(), 2);
+    }
+    #[test]
+    fn periodic_rescan_adds_new_verified_devices() {
+        let start = Instant::now();
+        let transport = MockTransport {
+            candidates: RefCell::new(vec![device("a")]),
+            ..MockTransport::default()
+        };
+        transport.hello_paths.borrow_mut().insert("a".to_string());
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        manager.probe_at(start).unwrap();
+        let generation = manager.device_generation();
+
+        manager.transport.candidates.borrow_mut().push(device("b"));
+        manager
+            .transport
+            .hello_paths
+            .borrow_mut()
+            .insert("b".to_string());
+
+        manager
+            .ensure_verified_at(start + Duration::from_secs(4))
+            .unwrap();
+        assert_eq!(manager.verified_devices(), &[device("a")]);
+        assert_eq!(manager.device_generation(), generation);
+
+        manager
+            .ensure_verified_at(start + Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(manager.verified_devices(), &[device("a"), device("b")]);
+        assert_ne!(manager.device_generation(), generation);
     }
 }

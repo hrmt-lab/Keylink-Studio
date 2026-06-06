@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Save, AlertCircle, RefreshCcw } from "lucide-react";
+import { Save, RefreshCcw } from "lucide-react";
 import { saveConfig, reloadConfig } from "../api";
+import { ErrorNotice, PageHeader, PrimaryButton, SecondaryButton, SectionCard, SettingRow } from "../components/Ui";
 import { useLang } from "../i18n";
 import type { AppConfig } from "../types";
 
@@ -13,20 +14,16 @@ export default function Settings({ config, setConfig }: Props) {
   const { t } = useLang();
   const [draft, setDraft] = useState(config);
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const isDirty = JSON.stringify(draft) !== JSON.stringify(config);
 
   const handleSave = async () => {
     setSaving(true);
-    setSaved(false);
     setError(null);
     try {
       await saveConfig(draft);
       setConfig(draft);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -46,43 +43,30 @@ export default function Settings({ config, setConfig }: Props) {
 
   return (
     <div className="p-6 max-w-2xl mx-auto space-y-5">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-gray-800">{t("settings.title")}</h1>
-          <p className="text-sm text-gray-500 mt-0.5">{t("settings.subtitle")}</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleReload}
-            className="flex items-center gap-2 rounded-lg border border-border bg-white px-4 py-2.5 text-sm font-medium text-gray-600 hover:bg-panel transition-colors"
-          >
-            <RefreshCcw size={15} />
-            {t("settings.reload")}
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving || !isDirty}
-            className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-white hover:bg-primary-dark disabled:opacity-50 transition-colors"
-          >
-            {saving ? (
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-            ) : (
-              <Save size={15} />
-            )}
-            {saved ? t("settings.saved") : t("settings.save")}
-          </button>
-        </div>
-      </div>
+      <PageHeader
+        title={t("settings.title")}
+        description={t("settings.subtitle")}
+        actions={
+          <>
+            <SecondaryButton onClick={handleReload} icon={<RefreshCcw size={15} />}>
+              {t("settings.reload")}
+            </SecondaryButton>
+            <PrimaryButton
+              onClick={handleSave}
+              disabled={!isDirty}
+              loading={saving}
+              icon={<Save size={15} />}
+            >
+              {t("settings.save")}
+            </PrimaryButton>
+          </>
+        }
+      />
 
-      {error && (
-        <div className="flex items-start gap-2.5 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700 ring-1 ring-red-200">
-          <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
-          <span>{error}</span>
-        </div>
-      )}
+      {error && <ErrorNotice message={error} />}
 
       {/* Polling */}
-      <Section title={t("settings.polling.section")}>
+      <SectionCard title={t("settings.polling.section")}>
         <SettingRow
           label={t("settings.polling.interval")}
           description={t("settings.polling.interval.desc")}
@@ -108,10 +92,10 @@ export default function Settings({ config, setConfig }: Props) {
             <span className="text-sm text-gray-500 w-8">ms</span>
           </div>
         </SettingRow>
-      </Section>
+      </SectionCard>
 
       {/* HID */}
-      <Section title={t("settings.hid.section")}>
+      <SectionCard title={t("settings.hid.section")}>
         <SettingRow
           label={t("settings.hid.usage_page")}
           description={t("settings.hid.usage_page.desc")}
@@ -176,7 +160,32 @@ export default function Settings({ config, setConfig }: Props) {
             <span className="text-sm text-gray-500 w-8">ms</span>
           </div>
         </SettingRow>
-      </Section>
+
+        <SettingRow
+          label={t("settings.hid.rescan_interval")}
+          description={t("settings.hid.rescan_interval.desc")}
+        >
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={1}
+              max={3600}
+              value={draft.hid.rescan_interval_sec}
+              onChange={(e) =>
+                setDraft({
+                  ...draft,
+                  hid: {
+                    ...draft.hid,
+                    rescan_interval_sec: Math.max(1, Number(e.target.value)),
+                  },
+                })
+              }
+              className="input w-28 text-right"
+            />
+            <span className="text-sm text-gray-500 w-8">sec</span>
+          </div>
+        </SettingRow>
+      </SectionCard>
 
       <div className="rounded-lg bg-background px-4 py-3 text-xs text-gray-400 ring-1 ring-border space-y-1">
         <div>
@@ -186,43 +195,6 @@ export default function Settings({ config, setConfig }: Props) {
           {t("settings.note2", { up: "0xFF60", u: "0x61" })}
         </div>
       </div>
-    </div>
-  );
-}
-
-function Section({
-  title,
-  children,
-}: {
-  title: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="rounded-xl bg-white shadow-card ring-1 ring-border overflow-hidden">
-      <div className="border-b border-border/60 px-5 py-3">
-        <h2 className="text-sm font-semibold text-gray-700">{title}</h2>
-      </div>
-      <div className="divide-y divide-border/60">{children}</div>
-    </div>
-  );
-}
-
-function SettingRow({
-  label,
-  description,
-  children,
-}: {
-  label: string;
-  description: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div className="flex items-center justify-between px-5 py-4 gap-4">
-      <div className="min-w-0">
-        <div className="text-sm font-medium text-gray-800">{label}</div>
-        <div className="text-xs text-gray-500 mt-0.5">{description}</div>
-      </div>
-      <div className="flex-shrink-0">{children}</div>
     </div>
   );
 }

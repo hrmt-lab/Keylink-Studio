@@ -238,3 +238,12 @@ Claude Code は OAuth usage API を experimental / best-effort source として�
 RawHID Host is a resident Windows app. React and TypeScript build the UI, Tauri connects that UI to Rust, and Rust handles Windows integration, TOML configuration, Raw HID, packet encoding, monitoring, time sync, and AI usage snapshots.
 
 The ZMK firmware side is not included in this repository. It must implement the compatible Raw HID receiver described in [Packet Specification](packet-spec.md).
+
+## Current implementation notes
+
+- `ui/src/components/Ui.tsx` contains shared UI primitives such as page headers, primary/secondary buttons, setting rows, section cards, and error notices.
+- Settings pages show errors only on save failure. Save success does not show a success message.
+- Dashboard quick toggles save immediately and roll back UI state if saving fails.
+- AI Usage has an app-level worker owned outside the monitoring loop, so the UI can refresh usage even when monitoring is stopped.
+- ZMK Studio support lives in `crates/rawhid-host-core/src/studio.rs`. It is separate from Host Link HID packet handling.
+- Keymap Viewer caches keymap snapshots by Studio device id and renders the selected physical layout when available, with grid fallback otherwise.

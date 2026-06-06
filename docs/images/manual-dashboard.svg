@@ -1,0 +1,41 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720">
+<defs>
+<style>
+  .bg{fill:#f3f4f6}.side{fill:#5f789c}.card{fill:#fff;stroke:#d7d7d7;stroke-width:1.5}.muted{fill:#8b95a6}.text{fill:#1f2937;font-family:'Segoe UI','Yu Gothic UI',sans-serif}.title{font-size:24px;font-weight:700}.sub{font-size:14px;fill:#667085}.nav{font-size:15px;fill:#e9eef7;font-weight:600}.label{font-size:13px}.small{font-size:11px}.btn{fill:#5f789c}.btn2{fill:#fff;stroke:#d1d5db}.pill{fill:#e5e7eb}.ok{fill:#bff7d7}.warn{fill:#fff3cd;stroke:#f1c36d}.err{fill:#fff7ed;stroke:#f59e0b}.barbg{fill:#ddd9d2}.barok{fill:#5f789c}.barwarn{fill:#f59e0b}.barerr{fill:#ef4444}.key{fill:#fff;stroke:#d1d5db}.panel{fill:#eeeeee;stroke:#d1d5db}.bluebox{fill:#eff6ff;stroke:#bfdbfe}.selected{fill:#eef3fa;stroke:#b7c3d7}.ghost{fill:#f1f1f1;stroke:#d0d0d0}.mono{font-family:'Segoe UI Mono','Consolas',monospace}
+</style>
+</defs>
+<rect class="bg" x="0" y="0" width="1200" height="720"/>
+<rect class="side" x="0" y="0" width="210" height="720"/>
+<rect x="20" y="28" width="48" height="48" rx="12" fill="#6f86a8" stroke="#8da0bd"/>
+<text class="text nav" x="82" y="59">RawHID Host</text>
+<text class="text nav" x="24" y="132">▦  ダッシュボード</text>
+<text class="text nav" x="24" y="174">☰  レイヤールール</text>
+<text class="text nav" x="24" y="216">◷  時刻同期</text>
+<text class="text nav" x="24" y="258">⌁  AI 使用量</text>
+<text class="text nav" x="24" y="300">⌨  キーマップ表示</text>
+<text class="text nav" x="24" y="342">🔧  デバイス</text>
+<text class="text nav" x="24" y="384">⚙  設定</text>
+<circle cx="24" cy="682" r="5" fill="#b7c3d7"/><text class="text nav" x="40" y="688">停止中</text>
+<text class="text title" x="260" y="64">ダッシュボード</text>
+<text class="text sub" x="260" y="88">監視状態と主要機能の概要を確認します</text>
+<rect class="btn" x="1010" y="42" width="138" height="44" rx="8"/><text class="text" x="1048" y="70" fill="#fff" font-size="15" font-weight="700">監視開始</text>
+
+<rect class="card" x="260" y="128" width="410" height="150" rx="12"/>
+<rect x="260" y="128" width="410" height="56" rx="12" fill="#f8fafc"/>
+<rect x="286" y="146" width="28" height="28" rx="8" fill="#5f789c"/><text class="text" x="296" y="166" font-size="14" fill="#fff">⌁</text>
+<text class="text" x="326" y="163" font-size="18" font-weight="700">ステータス</text>
+<rect class="pill" x="578" y="146" width="66" height="24" rx="12"/><text class="text small" x="595" y="162" fill="#667085">停止中</text>
+<text class="text sub" x="286" y="222">接続デバイス</text>
+<text class="text" x="604" y="222" font-size="18" text-anchor="end">1 台</text>
+
+<line x1="286" y1="266" x2="644" y2="266" stroke="#e5e7eb"/>
+<circle cx="292" cy="282" r="3" fill="#8da0bd"/><text class="text sub" x="304" y="286">KeyboardA</text>
+
+<rect class="card" x="700" y="128" width="410" height="150" rx="12"/><rect x="700" y="128" width="410" height="56" rx="12" fill="#f8fafc"/><text class="text" x="756" y="163" font-size="18" font-weight="700">レイヤールール</text><rect x="1032" y="148" width="48" height="24" rx="12" fill="#5f789c"/><circle cx="1066" cy="160" r="10" fill="#fff"/><text class="text sub" x="726" y="214">現在のアプリ</text><text class="text" x="1012" y="214" font-size="18" text-anchor="end">Code.exe</text><text class="text sub" x="726" y="246">送信レイヤー</text><text class="text" x="1044" y="246" font-size="18" text-anchor="end">L1</text>
+
+<rect class="card" x="260" y="310" width="410" height="150" rx="12"/><rect x="260" y="310" width="410" height="56" rx="12" fill="#f8fafc"/><text class="text" x="316" y="345" font-size="18" font-weight="700">時刻同期</text><rect x="592" y="330" width="48" height="24" rx="12" fill="#5f789c"/><circle cx="626" cy="342" r="10" fill="#fff"/><text class="text sub" x="286" y="396">同期間隔</text><text class="text" x="604" y="396" font-size="18" text-anchor="end">60秒</text><text class="text sub" x="286" y="428">表示形式</text><text class="text" x="604" y="428" font-size="18" text-anchor="end">24時間</text>
+
+<rect class="card" x="700" y="310" width="410" height="150" rx="12"/><rect x="700" y="310" width="410" height="56" rx="12" fill="#f8fafc"/><text class="text" x="756" y="345" font-size="18" font-weight="700">AI 使用量</text><rect x="1032" y="330" width="48" height="24" rx="12" fill="#5f789c"/><circle cx="1066" cy="342" r="10" fill="#fff"/><text class="text sub" x="726" y="396">Codex</text><rect class="barbg" x="726" y="412" width="330" height="9" rx="4"/><rect class="barok" x="726" y="412" width="145" height="9" rx="4"/><text class="text sub" x="1064" y="400" text-anchor="end">44.00%</text><text class="text sub" x="726" y="444">Claude Code</text><text class="text sub" x="1064" y="444" text-anchor="end">no data</text>
+
+<rect class="card" x="260" y="492" width="850" height="132" rx="12"/><text class="text" x="286" y="530" font-size="18" font-weight="700">直近ログ</text><text class="text sub" x="286" y="568">22:10 KeyboardA verified</text><text class="text sub" x="520" y="568">22:11 APP_LAYER sent: L1</text><text class="text sub" x="760" y="568">22:12 AI_USAGE sent</text>
+</svg>

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -15,6 +16,7 @@ pub struct AppConfig {
     pub layer_switch: LayerSwitchConfig,
     pub time: TimeConfig,
     pub ai_usage: AiUsageConfig,
+    pub studio: StudioConfig,
 }
 
 impl Default for AppConfig {
@@ -25,6 +27,7 @@ impl Default for AppConfig {
             layer_switch: LayerSwitchConfig::default(),
             time: TimeConfig::default(),
             ai_usage: AiUsageConfig::default(),
+            studio: StudioConfig::default(),
         }
     }
 }
@@ -47,6 +50,7 @@ pub struct HidConfig {
     pub usage_page: u16,
     pub usage: u16,
     pub hello_timeout_ms: i32,
+    pub rescan_interval_sec: u64,
 }
 
 impl Default for HidConfig {
@@ -55,23 +59,76 @@ impl Default for HidConfig {
             usage_page: 0xFF60,
             usage: 0x61,
             hello_timeout_ms: 200,
+            rescan_interval_sec: 5,
         }
     }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
+pub struct StudioConfig {
+    pub probe_timeout_ms: u64,
+    pub keymap_read_timeout_ms: u64,
+}
+
+impl Default for StudioConfig {
+    fn default() -> Self {
+        Self {
+            probe_timeout_ms: 1000,
+            keymap_read_timeout_ms: 8000,
+        }
+    }
+}
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
 pub struct LayerSwitchConfig {
     pub enabled: bool,
+    pub unmatched_action: UnmatchedAction,
     pub rules: Vec<RuleConfig>,
+    pub devices: BTreeMap<String, DeviceLayerSwitchConfig>,
 }
 
 impl Default for LayerSwitchConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            unmatched_action: UnmatchedAction::ClearManaged,
             rules: Vec::new(),
+            devices: BTreeMap::new(),
         }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DeviceLayerSwitchConfig {
+    pub display_name: Option<String>,
+    pub enabled: bool,
+    pub rules: Vec<RuleConfig>,
+    pub unmatched_action: Option<UnmatchedAction>,
+}
+
+impl Default for DeviceLayerSwitchConfig {
+    fn default() -> Self {
+        Self {
+            display_name: None,
+            enabled: true,
+            rules: Vec::new(),
+            unmatched_action: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UnmatchedAction {
+    ClearManaged,
+    Keep,
+}
+
+impl Default for UnmatchedAction {
+    fn default() -> Self {
+        Self::ClearManaged
     }
 }
 
@@ -149,6 +206,9 @@ impl Default for CodexAiUsageConfig {
 pub struct ClaudeCodeAiUsageConfig {
     pub enabled: bool,
     pub credentials_path: Option<String>,
+    pub credentials_auto_detect: bool,
+    pub include_wsl_credentials: bool,
+    pub extra_credentials_paths: Vec<String>,
     pub api_timeout_sec: u64,
 }
 
@@ -157,6 +217,9 @@ impl Default for ClaudeCodeAiUsageConfig {
         Self {
             enabled: true,
             credentials_path: None,
+            credentials_auto_detect: true,
+            include_wsl_credentials: true,
+            extra_credentials_paths: Vec::new(),
             api_timeout_sec: 10,
         }
     }
@@ -317,9 +380,15 @@ interval_ms = 500
 usage_page = 65376 # 0xFF60
 usage = 97         # 0x61
 hello_timeout_ms = 200
+rescan_interval_sec = 5
+
+[studio]
+probe_timeout_ms = 1000
+keymap_read_timeout_ms = 8000
 
 [layer_switch]
 enabled = true
+unmatched_action = "clear_managed"
 
 [[layer_switch.rules]]
 name = "Notepad"
@@ -336,6 +405,17 @@ layer = 2
 #[[layer_switch.rules]]
 #name = "Specific app"
 #path = "C:\\Program Files\\Example\\example.exe"
+#layer = 3
+
+# Device-specific rules are keyed by the stable uid returned in DEVICE_HELLO.
+# If a device entry exists, its rules are used exclusively, even when empty.
+#[layer_switch.devices."uid:7a91c3e4d102ab55"]
+#display_name = "Example Keyboard"
+#enabled = true
+#
+#[[layer_switch.devices."uid:7a91c3e4d102ab55".rules]]
+#name = "VS Code for this device"
+#exe = "Code.exe"
 #layer = 3
 
 [time]
@@ -361,6 +441,9 @@ activity_seven_day_token_baseline = 0
 [ai_usage.claude_code]
 enabled = true
 # credentials_path = "C:\\Users\\<user>\\.claude\\.credentials.json"
+credentials_auto_detect = true
+include_wsl_credentials = true
+extra_credentials_paths = []
 api_timeout_sec = 10
 "#
 }
@@ -406,7 +489,14 @@ mod tests {
         assert_eq!(config.polling.interval_ms, 500);
         assert_eq!(config.hid.usage_page, 0xFF60);
         assert_eq!(config.hid.usage, 0x61);
+        assert_eq!(config.hid.rescan_interval_sec, 5);
+        assert_eq!(config.studio.probe_timeout_ms, 1000);
+        assert_eq!(config.studio.keymap_read_timeout_ms, 8000);
         assert!(config.layer_switch.enabled);
+        assert_eq!(
+            config.layer_switch.unmatched_action,
+            UnmatchedAction::ClearManaged
+        );
         assert_eq!(config.layer_switch.rules.len(), 2);
         assert!(!config.time.enabled);
         assert_eq!(config.time.format_hint, TimeFormatHint::TimeHm);
@@ -416,6 +506,45 @@ mod tests {
         assert!(config.ai_usage.codex.enabled);
     }
 
+    #[test]
+    fn parses_device_layer_switch_config() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[layer_switch]
+enabled = true
+unmatched_action = "clear_managed"
+
+[layer_switch.devices."uid:7a91c3e4d102ab55"]
+display_name = "LotusUni Dongle"
+enabled = true
+
+[[layer_switch.devices."uid:7a91c3e4d102ab55".rules]]
+name = "VS Code"
+exe = "Code.exe"
+layer = 3
+
+[layer_switch.devices."uid:91ac51d6ef0201aa"]
+display_name = "LeftPad"
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.layer_switch.devices.len(), 2);
+        let lotus = config
+            .layer_switch
+            .devices
+            .get("uid:7a91c3e4d102ab55")
+            .unwrap();
+        assert_eq!(lotus.display_name.as_deref(), Some("LotusUni Dongle"));
+        assert_eq!(lotus.rules.len(), 1);
+        let left = config
+            .layer_switch
+            .devices
+            .get("uid:91ac51d6ef0201aa")
+            .unwrap();
+        assert!(left.rules.is_empty());
+    }
     #[test]
     fn parses_time_config() {
         let config: AppConfig = toml::from_str(
@@ -470,6 +599,9 @@ activity_seven_day_token_baseline = 7000
 [ai_usage.claude_code]
 enabled = true
 credentials_path = "C:\\Users\\me\\.claude\\.credentials.json"
+credentials_auto_detect = true
+include_wsl_credentials = true
+extra_credentials_paths = ["C:\\Users\\me\\.claude-alt\\.credentials.json"]
 api_timeout_sec = 5
 "#,
         )
@@ -482,8 +614,25 @@ api_timeout_sec = 5
             1000
         );
         assert_eq!(config.ai_usage.claude_code.api_timeout_sec, 5);
+        assert!(config.ai_usage.claude_code.credentials_auto_detect);
+        assert!(config.ai_usage.claude_code.include_wsl_credentials);
+        assert_eq!(config.ai_usage.claude_code.extra_credentials_paths.len(), 1);
     }
 
+    #[test]
+    fn parses_studio_config() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[studio]
+probe_timeout_ms = 250
+keymap_read_timeout_ms = 5000
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.studio.probe_timeout_ms, 250);
+        assert_eq!(config.studio.keymap_read_timeout_ms, 5000);
+    }
     #[test]
     fn explicit_path_is_selected_even_when_missing() {
         let paths = ConfigPaths {

@@ -2,15 +2,15 @@ import { useEffect, useState } from "react";
 import {
   AlertCircle,
   ChevronRight,
-  FolderOpen,
   RefreshCcw,
   RotateCcw,
   Save,
 } from "lucide-react";
 import claudeCodeIcon from "../assets/claude_code_icon_transparent.png";
 import codexIcon from "../assets/codex_icon_transparent.png";
-import { refreshAiUsage, saveConfig, showConfigFileLocation } from "../api";
+import { refreshAiUsage, saveConfig } from "../api";
 import { Toggle } from "../components/Toggle";
+import { ErrorNotice, PageHeader, PrimaryButton, SecondaryButton, SettingRow } from "../components/Ui";
 import { useLang, type TranslationKey } from "../i18n";
 import type { AiUsageProviderStatus, AppConfig, MonitorStatus } from "../types";
 
@@ -26,7 +26,6 @@ export default function AiUsage({ config, setConfig, status }: Props) {
   const { t } = useLang();
   const [draft, setDraft] = useState(config);
   const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -48,7 +47,6 @@ export default function AiUsage({ config, setConfig, status }: Props) {
 
   const handleSave = async () => {
     setSaving(true);
-    setSaved(false);
     setError(null);
     setMessage(null);
     setPendingRefreshSignature(null);
@@ -56,8 +54,6 @@ export default function AiUsage({ config, setConfig, status }: Props) {
       const updated = { ...config, ai_usage: draft.ai_usage };
       await saveConfig(updated);
       setConfig(updated);
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
     } catch (e) {
       setError(String(e));
     } finally {
@@ -90,81 +86,52 @@ export default function AiUsage({ config, setConfig, status }: Props) {
     }
   };
 
-  const handleShowConfig = async () => {
-    setError(null);
-    setMessage(null);
-    setPendingRefreshSignature(null);
-    try {
-      const result = await showConfigFileLocation();
-      setMessage(
-        result.revealed
-          ? t("ai_usage.config.revealed", { path: result.path })
-          : t("ai_usage.config.location", { path: result.path })
-      );
-    } catch (e) {
-      setError(String(e));
-    }
-  };
-
   const statusFor = (provider: ProviderName) =>
     status.ai_usage.find((item) => item.provider === provider) ?? null;
 
   return (
     <div className="mx-auto max-w-2xl space-y-5 p-6">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-semibold text-gray-800">{t("ai_usage.title")}</h1>
-          <p className="mt-0.5 text-sm text-gray-500">{t("ai_usage.subtitle")}</p>
-        </div>
-        <div className="flex items-center gap-2">
-          <button
-            onClick={handleRefresh}
-            disabled={refreshing || !status.running}
-            className="flex items-center gap-2 rounded-lg border border-border bg-white px-4 py-2.5 text-sm font-medium text-gray-600 hover:bg-panel disabled:cursor-not-allowed disabled:opacity-45 transition-colors"
-          >
-            {refreshing ? (
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-gray-300 border-t-primary" />
-            ) : (
-              <RefreshCcw size={15} />
-            )}
-            {refreshing ? t("ai_usage.refreshing") : t("ai_usage.refresh")}
-          </button>
-          <button
-            onClick={handleSave}
-            disabled={saving || !isDirty}
-            className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-white hover:bg-primary-dark disabled:opacity-50 transition-colors"
-          >
-            {saving ? (
-              <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
-            ) : (
-              <Save size={15} />
-            )}
-            {saved ? t("ai_usage.saved") : t("ai_usage.save")}
-          </button>
-        </div>
-      </div>
+      <PageHeader
+        title={t("ai_usage.title")}
+        description={t("ai_usage.subtitle")}
+        actions={
+          <>
+            <SecondaryButton
+              onClick={handleRefresh}
+              loading={refreshing}
+              icon={<RefreshCcw size={15} />}
+            >
+              {refreshing ? t("ai_usage.refreshing") : t("ai_usage.refresh")}
+            </SecondaryButton>
+            <PrimaryButton
+              onClick={handleSave}
+              disabled={!isDirty}
+              loading={saving}
+              icon={<Save size={15} />}
+            >
+              {t("ai_usage.save")}
+            </PrimaryButton>
+          </>
+        }
+      />
 
-      {!status.running && <Notice tone="warn">{t("ai_usage.not_running.banner")}</Notice>}
       {message && <Notice tone="info">{message}</Notice>}
-      {error && <Notice tone="error">{error}</Notice>}
+      {error && <ErrorNotice message={error} />}
 
       <BasicSettings
         draft={draft}
         updateAiUsage={updateAiUsage}
-        onShowConfig={handleShowConfig}
       />
 
       <ProviderCard
         provider="codex"
         status={statusFor("codex")}
-        running={status.running}
         draft={draft}
         updateAiUsage={updateAiUsage}
       />
       <ProviderCard
         provider="claude_code"
         status={statusFor("claude_code")}
-        running={status.running}
         draft={draft}
         updateAiUsage={updateAiUsage}
       />
@@ -175,11 +142,9 @@ export default function AiUsage({ config, setConfig, status }: Props) {
 function BasicSettings({
   draft,
   updateAiUsage,
-  onShowConfig,
 }: {
   draft: AppConfig;
   updateAiUsage: (ai_usage: AppConfig["ai_usage"]) => void;
-  onShowConfig: () => void;
 }) {
   const { t } = useLang();
   return (
@@ -209,18 +174,6 @@ function BasicSettings({
           unit="sec"
           onChange={(stale_after_sec) => updateAiUsage({ ...draft.ai_usage, stale_after_sec })}
         />
-        <SettingRow
-          label={t("ai_usage.config_file")}
-          description={t("ai_usage.config_file.desc")}
-        >
-          <button
-            onClick={onShowConfig}
-            className="flex items-center gap-1.5 rounded-lg border border-border bg-white px-3 py-1.5 text-xs font-medium text-gray-600 hover:bg-panel"
-          >
-            <FolderOpen size={12} />
-            {t("ai_usage.config_file.show")}
-          </button>
-        </SettingRow>
       </div>
     </div>
   );
@@ -229,13 +182,11 @@ function BasicSettings({
 function ProviderCard({
   provider,
   status,
-  running,
   draft,
   updateAiUsage,
 }: {
   provider: ProviderName;
   status: AiUsageProviderStatus | null;
-  running: boolean;
   draft: AppConfig;
   updateAiUsage: (ai_usage: AppConfig["ai_usage"]) => void;
 }) {
@@ -291,41 +242,35 @@ function ProviderCard({
         </p>
       </div>
 
-      {running ? (
-        <div className="space-y-3.5 px-5 py-3">
-          <UsageMetric
-            label={t("ai_usage.window.5h.used")}
-            status={status}
-            window="five_hour"
-            accent={accent}
-          />
-          <UsageMetric
-            label={t("ai_usage.window.7d.used")}
-            status={status}
-            window="seven_day"
-            accent={accent}
-          />
-          {status?.error_present && (
-            <div className="flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2.5 text-[11px] text-amber-800 ring-1 ring-amber-200">
-              <AlertCircle size={12} className="mt-0.5 flex-shrink-0 text-amber-600" />
-              <span>
-                {t("ai_usage.error.fixed", {
-                  code: errorCodeLabel(status.last_error_code, t),
-                })}
-              </span>
-            </div>
-          )}
-          {status?.estimated && (
-            <div className="rounded-lg bg-amber-50 px-3 py-2 text-[11px] text-amber-700 ring-1 ring-amber-100">
-              {t("ai_usage.estimate.note")}
-            </div>
-          )}
-        </div>
-      ) : (
-        <div className="px-5 py-4">
-          <p className="text-sm italic text-gray-400">{t("ai_usage.not_running")}</p>
-        </div>
-      )}
+      <div className="space-y-3.5 px-5 py-3">
+        <UsageMetric
+          label={t("ai_usage.window.5h.used")}
+          status={status}
+          window="five_hour"
+          accent={accent}
+        />
+        <UsageMetric
+          label={t("ai_usage.window.7d.used")}
+          status={status}
+          window="seven_day"
+          accent={accent}
+        />
+        {status?.error_present && (
+          <div className="flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2.5 text-[11px] text-amber-800 ring-1 ring-amber-200">
+            <AlertCircle size={12} className="mt-0.5 flex-shrink-0 text-amber-600" />
+            <span>
+              {t("ai_usage.error.fixed", {
+                code: errorCodeLabel(status.last_error_code, t),
+              })}
+            </span>
+          </div>
+        )}
+        {status?.estimated && (
+          <div className="rounded-lg bg-amber-50 px-3 py-2 text-[11px] text-amber-700 ring-1 ring-amber-100">
+            {t("ai_usage.estimate.note")}
+          </div>
+        )}
+      </div>
 
       <div className="border-t border-panel">
         <button
@@ -470,6 +415,54 @@ function ClaudeAdvanced({
           })
         }
       />
+      <SettingRow
+        compact
+        label={t("ai_usage.claude.auto_detect")}
+        description={t("ai_usage.claude.auto_detect.desc")}
+      >
+        <Toggle
+          checked={draft.ai_usage.claude_code.credentials_auto_detect}
+          onChange={(credentials_auto_detect) =>
+            updateAiUsage({
+              ...draft.ai_usage,
+              claude_code: { ...draft.ai_usage.claude_code, credentials_auto_detect },
+            })
+          }
+        />
+      </SettingRow>
+      <SettingRow
+        compact
+        label={t("ai_usage.claude.include_wsl")}
+        description={t("ai_usage.claude.include_wsl.desc")}
+      >
+        <Toggle
+          checked={draft.ai_usage.claude_code.include_wsl_credentials}
+          onChange={(include_wsl_credentials) =>
+            updateAiUsage({
+              ...draft.ai_usage,
+              claude_code: { ...draft.ai_usage.claude_code, include_wsl_credentials },
+            })
+          }
+        />
+      </SettingRow>
+      <TextAreaRow
+        label={t("ai_usage.claude.extra_paths")}
+        description={t("ai_usage.claude.extra_paths.desc")}
+        value={draft.ai_usage.claude_code.extra_credentials_paths.join("\n")}
+        placeholder="C:\\Users\\<user>\\.claude-alt\\.credentials.json"
+        onChange={(value) =>
+          updateAiUsage({
+            ...draft.ai_usage,
+            claude_code: {
+              ...draft.ai_usage.claude_code,
+              extra_credentials_paths: value
+                .split("\n")
+                .map((line) => line.trim())
+                .filter(Boolean),
+            },
+          })
+        }
+      />
       <NumberRow
         compact
         label={t("ai_usage.claude.api_timeout")}
@@ -488,6 +481,30 @@ function ClaudeAdvanced({
   );
 }
 
+function TextAreaRow({
+  label,
+  description,
+  value,
+  placeholder,
+  onChange,
+}: {
+  label: string;
+  description: string;
+  value: string;
+  placeholder: string;
+  onChange: (value: string) => void;
+}) {
+  return (
+    <SettingRow compact align="start" label={label} description={description}>
+      <textarea
+        className="h-20 w-56 resize-none rounded-lg border border-border bg-background px-2.5 py-1.5 font-mono text-xs text-gray-700 placeholder:text-gray-300"
+        value={value}
+        placeholder={placeholder}
+        onChange={(e) => onChange(e.target.value)}
+      />
+    </SettingRow>
+  );
+}
 function UsageMetric({
   label,
   status,
@@ -553,28 +570,6 @@ function ProviderIcon({ provider, small = false }: { provider: ProviderName; sma
   );
 }
 
-function SettingRow({
-  label,
-  description,
-  children,
-  compact = false,
-}: {
-  label: string;
-  description: string;
-  children: React.ReactNode;
-  compact?: boolean;
-}) {
-  return (
-    <div className={`flex items-center justify-between gap-4 px-5 ${compact ? "py-3" : "py-3.5"}`}>
-      <div className="min-w-0">
-        <div className={`${compact ? "text-xs" : "text-sm"} font-medium text-gray-800`}>{label}</div>
-        <div className="mt-0.5 text-[11px] text-gray-400">{description}</div>
-      </div>
-      <div className="flex-shrink-0">{children}</div>
-    </div>
-  );
-}
-
 function NumberRow({
   label,
   description,
@@ -625,14 +620,7 @@ function PathRow({
 }) {
   const { t } = useLang();
   return (
-    <div className="flex items-start justify-between gap-4 px-5 py-3">
-      <div className="min-w-0 flex-1">
-        <div className="text-xs font-medium text-gray-600">{label}</div>
-        <div className="mt-0.5 text-[11px] text-gray-400">{description}</div>
-        <div className="mt-0.5 text-[11px] text-secondary">
-          {t("ai_usage.example", { path: example })}
-        </div>
-      </div>
+    <SettingRow compact align="start" label={label} description={`${description} / ${t("ai_usage.example", { path: example })}`}>
       <div className="flex flex-shrink-0 items-center gap-2">
         <input
           className="w-40 rounded-lg border border-border bg-background px-2.5 py-1.5 text-right font-mono text-xs text-gray-700 placeholder:text-gray-300"
@@ -649,7 +637,7 @@ function PathRow({
           <RotateCcw size={12} />
         </button>
       </div>
-    </div>
+    </SettingRow>
   );
 }
 
@@ -691,7 +679,12 @@ type TFn = (key: TranslationKey, params?: Record<string, string | number>) => st
 function sourceLabel(status: AiUsageProviderStatus, t: TFn) {
   if (status.provider === "codex" && status.quota_source) return t("ai_usage.source.codex_rate_limits");
   if (status.provider === "codex" && status.local_history_source) return t("ai_usage.source.codex_history");
-  if (status.provider === "claude_code" && status.quota_source) return t("ai_usage.source.claude_oauth");
+  if (status.provider === "claude_code" && status.quota_source) {
+    const credentialSource = status.credential_source
+      ? ` / ${t(`ai_usage.credential_source.${status.credential_source}` as TranslationKey)}`
+      : "";
+    return `${t("ai_usage.source.claude_oauth")}${credentialSource}`;
+  }
   return t("ai_usage.source.none");
 }
 
@@ -740,6 +733,7 @@ function aiUsageStatusSignature(statuses: AiUsageProviderStatus[]) {
         status.seven_day_valid ? "1" : "0",
         status.stale ? "1" : "0",
         status.error_present ? "1" : "0",
+        status.credential_source ?? "",
       ].join(":")
     )
     .sort()

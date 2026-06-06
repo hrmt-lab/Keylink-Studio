@@ -1,9 +1,10 @@
-﻿import {
+import {
   LayoutDashboard,
   List,
   Clock,
   Activity,
   Usb,
+  Keyboard,
   Settings,
   type LucideIcon,
 } from "lucide-react";
@@ -22,6 +23,7 @@ const NAV_ITEMS: NavItem[] = [
   { id: "rules", labelKey: "nav.rules", icon: List },
   { id: "timesync", labelKey: "nav.timesync", icon: Clock },
   { id: "ai_usage", labelKey: "nav.ai_usage", icon: Activity },
+  { id: "keymap_viewer", labelKey: "nav.keymap_viewer", icon: Keyboard },
   { id: "devices", labelKey: "nav.devices", icon: Usb },
   { id: "settings", labelKey: "nav.settings", icon: Settings },
 ];

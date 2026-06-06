@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import type { AppConfig, MonitorStatus, LogEntry, ProbeResult } from "./types";
+import type { AppConfig, MonitorStatus, LogEntry, ProbeResult, StudioDeviceStatus, StudioKeymapSnapshot } from "./types";
 
 export interface ConfigLocationResult {
   path: string;
@@ -36,6 +36,9 @@ export const getRunningApps = () => invoke<RunningApp[]>("get_running_apps");
 // ─── Devices ──────────────────────────────────────────────────────────────────
 
 export const probeDevices = () => invoke<ProbeResult[]>("probe_devices");
+export const probeStudioDevices = () => invoke<StudioDeviceStatus[]>("probe_studio_devices");
+export const readStudioKeymap = (deviceId: string) =>
+  invoke<StudioKeymapSnapshot>("read_studio_keymap", { deviceId });
 
 // ─── Monitoring ───────────────────────────────────────────────────────────────
 

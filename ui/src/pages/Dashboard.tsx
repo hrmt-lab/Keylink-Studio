@@ -2,7 +2,6 @@ import { useState } from "react";
 import {
   Play,
   Square,
-  Keyboard,
   List,
   Clock,
   Activity,
@@ -12,6 +11,7 @@ import {
 } from "lucide-react";
 import { startMonitoring, stopMonitoring, saveConfig } from "../api";
 import { Toggle } from "../components/Toggle";
+import { ErrorNotice } from "../components/Ui";
 import { useLang, type TranslationKey } from "../i18n";
 import type { AppConfig, MonitorStatus, LogEntry, AiUsageProviderStatus } from "../types";
 
@@ -32,40 +32,50 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [featureSaving, setFeatureSaving] = useState(false);
+  const [featureError, setFeatureError] = useState<string | null>(null);
+
+  const saveFeatureConfig = async (updated: AppConfig) => {
+    const previous = config;
+    setActionError(null);
+    setFeatureError(null);
+    setConfig(updated);
+    setFeatureSaving(true);
+    try {
+      await saveConfig(updated);
+    } catch {
+      setConfig(previous);
+      setFeatureError(t("dashboard.save_failed"));
+    } finally {
+      setFeatureSaving(false);
+    }
+  };
 
   const toggleLayerSwitch = async (enabled: boolean) => {
-    const updated = { ...config, layer_switch: { ...config.layer_switch, enabled } };
-    setFeatureSaving(true);
-    try { await saveConfig(updated); setConfig(updated); } finally { setFeatureSaving(false); }
+    await saveFeatureConfig({ ...config, layer_switch: { ...config.layer_switch, enabled } });
   };
 
   const toggleTimeSync = async (enabled: boolean) => {
-    const updated = { ...config, time: { ...config.time, enabled } };
-    setFeatureSaving(true);
-    try { await saveConfig(updated); setConfig(updated); } finally { setFeatureSaving(false); }
+    await saveFeatureConfig({ ...config, time: { ...config.time, enabled } });
   };
 
   const toggleAiUsage = async (enabled: boolean) => {
-    const updated = { ...config, ai_usage: { ...config.ai_usage, enabled } };
-    setFeatureSaving(true);
-    try { await saveConfig(updated); setConfig(updated); } finally { setFeatureSaving(false); }
+    await saveFeatureConfig({ ...config, ai_usage: { ...config.ai_usage, enabled } });
   };
 
   const toggleAiUsageProvider = async (provider: "codex" | "claude_code", enabled: boolean) => {
-    const updated = {
+    await saveFeatureConfig({
       ...config,
       ai_usage: {
         ...config.ai_usage,
         [provider]: { ...config.ai_usage[provider], enabled },
       },
-    };
-    setFeatureSaving(true);
-    try { await saveConfig(updated); setConfig(updated); } finally { setFeatureSaving(false); }
+    });
   };
 
   const handleToggle = async () => {
     setActionLoading(true);
     setActionError(null);
+    setFeatureError(null);
     try {
       if (status.running) {
         await stopMonitoring();
@@ -108,67 +118,8 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
         </button>
       </div>
 
-      {actionError && (
-        <div className="flex items-start gap-2.5 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700 ring-1 ring-red-200">
-          <AlertCircle size={16} className="mt-0.5 flex-shrink-0" />
-          <span>{actionError}</span>
-        </div>
-      )}
-
-      {/* Status Cards */}
-      <div className="grid grid-cols-2 gap-4">
-        {/* Status */}
-        <div className="rounded-xl bg-white px-5 py-4 shadow-card ring-1 ring-border">
-          <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">
-            {t("dashboard.status.label")}
-          </div>
-          <div className="mt-3 flex items-center gap-2.5">
-            <span
-              className={`h-2.5 w-2.5 rounded-full flex-shrink-0 ${
-                status.running
-                  ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.5)]"
-                  : "bg-gray-300"
-              }`}
-            />
-            <span
-              className={`text-lg font-semibold ${
-                status.running ? "text-emerald-600" : "text-gray-400"
-              }`}
-            >
-              {status.running ? t("dashboard.status.running") : t("dashboard.status.stopped")}
-            </span>
-          </div>
-        </div>
-
-        {/* Devices */}
-        <div className="rounded-xl bg-white px-5 py-4 shadow-card ring-1 ring-border">
-          <div className="text-xs font-medium text-gray-400 uppercase tracking-wide">
-            {t("dashboard.devices.label")}
-          </div>
-          <div className="mt-3 flex items-center gap-2">
-            <Keyboard size={20} className="text-primary flex-shrink-0" />
-            <span className="text-lg font-semibold text-gray-800">
-              {status.connected_devices}
-            </span>
-            {t("dashboard.devices.unit") && (
-              <span className="text-sm text-gray-400">{t("dashboard.devices.unit")}</span>
-            )}
-          </div>
-          {status.connected_device_names.length > 0 && (
-            <div className="mt-1.5 space-y-0.5">
-              {status.connected_device_names.map((name, i) => (
-                <div key={i} className="text-[11px] text-gray-400 truncate flex items-center gap-1">
-                  <span className="inline-block h-1 w-1 rounded-full bg-gray-300 flex-shrink-0" />
-                  {name}
-                </div>
-              ))}
-            </div>
-          )}
-          {status.connected_devices === 0 && (
-            <div className="mt-1 text-[11px] text-gray-300">{t("dashboard.devices.none")}</div>
-          )}
-        </div>
-      </div>
+      {actionError && <ErrorNotice message={t("dashboard.error.title")} details={actionError} />}
+      {featureError && <ErrorNotice message={featureError} />}
 
       {/* Error Banner */}
       {status.last_error && (
@@ -183,6 +134,58 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
 
       {/* Feature Summary Cards */}
       <div className="grid grid-cols-2 gap-4">
+
+        {/* Status */}
+        <div className="overflow-hidden rounded-xl bg-white shadow-card ring-1 ring-border">
+          <div className="flex items-center justify-between rounded-t-xl bg-gray-50 px-5 py-3.5">
+            <div className="flex items-center gap-2">
+              <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary text-white">
+                <Activity size={14} />
+              </div>
+              <span className="text-sm font-semibold text-gray-800">{t("dashboard.status.label")}</span>
+            </div>
+            <span
+              className={`rounded-full px-2.5 py-1 text-xs font-medium ${
+                status.running
+                  ? "bg-emerald-100 text-emerald-700"
+                  : "bg-gray-100 text-gray-500"
+              }`}
+            >
+              {status.running ? t("dashboard.status.running") : t("dashboard.status.stopped")}
+            </span>
+          </div>
+
+          <div className="px-5 py-4 space-y-3">
+            <FeatureRow
+              label={t("dashboard.devices.label")}
+              value={
+                t("dashboard.devices.unit")
+                  ? status.connected_devices + " " + t("dashboard.devices.unit")
+                  : String(status.connected_devices)
+              }
+            />
+
+            {status.connected_device_names.length > 0 ? (
+              <div className="space-y-1 border-t border-border/60 pt-2.5">
+                {status.connected_device_names.slice(0, 2).map((name, i) => (
+                  <div key={i} className="flex items-center gap-1.5 truncate text-[11px] text-gray-400">
+                    <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-primary/40" />
+                    <span className="truncate">{name}</span>
+                  </div>
+                ))}
+                {status.connected_device_names.length > 2 && (
+                  <div className="text-[11px] text-gray-400">
+                    {t("dashboard.feature.rules_others", { n: status.connected_device_names.length - 2 })}
+                  </div>
+                )}
+              </div>
+            ) : (
+              <div className="border-t border-border/60 pt-2.5 text-[11px] text-gray-300">
+                {t("dashboard.devices.none")}
+              </div>
+            )}
+          </div>
+        </div>
 
         {/* レイヤー切替 */}
         <div className={`rounded-xl bg-white shadow-card ring-1 transition-all ${

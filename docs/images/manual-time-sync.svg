@@ -1,0 +1,36 @@
+<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='720' viewBox='0 0 1200 720'>
+<defs>
+<style>
+  .bg{fill:#f3f4f6}.side{fill:#5f789c}.card{fill:#fff;stroke:#d7d7d7;stroke-width:1.5}.muted{fill:#8b95a6}.text{fill:#1f2937;font-family:'Segoe UI','Yu Gothic UI',sans-serif}.title{font-size:24px;font-weight:700}.sub{font-size:14px;fill:#667085}.nav{font-size:15px;fill:#e9eef7;font-weight:600}.label{font-size:13px}.small{font-size:11px}.btn{fill:#5f789c}.btn2{fill:#fff;stroke:#d1d5db}.pill{fill:#e5e7eb}.ok{fill:#bff7d7}.key{fill:#fff;stroke:#d1d5db}.panel{fill:#eeeeee;stroke:#d1d5db}.selected{fill:#eef3fa;stroke:#b7c3d7}.ghost{fill:#f1f1f1;stroke:#d0d0d0}.option{fill:#fff;stroke:#d1d5db}.optionSel{fill:#f3f7ff;stroke:#5f789c;stroke-width:1.5}.mono{font-family:'Segoe UI Mono','Consolas',monospace}
+</style>
+</defs>
+<rect class="bg" x="0" y="0" width="1200" height="720"/>
+<rect class="side" x="0" y="0" width="210" height="720"/>
+<rect x="20" y="28" width="48" height="48" rx="12" fill="#6f86a8" stroke="#8da0bd"/>
+<text class="text nav" x="82" y="59">RawHID Host</text>
+<text class="text nav" x="24" y="132">▦  ダッシュボード</text>
+<text class="text nav" x="24" y="174">☰  レイヤールール</text>
+<text class="text nav" x="24" y="216">◷  時刻同期</text>
+<text class="text nav" x="24" y="258">⌁  AI 使用量</text>
+<text class="text nav" x="24" y="300">⌨  キーマップ表示</text>
+<text class="text nav" x="24" y="342">🔧  デバイス</text>
+<text class="text nav" x="24" y="384">⚙  設定</text>
+<circle cx="24" cy="682" r="5" fill="#b7c3d7"/><text class="text nav" x="40" y="688">停止中</text>
+<g transform="translate(350 0)">
+<text class="text title" x="0" y="64">時刻同期</text><text class="text sub" x="0" y="88">キーボードへ時刻情報を送信します</text><rect class="btn" x="540" y="42" width="88" height="44" rx="8"/><text x="570" y="70" fill="#fff" font-size="15" font-weight="700">保存</text>
+<rect class="card" x="0" y="126" width="628" height="456" rx="12"/>
+<line x1="0" y1="194" x2="628" y2="194" stroke="#e5e7eb"/>
+<line x1="0" y1="354" x2="628" y2="354" stroke="#e5e7eb"/>
+<line x1="0" y1="426" x2="628" y2="426" stroke="#e5e7eb"/>
+<line x1="0" y1="498" x2="628" y2="498" stroke="#e5e7eb"/>
+<text class="text label" x="28" y="160" font-weight="700">時刻同期</text><text class="text small" x="28" y="180" fill="#667085">TIME_SYNC packet を送信します</text><rect x="548" y="150" width="48" height="24" rx="12" fill="#5f789c"/><circle cx="582" cy="162" r="10" fill="#fff"/>
+<text class="text label" x="28" y="228" font-weight="700">表示形式</text>
+<rect class="optionSel" x="28" y="246" width="270" height="40" rx="8"/><text class="text small" x="44" y="270" fill="#5f789c">時:分</text><text class="text mono small" x="250" y="270" text-anchor="end" fill="#9ca3af">14:30</text>
+<rect class="option" x="314" y="246" width="270" height="40" rx="8"/><text class="text small" x="330" y="270">時:分:秒</text><text class="text mono small" x="566" y="270" text-anchor="end" fill="#9ca3af">14:30:05</text>
+<rect class="option" x="28" y="296" width="270" height="40" rx="8"/><text class="text small" x="44" y="320">年月日</text><text class="text mono small" x="250" y="320" text-anchor="end" fill="#9ca3af">2025-01-15</text>
+<rect class="option" x="314" y="296" width="270" height="40" rx="8"/><text class="text small" x="330" y="320">月日</text><text class="text mono small" x="566" y="320" text-anchor="end" fill="#9ca3af">01-15</text>
+<text class="text label" x="28" y="390" font-weight="700">時計表示</text><text class="text small" x="28" y="410" fill="#667085">12時間表示に切り替えます</text><rect x="548" y="376" width="48" height="24" rx="12" fill="#cbd5e1"/><circle cx="560" cy="388" r="10" fill="#fff"/>
+<text class="text label" x="28" y="462" font-weight="700">同期間隔</text><text class="text small" x="28" y="482" fill="#667085">定期補正の間隔</text><rect class="btn2" x="464" y="448" width="72" height="34" rx="8"/><text class="text mono" x="516" y="470" font-size="13" text-anchor="end">60</text><text class="text small" x="548" y="470" fill="#667085">秒</text>
+<text class="text label" x="28" y="534" font-weight="700">タイムゾーン</text><text class="text small" x="28" y="554" fill="#667085">空欄なら OS の現在値を使用</text><rect class="btn2" x="436" y="520" width="100" height="34" rx="8"/><text class="text mono" x="520" y="542" font-size="13" text-anchor="end">自動</text><text class="text small" x="548" y="542" fill="#667085">分</text>
+</g>
+</svg>

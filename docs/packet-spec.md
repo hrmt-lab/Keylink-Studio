@@ -157,3 +157,44 @@ Error/status は固定 code として扱います。access token、credentials J
 - `HOST_HELLO` に対して、同じ `seq` の `DEVICE_HELLO` を返してください。
 - `APP_LAYER` は packet type ではなく `action` で set / clear を分岐してください。
 - `AI_USAGE` の history fallback は quota ではありません。`quota_source=0` の reset は表示しないでください。
+
+## Device identity and capabilities
+
+`DEVICE_HELLO` v1 may include stable identity and capability fields. Host uses these fields for per-device feature routing.
+
+```text
+0..1    magic "HL"
+2       protocol_version
+3       type = 0x02 DEVICE_HELLO
+4       protocol_min
+5       protocol_max
+6       reserved zero
+7       seq
+8..11   capabilities u32 LE
+12..19  device_uid_hash u64 LE
+20..31  reserved zero
+```
+
+Validation:
+
+- `seq` must match the preceding `HOST_HELLO`.
+- byte `6` and bytes `20..31` must be zero.
+- `device_uid_hash = 0` is normalized to `None` on the host side.
+- Non-zero `device_uid_hash` is displayed and stored as `uid:<16 lowercase hex digits>`.
+
+Capability bits:
+
+```text
+bit0 = APP_LAYER
+bit1 = TIME_SYNC
+bit2 = AI_USAGE
+bit3 = THEME
+```
+
+RawHID Host does not send `APP_LAYER` packets to a device unless `APP_LAYER` capability is present. The device is still shown as a Host Link device in the Devices page.
+
+### Host behavior for capabilities
+
+The host treats `capabilities` as feature gates. A verified Host Link device remains visible in the Devices page even when a capability is missing, but feature packets are sent only when the relevant capability is present. In v1 this gate is enforced for `APP_LAYER` routing.
+
+`device_uid_hash` is an identity hint, not a transport path. The host serializes non-zero values as `uid:<16 lowercase hex digits>` for config and UI. The value `0` is invalid as an identity and is normalized to `None`.

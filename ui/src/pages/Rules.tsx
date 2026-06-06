@@ -4,12 +4,12 @@ import { saveConfig, getRunningApps, type RunningApp } from "../api";
 import { Toggle } from "../components/Toggle";
 import { LayerBadge } from "../components/LayerBadge";
 import { useLang } from "../i18n";
-import type { AppConfig, RuleConfig } from "../types";
+import type { AppConfig, DeviceInfo, RuleConfig } from "../types";
 
 interface Props {
   config: AppConfig;
   setConfig: (c: AppConfig) => void;
-  status: { running: boolean };
+  status: { running: boolean; host_link_devices: DeviceInfo[] };
 }
 
 // Match priority: exe → path → title
@@ -34,9 +34,12 @@ export default function Rules({ config, setConfig, status }: Props) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [justAdded, setJustAdded] = useState<string | null>(null);
+  const [targetKey, setTargetKey] = useState("global");
 
-  void status;
-  const rules = config.layer_switch.rules;
+  const appLayerDevices = status.host_link_devices.filter(isAppLayerDevice);
+  const deviceTargets = buildDeviceTargets(config, appLayerDevices);
+  const selectedDeviceConfig = targetKey === "global" ? null : config.layer_switch.devices[targetKey];
+  const rules = targetKey === "global" ? config.layer_switch.rules : selectedDeviceConfig?.rules ?? [];
   const maxLayer = 31; // ZMK max layers (0-31)
 
   const loadApps = useCallback(async () => {
@@ -50,12 +53,43 @@ export default function Rules({ config, setConfig, status }: Props) {
 
   useEffect(() => { loadApps(); }, [loadApps]);
 
+  useEffect(() => {
+    if (targetKey !== "global" && !deviceTargets.some((target) => target.key === targetKey)) {
+      setTargetKey("global");
+    }
+  }, [deviceTargets, targetKey]);
+
   const filtered = apps.filter((a) => {
     if (!query) return true;
     const q = query.toLowerCase();
     return a.display_name.toLowerCase().includes(q) || a.exe.toLowerCase().includes(q);
   });
 
+
+  const updateRulesForTarget = (nextRules: RuleConfig[]): AppConfig => {
+    if (targetKey === "global") {
+      return {
+        ...config,
+        layer_switch: { ...config.layer_switch, rules: nextRules },
+      };
+    }
+    const existing = config.layer_switch.devices[targetKey] ?? {
+      display_name: deviceTargets.find((target) => target.key === targetKey)?.label ?? null,
+      enabled: true,
+      rules: [],
+      unmatched_action: null,
+    };
+    return {
+      ...config,
+      layer_switch: {
+        ...config.layer_switch,
+        devices: {
+          ...config.layer_switch.devices,
+          [targetKey]: { ...existing, rules: nextRules },
+        },
+      },
+    };
+  };
   const addRule = async () => {
     if (!selected) return;
     setError(null);
@@ -64,10 +98,7 @@ export default function Rules({ config, setConfig, status }: Props) {
       setError(t("rules.duplicate"));
       return;
     }
-    const updated = {
-      ...config,
-      layer_switch: { ...config.layer_switch, rules: [...rules, newRule] },
-    };
+    const updated = updateRulesForTarget([...rules, newRule]);
     setSaving(true);
     try {
       await saveConfig(updated);
@@ -83,10 +114,7 @@ export default function Rules({ config, setConfig, status }: Props) {
   };
 
   const deleteRule = async (idx: number) => {
-    const updated = {
-      ...config,
-      layer_switch: { ...config.layer_switch, rules: rules.filter((_, i) => i !== idx) },
-    };
+    const updated = updateRulesForTarget(rules.filter((_, i) => i !== idx));
     setSaving(true);
     try {
       await saveConfig(updated);
@@ -114,6 +142,19 @@ export default function Rules({ config, setConfig, status }: Props) {
           <p className="mt-0.5 text-sm text-gray-500">{t("rules.subtitle")}</p>
         </div>
         <div className="flex items-center gap-3">
+          <select
+            value={targetKey}
+            onChange={(e) => { setTargetKey(e.target.value); setSelected(null); setError(null); }}
+            className="input min-w-48 text-sm"
+            title={t("rules.device_target")}
+          >
+            <option value="global">{t("rules.global_fallback")}</option>
+            {deviceTargets.map((device) => (
+              <option key={device.key} value={device.key}>
+                {device.label}
+              </option>
+            ))}
+          </select>
           <span className="text-sm text-gray-600">{t("rules.toggle_label")}</span>
           <Toggle checked={config.layer_switch.enabled} onChange={toggleEnabled} disabled={saving} />
         </div>
@@ -265,7 +306,7 @@ export default function Rules({ config, setConfig, status }: Props) {
             ) : (
               <div className="space-y-2">
                 <p className="mb-3 text-xs font-medium uppercase tracking-wide text-gray-400">
-                  {t("rules.count", { n: rules.length })}
+                  {targetKey === "global" ? t("rules.count", { n: rules.length }) : t("rules.device_count", { n: rules.length })}
                 </p>
                 {rules.map((rule, idx) => (
                   <RuleCard key={idx} rule={rule} onDelete={() => deleteRule(idx)} disabled={saving} />
@@ -281,6 +322,24 @@ export default function Rules({ config, setConfig, status }: Props) {
 
 // ─── Avatar ───────────────────────────────────────────────────────────────────
 
+const APP_LAYER_CAPABILITY = 1 << 0;
+
+function isAppLayerDevice(device: DeviceInfo) {
+  return device.device_uid_hash !== null && (device.capabilities & APP_LAYER_CAPABILITY) !== 0;
+}
+
+function buildDeviceTargets(config: AppConfig, appLayerDevices: DeviceInfo[]) {
+  const targets = new Map<string, { key: string; label: string }>();
+  for (const [key, deviceConfig] of Object.entries(config.layer_switch.devices ?? {})) {
+    targets.set(key, { key, label: deviceConfig.display_name || key });
+  }
+  for (const device of appLayerDevices) {
+    if (!device.device_uid_hash) continue;
+    const label = device.product || device.serial_number || device.device_uid_hash;
+    targets.set(device.device_uid_hash, { key: device.device_uid_hash, label });
+  }
+  return Array.from(targets.values()).sort((a, b) => a.label.localeCompare(b.label));
+}
 const AVATAR_COLORS = [
   "bg-blue-500","bg-violet-500","bg-emerald-500","bg-amber-500","bg-rose-500",
   "bg-cyan-500","bg-orange-500","bg-pink-500","bg-teal-500","bg-indigo-500",

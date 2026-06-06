@@ -23,6 +23,8 @@ pub fn run() {
             commands::get_status,
             commands::get_log_entries,
             commands::probe_devices,
+            commands::probe_studio_devices,
+            commands::read_studio_keymap,
             commands::start_monitoring,
             commands::stop_monitoring,
             commands::refresh_ai_usage,

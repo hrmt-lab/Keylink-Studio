@@ -224,7 +224,8 @@ function KeymapCanvas({ keys, layer }: { keys: StudioPhysicalKey[]; layer: Studi
                 top: y,
                 width,
                 height,
-                transform: key.r ? `rotate(${key.r}deg)` : undefined,
+                // ZMK physical-layout rotation is in 1/100 of a degree.
+                transform: key.r ? `rotate(${key.r / 100}deg)` : undefined,
                 transformOrigin: `${originX}px ${originY}px`,
               }}
             >

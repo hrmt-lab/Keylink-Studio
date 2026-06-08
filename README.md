@@ -162,6 +162,8 @@ Tauri 開発起動:
 
 ## 詳細ドキュメント
 
+- [変更履歴](CHANGELOG.md)
+- [互換性情報](docs/compatibility.md)
 - [セットアップガイド](docs/manual-setup.md)
 - [アプリ操作マニュアル](docs/manual-app-usage.md)
 - [技術スタックと仕組み](docs/technology-overview.md)
@@ -176,7 +178,7 @@ RawHID Host is a Windows host application for ZMK keyboards. It monitors the for
 
 This repository contains the host-side app only. The ZMK firmware side must implement the compatible `HL` packet receiver.
 
-See the documentation under `docs/` for setup, usage, architecture, and packet details.
+See [CHANGELOG.md](CHANGELOG.md), [Compatibility](docs/compatibility.md), and the documentation under `docs/` for setup, usage, architecture, and packet details.
 
 ## Current implementation notes
 

@@ -2,13 +2,17 @@ interface Props {
   checked: boolean;
   onChange: (checked: boolean) => void;
   disabled?: boolean;
+  /** Accessible label describing what the toggle controls. */
+  label?: string;
 }
 
-export function Toggle({ checked, onChange, disabled = false }: Props) {
+export function Toggle({ checked, onChange, disabled = false, label }: Props) {
   return (
     <button
+      type="button"
       role="switch"
       aria-checked={checked}
+      aria-label={label}
       disabled={disabled}
       onClick={() => onChange(!checked)}
       className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors duration-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-primary ${

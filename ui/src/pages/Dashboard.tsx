@@ -11,9 +11,16 @@ import {
 } from "lucide-react";
 import { startMonitoring, stopMonitoring, saveConfig } from "../api";
 import { Toggle } from "../components/Toggle";
-import { ErrorNotice } from "../components/Ui";
+import { ErrorNotice, SavedIndicator } from "../components/Ui";
+import { aiStatusKey, formatClockTime, formatUsedBp, usageBarColor } from "../lib/format";
 import { useLang, type TranslationKey } from "../i18n";
-import type { AppConfig, MonitorStatus, LogEntry, AiUsageProviderStatus } from "../types";
+import type {
+  AppConfig,
+  MonitorStatus,
+  LogEntry,
+  AiUsageProviderStatus,
+  AiUsageStatusKind,
+} from "../types";
 
 interface Props {
   config: AppConfig;
@@ -22,26 +29,25 @@ interface Props {
   logs: LogEntry[];
 }
 
-function formatTime(ms: number) {
-  const d = new Date(ms);
-  return d.toLocaleTimeString("ja-JP", { hour: "2-digit", minute: "2-digit", second: "2-digit" });
-}
-
 export default function Dashboard({ config, setConfig, status, logs }: Props) {
-  const { t } = useLang();
+  const { t, lang } = useLang();
   const [actionLoading, setActionLoading] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [featureSaving, setFeatureSaving] = useState(false);
   const [featureError, setFeatureError] = useState<string | null>(null);
+  const [justSaved, setJustSaved] = useState(false);
 
   const saveFeatureConfig = async (updated: AppConfig) => {
     const previous = config;
     setActionError(null);
     setFeatureError(null);
+    setJustSaved(false);
     setConfig(updated);
     setFeatureSaving(true);
     try {
       await saveConfig(updated);
+      setJustSaved(true);
+      setTimeout(() => setJustSaved(false), 2000);
     } catch {
       setConfig(previous);
       setFeatureError(t("dashboard.save_failed"));
@@ -98,7 +104,9 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
           <h1 className="text-xl font-semibold text-gray-800">{t("dashboard.title")}</h1>
           <p className="text-sm text-gray-500 mt-0.5">{t("dashboard.subtitle")}</p>
         </div>
-        <button
+        <div className="flex items-center gap-3">
+          {justSaved && <SavedIndicator label={t("common.saved")} />}
+          <button
           onClick={handleToggle}
           disabled={actionLoading}
           className={`flex items-center gap-2 rounded-lg px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition-all disabled:opacity-60 ${
@@ -115,7 +123,8 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
             <Play size={15} />
           )}
           {status.running ? t("dashboard.stop") : t("dashboard.start")}
-        </button>
+          </button>
+        </div>
       </div>
 
       {actionError && <ErrorNotice message={t("dashboard.error.title")} details={actionError} />}
@@ -206,6 +215,7 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
               checked={config.layer_switch.enabled}
               onChange={toggleLayerSwitch}
               disabled={featureSaving}
+              label={t("dashboard.layer_switch")}
             />
           </div>
 
@@ -270,6 +280,7 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
               checked={config.time.enabled}
               onChange={toggleTimeSync}
               disabled={featureSaving}
+              label={t("dashboard.timesync")}
             />
           </div>
 
@@ -324,6 +335,7 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
               checked={config.ai_usage.enabled}
               onChange={toggleAiUsage}
               disabled={featureSaving}
+              label={t("dashboard.ai_usage")}
             />
           </div>
 
@@ -399,7 +411,7 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
                     <span className="text-sm text-gray-700">{entry.message}</span>
                   </div>
                   <span className="flex-shrink-0 text-[11px] text-gray-400 font-mono">
-                    {formatTime(entry.timestamp_ms)}
+                    {formatClockTime(entry.timestamp_ms, lang)}
                   </span>
                 </li>
               ))}
@@ -441,7 +453,7 @@ function MiniUsage({ label, valid, bp }: { label: string; valid: boolean; bp: nu
       </div>
       <div className="mt-1 h-1.5 rounded-full bg-gray-200">
         <div
-          className={`h-1.5 rounded-full ${usageBarColor(bp ?? 0, valid)}`}
+          className={`h-1.5 rounded-full transition-all duration-500 ${usageBarColor(bp ?? 0, valid)}`}
           style={{ width: valid && bp !== null ? `${Math.min(bp / 100, 100)}%` : "0%" }}
         />
       </div>
@@ -463,7 +475,7 @@ function ProviderToggle({
   return (
     <div className="flex items-center justify-between rounded-lg bg-background px-3 py-2">
       <span className="text-xs font-medium text-gray-600">{label}</span>
-      <Toggle checked={checked} onChange={onChange} disabled={disabled} />
+      <Toggle checked={checked} onChange={onChange} disabled={disabled} label={label} />
     </div>
   );
 }
@@ -474,19 +486,8 @@ function providerLabel(provider: string) {
   return provider;
 }
 
-function aiStatusLabel(status: string, t: TFn) {
-  return t(`ai_usage.status.${status}` as TranslationKey);
-}
-
-function formatUsedBp(bp: number) {
-  return `${(bp / 100).toFixed(2)}%`;
-}
-
-function usageBarColor(bp: number, valid: boolean) {
-  if (!valid) return "bg-gray-300";
-  if (bp >= 9000) return "bg-red-500";
-  if (bp >= 8000) return "bg-orange-400";
-  return "bg-primary";
+function aiStatusLabel(status: AiUsageStatusKind, t: TFn) {
+  return t(aiStatusKey(status));
 }
 
 function FeatureRow({ label, value, warn = false }: { label: string; value: string; warn?: boolean }) {

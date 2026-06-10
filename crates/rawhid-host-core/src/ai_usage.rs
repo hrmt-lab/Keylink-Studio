@@ -1,6 +1,7 @@
 use std::{
     collections::HashSet,
     fs,
+    io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
     process::Command,
     sync::{
@@ -24,6 +25,10 @@ const SEVEN_DAY_MINUTES: u64 = 10_080;
 const FIVE_HOUR_SECONDS: u64 = FIVE_HOUR_MINUTES * 60;
 const SEVEN_DAY_SECONDS: u64 = SEVEN_DAY_MINUTES * 60;
 const CLAUDE_USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
+/// Cap how much of each session JSONL file is read per poll. Codex session logs
+/// can grow large; the entries we care about (latest rate_limits, recent token
+/// usage) live near the end, so we read at most the trailing window of bytes.
+const MAX_SESSION_READ_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -459,7 +464,7 @@ fn collect_codex(config: &CodexAiUsageConfig) -> AiUsageSnapshot {
 
 fn codex_rate_limits_snapshot(sessions_dir: &Path) -> Option<AiUsageSnapshot> {
     for path in sorted_jsonl_files(sessions_dir) {
-        let Ok(text) = fs::read_to_string(&path) else {
+        let Some(text) = read_session_text(&path) else {
             continue;
         };
         for line in text.lines().rev() {
@@ -472,30 +477,17 @@ fn codex_rate_limits_snapshot(sessions_dir: &Path) -> Option<AiUsageSnapshot> {
             let Some(rate_limits) = value.pointer("/payload/rate_limits") else {
                 continue;
             };
-            let five_hour = rate_limit_window(rate_limits.get("primary"))
-                .or_else(|| rate_limit_window(rate_limits.get("secondary")))
-                .filter(|window| window.0 == FIVE_HOUR_MINUTES)
-                .map(|(_, window)| window);
-            let seven_day = rate_limit_window(rate_limits.get("primary"))
-                .or_else(|| rate_limit_window(rate_limits.get("secondary")))
-                .filter(|window| window.0 == SEVEN_DAY_MINUTES)
-                .map(|(_, window)| window);
             let primary = rate_limit_window(rate_limits.get("primary"));
             let secondary = rate_limit_window(rate_limits.get("secondary"));
-            let five_hour = five_hour.or_else(|| {
-                [primary.clone(), secondary.clone()]
+            let window_for = |minutes: u64| -> Option<AiUsageWindow> {
+                [primary.as_ref(), secondary.as_ref()]
                     .into_iter()
                     .flatten()
-                    .find(|(minutes, _)| *minutes == FIVE_HOUR_MINUTES)
-                    .map(|(_, window)| window)
-            });
-            let seven_day = seven_day.or_else(|| {
-                [primary, secondary]
-                    .into_iter()
-                    .flatten()
-                    .find(|(minutes, _)| *minutes == SEVEN_DAY_MINUTES)
-                    .map(|(_, window)| window)
-            });
+                    .find(|(window_minutes, _)| *window_minutes == minutes)
+                    .map(|(_, window)| window.clone())
+            };
+            let five_hour = window_for(FIVE_HOUR_MINUTES);
+            let seven_day = window_for(SEVEN_DAY_MINUTES);
             if five_hour.is_some() || seven_day.is_some() {
                 return Some(AiUsageSnapshot {
                     provider: AiUsageProvider::Codex,
@@ -595,7 +587,7 @@ struct TokenEvent {
 fn codex_token_events(sessions_dir: &Path) -> Vec<TokenEvent> {
     let mut events = Vec::new();
     for path in sorted_jsonl_files(sessions_dir).into_iter().rev() {
-        let Ok(text) = fs::read_to_string(&path) else {
+        let Some(text) = read_session_text(&path) else {
             continue;
         };
         let mut previous_total: Option<u64> = None;
@@ -1012,6 +1004,25 @@ fn parse_reset_unix(value: &Value) -> Option<u32> {
         return u32::try_from(seconds).ok();
     }
     u32::try_from(parse_rfc3339_unix(text)?).ok()
+}
+
+/// Read a session JSONL file, capping the read at `MAX_SESSION_READ_BYTES`.
+/// For oversized files only the trailing window is read and the first
+/// (likely partial) line is dropped so JSON parsing stays valid.
+fn read_session_text(path: &Path) -> Option<String> {
+    let mut file = fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    if len <= MAX_SESSION_READ_BYTES {
+        return fs::read_to_string(path).ok();
+    }
+    file.seek(SeekFrom::Start(len - MAX_SESSION_READ_BYTES)).ok()?;
+    let mut buf = Vec::with_capacity(MAX_SESSION_READ_BYTES as usize);
+    file.take(MAX_SESSION_READ_BYTES).read_to_end(&mut buf).ok()?;
+    let text = String::from_utf8_lossy(&buf).into_owned();
+    Some(match text.find('\n') {
+        Some(idx) => text[idx + 1..].to_string(),
+        None => text,
+    })
 }
 
 fn sorted_jsonl_files(root: &Path) -> Vec<PathBuf> {

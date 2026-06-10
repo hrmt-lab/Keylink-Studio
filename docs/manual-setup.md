@@ -104,6 +104,9 @@ Tauri debug build では、プロジェクトルートの `rawhid-host.toml` を
 設定例:
 
 ```toml
+[app]
+start_monitoring_on_launch = false
+
 [polling]
 interval_ms = 500
 
@@ -179,6 +182,8 @@ Thumbs.db
 
 ## Current implementation notes
 
+- `[app] start_monitoring_on_launch = true` starts monitoring automatically when the app launches. Combined with the Settings "launch at login" toggle (HKCU Run registry key), monitoring can start automatically after Windows login.
+- The app is single-instance. A second launch focuses the existing window instead of starting another process.
 - Add `hid.rescan_interval_sec` to configure Host Link HID rescan while monitoring is running. The default is 5 seconds.
 - AI Usage collection runs independently from monitoring. Raw HID sending still requires monitoring.
 - Claude Code credentials auto-detect supports Windows default, WSL default, and extra credentials paths. Refresh token updates are not implemented in v1.

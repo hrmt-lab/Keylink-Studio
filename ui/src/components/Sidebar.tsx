@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from "react";
 import {
   LayoutDashboard,
   List,
@@ -36,6 +37,18 @@ interface Props {
 
 export function Sidebar({ currentPage, onNavigate, status }: Props) {
   const { lang, setLang, t } = useLang();
+
+  // Pulse the status dot briefly whenever the active layer changes.
+  const [pulse, setPulse] = useState(false);
+  const prevLayer = useRef(status.current_layer);
+  useEffect(() => {
+    if (status.current_layer === prevLayer.current) return;
+    prevLayer.current = status.current_layer;
+    if (status.current_layer === null) return;
+    setPulse(true);
+    const timer = setTimeout(() => setPulse(false), 900);
+    return () => clearTimeout(timer);
+  }, [status.current_layer]);
 
   return (
     <aside className="flex w-60 flex-col bg-primary text-white select-none flex-shrink-0">
@@ -86,7 +99,7 @@ export function Sidebar({ currentPage, onNavigate, status }: Props) {
               status.running
                 ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]"
                 : "bg-white/30"
-            }`}
+            } ${pulse ? "animate-layer-pulse" : ""}`}
           />
           <div className="min-w-0">
             <div className="text-xs font-medium text-white/80 truncate">

@@ -1,4 +1,4 @@
-import { AlertCircle } from "lucide-react";
+import { AlertCircle, Check } from "lucide-react";
 import type { ReactNode } from "react";
 
 export function PageHeader({
@@ -96,6 +96,37 @@ export function ErrorNotice({
         {details && <div className="mt-0.5 break-words text-red-600">{details}</div>}
       </div>
     </div>
+  );
+}
+
+export function Notice({
+  tone = "info",
+  children,
+}: {
+  tone?: "info" | "warn" | "error";
+  children: ReactNode;
+}) {
+  const color =
+    tone === "error"
+      ? "bg-red-50 text-red-700 ring-red-200"
+      : tone === "warn"
+        ? "bg-amber-50 text-amber-800 ring-amber-200"
+        : "bg-blue-50 text-blue-700 ring-blue-200";
+  return (
+    <div className={`flex items-start gap-2.5 rounded-lg px-4 py-3 text-sm ring-1 ${color}`}>
+      <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
+      <span>{children}</span>
+    </div>
+  );
+}
+
+/** Transient "saved" pill used for auto-saving flows. */
+export function SavedIndicator({ label }: { label: string }) {
+  return (
+    <span className="flex items-center gap-1 text-xs font-medium text-emerald-600">
+      <Check size={13} className="flex-shrink-0" />
+      {label}
+    </span>
   );
 }
 

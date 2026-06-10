@@ -33,6 +33,15 @@ export interface RunningApp {
 
 export const getRunningApps = () => invoke<RunningApp[]>("get_running_apps");
 
+export const getAppIcons = (paths: string[]) =>
+  invoke<Record<string, string>>("get_app_icons", { paths });
+
+// ─── Startup ──────────────────────────────────────────────────────────────────
+
+export const getLaunchAtLogin = () => invoke<boolean>("get_launch_at_login");
+export const setLaunchAtLogin = (enabled: boolean) =>
+  invoke<void>("set_launch_at_login", { enabled });
+
 // ─── Devices ──────────────────────────────────────────────────────────────────
 
 export const probeDevices = () => invoke<ProbeResult[]>("probe_devices");

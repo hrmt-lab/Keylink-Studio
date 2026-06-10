@@ -63,6 +63,8 @@ pub struct AppState {
 pub enum MonitorCommand {
     Stop,
     UpdateConfig(AppConfig, Option<AiUsageShared>),
+    /// The OS foreground window changed; wake the loop to re-evaluate immediately.
+    ForegroundChanged,
 }
 
 impl AppState {

@@ -83,6 +83,21 @@ crates/
 
 core は GUI に依存しないため、CLI からも同じ仕組みを使えます。
 
+### `rawhid-host-tauri`
+
+GUI アプリとして動かすための Rust 側です。Windows 固有の処理もここにあります。
+
+| File | Role |
+| --- | --- |
+| `src/commands.rs` | UI から呼ばれる Tauri command と監視 thread |
+| `src/foreground.rs` | 前面アプリ切り替えの即時検知 (WinEventHook) |
+| `src/icon.rs` | 実行ファイルからのアプリアイコン抽出 |
+| `src/startup.rs` | Windows ログイン時起動のレジストリ管理 |
+| `src/state.rs` | アプリ全体の共有状態と監視 thread への command |
+| `src/lib.rs` | アプリ起動、システムトレイ、シングルインスタンス |
+
+`foreground.rs` / `icon.rs` / `startup.rs` は Windows 専用で、他 OS では何もしないスタブになります。
+
 ### `rawhid-host-cli`
 
 GUI なしで確認するための入口です。
@@ -106,10 +121,17 @@ React はアプリの画面を作るために使っています。TypeScript は
 | `Rules.tsx` | アプリごとの layer rule 設定 |
 | `TimeSync.tsx` | 時刻同期設定 |
 | `AiUsage.tsx` | Codex / Claude Code 使用量設定と状態表示 |
+| `KeymapViewer.tsx` | ZMK Studio キーマップの表示専用ビューア |
 | `Devices.tsx` | Raw HID device scan と HELLO 結果 |
-| `Settings.tsx` | polling / HID 基本設定 |
+| `Settings.tsx` | アプリ起動 / polling / HID 基本設定 |
 
 `ui/src/i18n.tsx` に日本語 / 英語の表示文言があります。新しい UI 文言を追加する場合は、ここに両言語分を追加します。
+
+ページをまたいで使う処理は次の場所にあります。
+
+- `ui/src/lib/format.ts`: 使用率や時刻などの表示フォーマット関数
+- `ui/src/hooks/useConfigSection.ts`: 設定ページ共通の draft / 保存処理 hook
+- `ui/src/components/Ui.tsx`: ボタン、カード、通知などの共通 UI 部品
 
 ## Tauri: UI と Rust をつなぐ部分
 
@@ -178,7 +200,7 @@ byte layout は [Packet Specification](packet-spec.md) にあります。
 
 ```mermaid
 flowchart TD
-    A["監視開始"] --> B["一定間隔で前面アプリを確認"]
+    A["監視開始"] --> B["前面アプリの切り替えを即時検知<br>(フォールバック: 一定間隔で確認)"]
     B --> C["例: notepad.exe を検出"]
     C --> D["設定内の rule と一致"]
     D --> E["APP_LAYER set packet を作成"]
@@ -241,7 +263,12 @@ The ZMK firmware side is not included in this repository. It must implement the 
 
 ## Current implementation notes
 
-- `ui/src/components/Ui.tsx` contains shared UI primitives such as page headers, primary/secondary buttons, setting rows, section cards, and error notices.
+- Foreground app changes are detected instantly via `SetWinEventHook` (`foreground.rs`). Interval polling remains as a fallback.
+- App icons shown in Layer Rules are extracted from exe files via the Windows Shell API (`icon.rs`) and delivered to the UI as PNG data URLs.
+- Launch at Windows login is managed through the HKCU Run registry key (`startup.rs`).
+- The app enforces a single instance via `tauri-plugin-single-instance`; a second launch focuses the existing window.
+- `ui/src/components/Ui.tsx` contains shared UI primitives such as page headers, primary/secondary buttons, setting rows, section cards, notices, and a saved indicator.
+- `ui/src/lib/format.ts` and `ui/src/hooks/useConfigSection.ts` hold shared formatting helpers and the common settings draft/save hook.
 - Settings pages show errors only on save failure. Save success does not show a success message.
 - Dashboard quick toggles save immediately and roll back UI state if saving fails.
 - AI Usage has an app-level worker owned outside the monitoring loop, so the UI can refresh usage even when monitoring is stopped.

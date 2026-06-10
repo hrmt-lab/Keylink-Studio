@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { RefreshCw, Search, Trash2, Check, Plus } from "lucide-react";
-import { saveConfig, getRunningApps, type RunningApp } from "../api";
+import { saveConfig, getRunningApps, getAppIcons, type RunningApp } from "../api";
 import { Toggle } from "../components/Toggle";
 import { LayerBadge } from "../components/LayerBadge";
 import { useLang } from "../i18n";
@@ -27,6 +27,7 @@ function buildRule(app: RunningApp, layer: number): RuleConfig {
 export default function Rules({ config, setConfig, status }: Props) {
   const { t } = useLang();
   const [apps, setApps] = useState<RunningApp[]>([]);
+  const [iconByExe, setIconByExe] = useState<Record<string, string>>({});
   const [loadingApps, setLoadingApps] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<RunningApp | null>(null);
@@ -45,7 +46,19 @@ export default function Rules({ config, setConfig, status }: Props) {
   const loadApps = useCallback(async () => {
     setLoadingApps(true);
     try {
-      setApps(await getRunningApps());
+      const list = await getRunningApps();
+      setApps(list);
+      try {
+        const paths = list.map((a) => a.path).filter((p): p is string => Boolean(p));
+        const iconsByPath = await getAppIcons(paths);
+        const byExe: Record<string, string> = {};
+        for (const app of list) {
+          if (app.path && iconsByPath[app.path]) byExe[app.exe] = iconsByPath[app.path];
+        }
+        setIconByExe(byExe);
+      } catch {
+        // Icons are best-effort; fall back to initials.
+      }
     } finally {
       setLoadingApps(false);
     }
@@ -156,7 +169,7 @@ export default function Rules({ config, setConfig, status }: Props) {
             ))}
           </select>
           <span className="text-sm text-gray-600">{t("rules.toggle_label")}</span>
-          <Toggle checked={config.layer_switch.enabled} onChange={toggleEnabled} disabled={saving} />
+          <Toggle checked={config.layer_switch.enabled} onChange={toggleEnabled} disabled={saving} label={t("rules.toggle_label")} />
         </div>
       </div>
 
@@ -179,7 +192,8 @@ export default function Rules({ config, setConfig, status }: Props) {
             <button
               onClick={loadApps}
               disabled={loadingApps}
-              title="更新"
+              title={t("common.refresh")}
+              aria-label={t("common.refresh")}
               className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-border bg-white text-gray-500 hover:border-primary hover:text-primary disabled:opacity-50"
             >
               <RefreshCw size={13} className={loadingApps ? "animate-spin" : ""} />
@@ -209,7 +223,7 @@ export default function Rules({ config, setConfig, status }: Props) {
                             : "hover:bg-white hover:shadow-sm text-gray-700"
                         }`}
                       >
-                        <AppAvatar name={app.display_name} selected={isSelected} />
+                        <AppAvatar name={app.display_name} icon={iconByExe[app.exe]} selected={isSelected} />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1">
                             <span className={`truncate text-sm font-medium ${isSelected ? "text-white" : "text-gray-800"}`}>
@@ -244,7 +258,7 @@ export default function Rules({ config, setConfig, status }: Props) {
               <div className="flex items-center gap-4 flex-wrap">
                 {/* App */}
                 <div className="flex items-center gap-3 min-w-0 flex-shrink-0">
-                  <AppAvatar name={selected.display_name} size="lg" />
+                  <AppAvatar name={selected.display_name} icon={iconByExe[selected.exe]} size="lg" />
                   <div className="min-w-0">
                     <div className="font-semibold text-gray-800 truncate max-w-[160px]">
                       {selected.display_name}
@@ -309,7 +323,13 @@ export default function Rules({ config, setConfig, status }: Props) {
                   {targetKey === "global" ? t("rules.count", { n: rules.length }) : t("rules.device_count", { n: rules.length })}
                 </p>
                 {rules.map((rule, idx) => (
-                  <RuleCard key={idx} rule={rule} onDelete={() => deleteRule(idx)} disabled={saving} />
+                  <RuleCard
+                    key={idx}
+                    rule={rule}
+                    icon={rule.exe ? iconByExe[rule.exe] : undefined}
+                    onDelete={() => deleteRule(idx)}
+                    disabled={saving}
+                  />
                 ))}
               </div>
             )}
@@ -351,13 +371,21 @@ function avatarColor(name: string) {
   return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
 }
 
-function AppAvatar({ name, selected = false, size = "sm" }: {
-  name: string; selected?: boolean; size?: "sm" | "lg";
+function AppAvatar({ name, icon, selected = false, size = "sm" }: {
+  name: string; icon?: string; selected?: boolean; size?: "sm" | "lg";
 }) {
+  const sizeClass = size === "lg" ? "h-10 w-10" : "h-8 w-8";
+  if (icon) {
+    return (
+      <div className={`flex flex-shrink-0 items-center justify-center overflow-hidden rounded-lg bg-white/60 ${sizeClass}`}>
+        <img src={icon} alt="" aria-hidden="true" className="h-full w-full object-contain" draggable={false} />
+      </div>
+    );
+  }
   return (
     <div className={`flex flex-shrink-0 items-center justify-center rounded-lg font-bold text-white ${
-      size === "lg" ? "h-10 w-10 text-base" : "h-8 w-8 text-sm"
-    } ${selected ? "opacity-90" : ""} ${avatarColor(name)}`}>
+      size === "lg" ? "text-base" : "text-sm"
+    } ${sizeClass} ${selected ? "opacity-90" : ""} ${avatarColor(name)}`}>
       {(name[0] ?? "?").toUpperCase()}
     </div>
   );
@@ -365,15 +393,19 @@ function AppAvatar({ name, selected = false, size = "sm" }: {
 
 // ─── Rule Card ────────────────────────────────────────────────────────────────
 
-function RuleCard({ rule, onDelete, disabled }: {
-  rule: RuleConfig; onDelete: () => void; disabled: boolean;
+function RuleCard({ rule, icon, onDelete, disabled }: {
+  rule: RuleConfig; icon?: string; onDelete: () => void; disabled: boolean;
 }) {
+  const { t } = useLang();
   const matchDesc = rule.exe ?? rule.title ?? rule.path ?? "—";
   const matchKind = rule.exe ? "exe" : rule.title ? "title" : "path";
 
   return (
     <div className="group flex items-center gap-4 rounded-xl bg-white px-4 py-3 shadow-card ring-1 ring-border hover:shadow-card-hover transition-all">
       <LayerBadge layer={rule.layer} />
+      {icon && (
+        <img src={icon} alt="" aria-hidden="true" className="h-7 w-7 flex-shrink-0 object-contain" draggable={false} />
+      )}
       <div className="min-w-0 flex-1">
         <div className="font-medium text-gray-800">{rule.name}</div>
         <div className="mt-0.5 flex items-center gap-1.5">
@@ -387,7 +419,8 @@ function RuleCard({ rule, onDelete, disabled }: {
         onClick={onDelete}
         disabled={disabled}
         className="flex-shrink-0 rounded-lg p-1.5 text-gray-300 opacity-0 transition-all group-hover:opacity-100 hover:bg-red-50 hover:text-red-400 disabled:opacity-30"
-        title="削除"
+        title={t("common.delete")}
+        aria-label={t("common.delete")}
       >
         <Trash2 size={14} />
       </button>

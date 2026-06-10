@@ -4,12 +4,13 @@ RawHID Host のアプリバージョンと Host Link プロトコルバージョ
 
 - アプリバージョンは PC 側アプリ、UI、CLI、配布物のバージョンです。
 - Host Link プロトコルバージョンは、ZMK firmware 側と Raw HID packet で合意する通信仕様のバージョンです。
-- RawHID Host `0.3.1` 時点の Host Link プロトコルは `v1` です。
+- RawHID Host `0.4.0` 時点の Host Link プロトコルは `v1` です。
 
 ## 互換性一覧
 
 | ホストアプリバージョン | Host Link プロトコル | 必要 firmware 側対応 | 主な機能 |
 | --- | --- | --- | --- |
+| `0.4.0` | `v1` | `HOST_HELLO` / `DEVICE_HELLO`, capability 情報, `APP_LAYER`, `TIME_SYNC`, `AI_USAGE` | アプリ別レイヤー切り替え (即時検知)、時刻同期、AI 使用量送信、Keymap Viewer、自動起動 |
 | `0.3.1` | `v1` | `HOST_HELLO` / `DEVICE_HELLO`, capability 情報, `APP_LAYER`, `TIME_SYNC`, `AI_USAGE` | アプリ別レイヤー切り替え、時刻同期、AI 使用量送信、Keymap Viewer |
 | `0.3.0` | `v1` | `HOST_HELLO` / `DEVICE_HELLO`, capability 情報, `APP_LAYER`, `TIME_SYNC`, `AI_USAGE` | アプリ別レイヤー切り替え、時刻同期、AI 使用量送信、Keymap Viewer |
 | `0.2.x` | `v1` | `HOST_HELLO` / `DEVICE_HELLO`, `APP_LAYER`, `TIME_SYNC`, `AI_USAGE` | アプリ別レイヤー切り替え、時刻同期、AI 使用量送信 |

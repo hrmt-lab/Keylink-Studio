@@ -1,7 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { Save, RefreshCcw } from "lucide-react";
-import { saveConfig, reloadConfig } from "../api";
+import { reloadConfig, getLaunchAtLogin, setLaunchAtLogin } from "../api";
+import { Toggle } from "../components/Toggle";
 import { ErrorNotice, PageHeader, PrimaryButton, SecondaryButton, SectionCard, SettingRow } from "../components/Ui";
+import { useConfigSection } from "../hooks/useConfigSection";
 import { useLang } from "../i18n";
 import type { AppConfig } from "../types";
 
@@ -10,34 +12,56 @@ interface Props {
   setConfig: (c: AppConfig) => void;
 }
 
+const MAX_USAGE = 0xffff;
+
 export default function Settings({ config, setConfig }: Props) {
   const { t } = useLang();
-  const [draft, setDraft] = useState(config);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const { draft, setDraft, isDirty, saving, error, setError, save } = useConfigSection({
+    config,
+    setConfig,
+    select: (c) => c,
+    apply: (_c, d) => d,
+  });
 
-  const isDirty = JSON.stringify(draft) !== JSON.stringify(config);
+  const [launchAtLogin, setLaunchAtLoginState] = useState(false);
+  const [launchBusy, setLaunchBusy] = useState(false);
 
-  const handleSave = async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      await saveConfig(draft);
-      setConfig(draft);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSaving(false);
-    }
-  };
+  useEffect(() => {
+    void getLaunchAtLogin()
+      .then(setLaunchAtLoginState)
+      .catch(() => {});
+  }, []);
 
   const handleReload = async () => {
     try {
-      const loaded = await reloadConfig();
-      setConfig(loaded);
-      setDraft(loaded);
+      setConfig(await reloadConfig());
     } catch (e) {
       setError(String(e));
+    }
+  };
+
+  const updateHex = (field: "usage_page" | "usage", raw: string) => {
+    const value = parseInt(raw, 16);
+    if (isNaN(value) || value < 0 || value > MAX_USAGE) {
+      setError(t("settings.app.hex_invalid"));
+      return;
+    }
+    setError(null);
+    setDraft({ ...draft, hid: { ...draft.hid, [field]: value } });
+  };
+
+  const toggleLaunchAtLogin = async (enabled: boolean) => {
+    setLaunchBusy(true);
+    setError(null);
+    const previous = launchAtLogin;
+    setLaunchAtLoginState(enabled);
+    try {
+      await setLaunchAtLogin(enabled);
+    } catch (e) {
+      setLaunchAtLoginState(previous);
+      setError(String(e));
+    } finally {
+      setLaunchBusy(false);
     }
   };
 
@@ -52,7 +76,7 @@ export default function Settings({ config, setConfig }: Props) {
               {t("settings.reload")}
             </SecondaryButton>
             <PrimaryButton
-              onClick={handleSave}
+              onClick={save}
               disabled={!isDirty}
               loading={saving}
               icon={<Save size={15} />}
@@ -64,6 +88,33 @@ export default function Settings({ config, setConfig }: Props) {
       />
 
       {error && <ErrorNotice message={error} />}
+
+      {/* App startup */}
+      <SectionCard title={t("settings.app.section")}>
+        <SettingRow
+          label={t("settings.app.start_on_launch")}
+          description={t("settings.app.start_on_launch.desc")}
+        >
+          <Toggle
+            checked={draft.app.start_monitoring_on_launch}
+            onChange={(v) =>
+              setDraft({ ...draft, app: { ...draft.app, start_monitoring_on_launch: v } })
+            }
+            label={t("settings.app.start_on_launch")}
+          />
+        </SettingRow>
+        <SettingRow
+          label={t("settings.app.launch_at_login")}
+          description={t("settings.app.launch_at_login.desc")}
+        >
+          <Toggle
+            checked={launchAtLogin}
+            disabled={launchBusy}
+            onChange={toggleLaunchAtLogin}
+            label={t("settings.app.launch_at_login")}
+          />
+        </SettingRow>
+      </SectionCard>
 
       {/* Polling */}
       <SectionCard title={t("settings.polling.section")}>
@@ -105,12 +156,7 @@ export default function Settings({ config, setConfig }: Props) {
             <input
               className="input w-24 font-mono"
               value={draft.hid.usage_page.toString(16).toUpperCase()}
-              onChange={(e) => {
-                const v = parseInt(e.target.value, 16);
-                if (!isNaN(v)) {
-                  setDraft({ ...draft, hid: { ...draft.hid, usage_page: v } });
-                }
-              }}
+              onChange={(e) => updateHex("usage_page", e.target.value)}
               placeholder="FF60"
             />
           </div>
@@ -125,12 +171,7 @@ export default function Settings({ config, setConfig }: Props) {
             <input
               className="input w-24 font-mono"
               value={draft.hid.usage.toString(16).toUpperCase()}
-              onChange={(e) => {
-                const v = parseInt(e.target.value, 16);
-                if (!isNaN(v)) {
-                  setDraft({ ...draft, hid: { ...draft.hid, usage: v } });
-                }
-              }}
+              onChange={(e) => updateHex("usage", e.target.value)}
               placeholder="61"
             />
           </div>

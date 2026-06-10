@@ -171,30 +171,34 @@ where
                 continue;
             };
             let device_key = device_uid_key(uid);
-            let state = self.managed_layers.entry(device_key.clone()).or_default();
+            let layer_switch = &self.config.layer_switch;
+            let device_config = layer_switch.devices.get(&device_key);
+            // Device-specific unmatched_action overrides the global default when set.
+            let unmatched_action = device_config
+                .and_then(|cfg| cfg.unmatched_action)
+                .unwrap_or(layer_switch.unmatched_action);
 
-            let (action, rule_name) = if self.config.layer_switch.enabled {
-                if let Some(device_config) = self.config.layer_switch.devices.get(&device_key) {
-                    if device_config.enabled {
-                        let (action, matched) = match_action(app, &device_config.rules);
-                        (action, matched.map(|m| m.rule.name.clone()))
-                    } else {
-                        (LayerAction::Clear, None)
-                    }
-                } else {
-                    let (action, matched) = match_action(app, &self.config.layer_switch.rules);
+            let (action, rule_name) = if !layer_switch.enabled {
+                (LayerAction::Clear, None)
+            } else if let Some(device_config) = device_config {
+                if device_config.enabled {
+                    let (action, matched) = match_action(app, &device_config.rules);
                     (action, matched.map(|m| m.rule.name.clone()))
+                } else {
+                    (LayerAction::Clear, None)
                 }
             } else {
-                (LayerAction::Clear, None)
+                let (action, matched) = match_action(app, &layer_switch.rules);
+                (action, matched.map(|m| m.rule.name.clone()))
             };
+
+            let state = self.managed_layers.entry(device_key.clone()).or_default();
 
             match action {
                 LayerAction::Set(layer) => {
                     if state.active_layer != Some(layer) || resend_due_to_generation {
                         self.hid.send_set_layer_to_device(&device, layer)?;
                         state.active_layer = Some(layer);
-                        state.last_rule_id = rule_name.clone();
                         let rule_name = rule_name.unwrap_or_else(|| "<unknown>".to_string());
                         info!(
                             "set layer {} by rule {} for {}",
@@ -208,12 +212,10 @@ where
                 }
                 LayerAction::Clear => {
                     if state.active_layer.is_some()
-                        && self.config.layer_switch.unmatched_action
-                            == UnmatchedAction::ClearManaged
+                        && unmatched_action == UnmatchedAction::ClearManaged
                     {
                         self.hid.send_clear_to_device(&device)?;
                         state.active_layer = None;
-                        state.last_rule_id = None;
                         debug!("clear layer for {}", device_key);
                         changed = true;
                     }
@@ -266,7 +268,6 @@ where
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct ManagedLayerState {
     active_layer: Option<u8>,
-    last_rule_id: Option<String>,
 }
 
 fn supports_app_layer(device: &DeviceInfo) -> bool {
@@ -600,6 +601,75 @@ mod tests {
 
         assert_eq!(runner.tick().unwrap(), RunEvent::Unchanged);
         assert!(writes.borrow().is_empty());
+    }
+
+    #[derive(Debug)]
+    struct SwappableProvider {
+        app: RefCell<crate::ActiveApp>,
+    }
+
+    impl ActiveAppProvider for SwappableProvider {
+        fn active_app(&self) -> Result<crate::ActiveApp, ActiveAppError> {
+            Ok(self.app.borrow().clone())
+        }
+    }
+
+    #[test]
+    fn device_unmatched_action_keep_overrides_global_clear() {
+        let mut devices = std::collections::BTreeMap::new();
+        devices.insert(
+            "uid:00000000000000aa".to_string(),
+            crate::config::DeviceLayerSwitchConfig {
+                rules: vec![code_rule("device", 3)],
+                unmatched_action: Some(crate::config::UnmatchedAction::Keep),
+                ..Default::default()
+            },
+        );
+        let config = AppConfig {
+            layer_switch: crate::config::LayerSwitchConfig {
+                enabled: true,
+                // Global default would clear, but the device override keeps.
+                unmatched_action: crate::config::UnmatchedAction::ClearManaged,
+                rules: Vec::new(),
+                devices,
+            },
+            ..AppConfig::default()
+        };
+        let transport = MultiMockTransport {
+            devices: vec![device_with_uid(
+                "a",
+                0xaa,
+                crate::packet::CAPABILITY_APP_LAYER,
+            )],
+            writes: Rc::new(RefCell::new(Vec::new())),
+        };
+        let writes = transport.writes.clone();
+        let hid = HidDeviceManager::new(HidConfig::default(), transport);
+        let provider = SwappableProvider {
+            app: RefCell::new(crate::ActiveApp {
+                process_path: Some(PathBuf::from("C:\\Apps\\Code.exe")),
+                exe: Some("Code.exe".to_string()),
+                title: None,
+            }),
+        };
+        let mut runner = Runner::new(config, provider, hid);
+
+        assert!(matches!(
+            runner.tick().unwrap(),
+            RunEvent::SetLayer { layer: 3, .. }
+        ));
+
+        // Switch to an app that matches no rule; Keep must suppress the clear.
+        *runner.app_provider.app.borrow_mut() = crate::ActiveApp {
+            process_path: Some(PathBuf::from("C:\\Apps\\other.exe")),
+            exe: Some("other.exe".to_string()),
+            title: None,
+        };
+        assert_eq!(runner.tick().unwrap(), RunEvent::Unchanged);
+
+        // Only the initial set was written; no clear packet.
+        assert_eq!(writes.borrow().len(), 1);
+        assert_eq!(writes.borrow()[0].1[5], 1); // AppLayerAction::Set
     }
 
     #[test]

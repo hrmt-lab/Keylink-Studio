@@ -95,11 +95,10 @@ const T = {
     "timesync.sync_interval.desc":
       "0 に設定すると表示が変わる瞬間にのみ送信します",
     "timesync.sync_interval.unit": "秒",
-    "timesync.timezone": "タイムゾーンオフセット",
+    "timesync.timezone": "タイムゾーン",
     "timesync.timezone.desc":
-      "空白の場合はシステムのタイムゾーンを使用します (分単位、例: 540 = UTC+9)",
-    "timesync.timezone.unit": "分",
-    "timesync.timezone.auto": "自動",
+      "「自動」は PC のタイムゾーン設定を使用します",
+    "timesync.timezone.auto": "自動 (PC の設定)",
     "timesync.disabled.hint":
       "有効にすると、キーボードのディスプレイに時刻を表示できます。",
 
@@ -226,6 +225,9 @@ const T = {
 
     "common.yes": "はい",
     "common.no": "いいえ",
+    "common.refresh": "更新",
+    "common.delete": "削除",
+    "common.saved": "保存しました",
 
 
     "keymap.title": "キーマップ表示",
@@ -323,6 +325,12 @@ const T = {
     "settings.note1": "設定は {file} に保存されます。",
     "settings.note2":
       "デフォルト Usage Page は {up}、Usage は {u} (ZMK/QMK 標準) です。",
+    "settings.app.section": "アプリの起動",
+    "settings.app.start_on_launch": "起動時に監視を開始",
+    "settings.app.start_on_launch.desc": "アプリ起動時に自動で監視を開始します",
+    "settings.app.launch_at_login": "Windows ログイン時に起動",
+    "settings.app.launch_at_login.desc": "サインイン時に RawHID Host を自動起動します（トレイ常駐）",
+    "settings.app.hex_invalid": "0x0000〜0xFFFF の範囲で入力してください",
   },
   en: {
     "app.loading": "Loading...",
@@ -411,11 +419,10 @@ const T = {
     "timesync.sync_interval.desc":
       "Set to 0 to sync only when the displayed value changes",
     "timesync.sync_interval.unit": "sec",
-    "timesync.timezone": "Timezone offset",
+    "timesync.timezone": "Timezone",
     "timesync.timezone.desc":
-      "Leave blank to use the system timezone (minutes, e.g. 540 = UTC+9)",
-    "timesync.timezone.unit": "min",
-    "timesync.timezone.auto": "Auto",
+      "\"Auto\" uses the PC's timezone setting",
+    "timesync.timezone.auto": "Auto (PC setting)",
     "timesync.disabled.hint":
       "Enable it to display the current time on your keyboard.",
 
@@ -541,6 +548,9 @@ const T = {
 
     "common.yes": "Yes",
     "common.no": "No",
+    "common.refresh": "Refresh",
+    "common.delete": "Delete",
+    "common.saved": "Saved",
 
 
     "keymap.title": "Keymap Viewer",
@@ -638,6 +648,12 @@ const T = {
     "settings.note1": "Config is saved to {file}.",
     "settings.note2":
       "Default Usage Page is {up}, Usage is {u} (ZMK/QMK standard).",
+    "settings.app.section": "App startup",
+    "settings.app.start_on_launch": "Start monitoring on launch",
+    "settings.app.start_on_launch.desc": "Automatically start monitoring when the app launches",
+    "settings.app.launch_at_login": "Launch at Windows login",
+    "settings.app.launch_at_login.desc": "Start RawHID Host automatically at sign-in (runs in the tray)",
+    "settings.app.hex_invalid": "Enter a value between 0x0000 and 0xFFFF",
   },
 } as const;
 

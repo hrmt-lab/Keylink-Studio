@@ -1,5 +1,9 @@
 # RawHID Host configuration
 
+[app]
+# Start monitoring automatically when the app launches.
+start_monitoring_on_launch = false
+
 [polling]
 interval_ms = 500
 

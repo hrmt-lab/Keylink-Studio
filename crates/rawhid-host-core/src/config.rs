@@ -11,6 +11,7 @@ use thiserror::Error;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct AppConfig {
+    pub app: AppBehaviorConfig,
     pub polling: PollingConfig,
     pub hid: HidConfig,
     pub layer_switch: LayerSwitchConfig,
@@ -22,12 +23,28 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            app: AppBehaviorConfig::default(),
             polling: PollingConfig::default(),
             hid: HidConfig::default(),
             layer_switch: LayerSwitchConfig::default(),
             time: TimeConfig::default(),
             ai_usage: AiUsageConfig::default(),
             studio: StudioConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AppBehaviorConfig {
+    /// Start monitoring automatically when the GUI launches.
+    pub start_monitoring_on_launch: bool,
+}
+
+impl Default for AppBehaviorConfig {
+    fn default() -> Self {
+        Self {
+            start_monitoring_on_launch: false,
         }
     }
 }
@@ -372,6 +389,10 @@ pub fn write_default_config(path: &Path, overwrite: bool) -> Result<(), ConfigEr
 
 pub fn example_config() -> &'static str {
     r#"# RawHID Host configuration
+
+[app]
+# Start monitoring automatically when the GUI launches.
+start_monitoring_on_launch = false
 
 [polling]
 interval_ms = 500

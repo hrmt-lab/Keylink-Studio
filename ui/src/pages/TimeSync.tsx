@@ -1,15 +1,22 @@
-import { useState } from "react";
 import { Save } from "lucide-react";
-import { saveConfig } from "../api";
 import { Toggle } from "../components/Toggle";
 import { ErrorNotice, PageHeader, PrimaryButton } from "../components/Ui";
+import { useConfigSection } from "../hooks/useConfigSection";
 import { useLang } from "../i18n";
+import { formatTzOffset } from "../lib/format";
 import type { AppConfig, TimeFormatHint } from "../types";
 
 interface Props {
   config: AppConfig;
   setConfig: (c: AppConfig) => void;
 }
+
+// Standard UTC offsets in current worldwide use, in minutes.
+const TZ_PRESETS_MIN: number[] = [
+  -720, -660, -600, -570, -540, -480, -420, -360, -300, -240, -210, -180,
+  -120, -60, 0, 60, 120, 180, 210, 240, 270, 300, 330, 345, 360, 390, 420,
+  480, 525, 540, 570, 600, 630, 660, 720, 765, 780, 840,
+];
 
 const FORMAT_OPTIONS: { value: TimeFormatHint; labelKey: string; example: string }[] = [
   { value: "time_hm",      labelKey: "format.time_hm",      example: "14:30" },
@@ -22,25 +29,12 @@ const FORMAT_OPTIONS: { value: TimeFormatHint; labelKey: string; example: string
 
 export default function TimeSync({ config, setConfig }: Props) {
   const { t } = useLang();
-  const [draft, setDraft] = useState(config.time);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  const isDirty = JSON.stringify(draft) !== JSON.stringify(config.time);
-
-  const handleSave = async () => {
-    setSaving(true);
-    setError(null);
-    try {
-      const updated = { ...config, time: draft };
-      await saveConfig(updated);
-      setConfig(updated);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSaving(false);
-    }
-  };
+  const { draft, setDraft, isDirty, saving, error, save } = useConfigSection({
+    config,
+    setConfig,
+    select: (c) => c.time,
+    apply: (c, time) => ({ ...c, time }),
+  });
 
   return (
     <div className="p-6 max-w-2xl mx-auto space-y-5">
@@ -49,7 +43,7 @@ export default function TimeSync({ config, setConfig }: Props) {
         description={t("timesync.subtitle")}
         actions={
           <PrimaryButton
-            onClick={handleSave}
+            onClick={save}
             disabled={!isDirty}
             loading={saving}
             icon={<Save size={15} />}
@@ -71,6 +65,7 @@ export default function TimeSync({ config, setConfig }: Props) {
           <Toggle
             checked={draft.enabled}
             onChange={(v) => setDraft({ ...draft, enabled: v })}
+            label={t("timesync.enable")}
           />
         </div>
 
@@ -106,6 +101,7 @@ export default function TimeSync({ config, setConfig }: Props) {
             onChange={(v) =>
               setDraft({ ...draft, clock_mode: v ? "12h" : "24h" })
             }
+            label={t("timesync.clock_mode")}
           />
         </div>
 
@@ -139,23 +135,27 @@ export default function TimeSync({ config, setConfig }: Props) {
             <div className="text-sm font-medium text-gray-800">{t("timesync.timezone")}</div>
             <div className="text-xs text-gray-500 mt-0.5">{t("timesync.timezone.desc")}</div>
           </div>
-          <div className="flex items-center gap-2">
-            <input
-              type="number"
-              min={-1440}
-              max={1440}
-              value={draft.tz_offset_min ?? ""}
-              onChange={(e) =>
-                setDraft({
-                  ...draft,
-                  tz_offset_min: e.target.value === "" ? null : Number(e.target.value),
-                })
-              }
-              placeholder={t("timesync.timezone.auto")}
-              className="input w-24 text-right"
-            />
-            <span className="text-sm text-gray-500">{t("timesync.timezone.unit")}</span>
-          </div>
+          <select
+            value={draft.tz_offset_min == null ? "" : String(draft.tz_offset_min)}
+            onChange={(e) =>
+              setDraft({
+                ...draft,
+                tz_offset_min: e.target.value === "" ? null : Number(e.target.value),
+              })
+            }
+            aria-label={t("timesync.timezone")}
+            className="input w-48"
+          >
+            <option value="">{t("timesync.timezone.auto")}</option>
+            {(draft.tz_offset_min == null || TZ_PRESETS_MIN.includes(draft.tz_offset_min)
+              ? TZ_PRESETS_MIN
+              : [...TZ_PRESETS_MIN, draft.tz_offset_min].sort((a, b) => a - b)
+            ).map((min) => (
+              <option key={min} value={min}>
+                {formatTzOffset(min)}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 

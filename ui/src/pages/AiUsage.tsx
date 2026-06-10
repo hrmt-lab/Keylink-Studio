@@ -8,11 +8,20 @@ import {
 } from "lucide-react";
 import claudeCodeIcon from "../assets/claude_code_icon_transparent.png";
 import codexIcon from "../assets/codex_icon_transparent.png";
-import { refreshAiUsage, saveConfig } from "../api";
+import { refreshAiUsage } from "../api";
 import { Toggle } from "../components/Toggle";
-import { ErrorNotice, PageHeader, PrimaryButton, SecondaryButton, SettingRow } from "../components/Ui";
+import {
+  ErrorNotice,
+  Notice,
+  PageHeader,
+  PrimaryButton,
+  SecondaryButton,
+  SettingRow,
+} from "../components/Ui";
+import { useConfigSection } from "../hooks/useConfigSection";
+import { aiStatusKey, formatUnixShort, formatUsedBp, usageBarColor, usageTextColor } from "../lib/format";
 import { useLang, type TranslationKey } from "../i18n";
-import type { AiUsageProviderStatus, AppConfig, MonitorStatus } from "../types";
+import type { AiUsageProviderStatus, AiUsageStatusKind, AppConfig, MonitorStatus } from "../types";
 
 interface Props {
   config: AppConfig;
@@ -24,55 +33,48 @@ type ProviderName = "codex" | "claude_code";
 
 export default function AiUsage({ config, setConfig, status }: Props) {
   const { t } = useLang();
-  const [draft, setDraft] = useState(config);
-  const [saving, setSaving] = useState(false);
+  const {
+    draft,
+    setDraft,
+    isDirty,
+    saving,
+    error,
+    setError,
+    save,
+  } = useConfigSection({
+    config,
+    setConfig,
+    select: (c) => c,
+    apply: (_c, d) => d,
+  });
   const [refreshing, setRefreshing] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [pendingRefreshSignature, setPendingRefreshSignature] = useState<string | null>(null);
 
-  useEffect(() => setDraft(config), [config]);
-
+  // The backend pushes a status-update when the worker finishes (even while
+  // monitoring is stopped), so the metrics refresh on their own. We only show a
+  // transient acknowledgement here.
   useEffect(() => {
-    if (!pendingRefreshSignature || message !== t("ai_usage.refresh.done")) return;
-    const currentSignature = aiUsageStatusSignature(status.ai_usage);
-    if (currentSignature !== pendingRefreshSignature) {
-      setMessage(null);
-      setPendingRefreshSignature(null);
-    }
-  }, [message, pendingRefreshSignature, status.ai_usage, t]);
+    if (!message) return;
+    const timer = setTimeout(() => setMessage(null), 4000);
+    return () => clearTimeout(timer);
+  }, [message]);
 
-  const isDirty = JSON.stringify(draft.ai_usage) !== JSON.stringify(config.ai_usage);
-  const updateAiUsage = (ai_usage: AppConfig["ai_usage"]) => setDraft({ ...draft, ai_usage });
+  const updateAiUsage = (ai_usage: AppConfig["ai_usage"]) =>
+    setDraft((prev) => ({ ...prev, ai_usage }));
 
   const handleSave = async () => {
-    setSaving(true);
-    setError(null);
     setMessage(null);
-    setPendingRefreshSignature(null);
-    try {
-      const updated = { ...config, ai_usage: draft.ai_usage };
-      await saveConfig(updated);
-      setConfig(updated);
-    } catch (e) {
-      setError(String(e));
-    } finally {
-      setSaving(false);
-    }
+    await save();
   };
 
   const handleRefresh = async () => {
     setRefreshing(true);
     setError(null);
     setMessage(null);
-    setPendingRefreshSignature(null);
-    const signatureBeforeRefresh = aiUsageStatusSignature(status.ai_usage);
     try {
       await refreshAiUsage();
-      setPendingRefreshSignature(signatureBeforeRefresh);
       setMessage(t("ai_usage.refresh.done"));
     } catch (e) {
-      setPendingRefreshSignature(null);
       const code = String(e);
       setError(
         code === "not_running"
@@ -154,6 +156,7 @@ function BasicSettings({
           <Toggle
             checked={draft.ai_usage.enabled}
             onChange={(enabled) => updateAiUsage({ ...draft.ai_usage, enabled })}
+            label={t("ai_usage.enabled")}
           />
         </SettingRow>
         <NumberRow
@@ -219,6 +222,7 @@ function ProviderCard({
           </span>
           <Toggle
             checked={providerConfig.enabled}
+            label={name}
             onChange={(enabled) =>
               updateAiUsage(
                 isCodex
@@ -538,7 +542,7 @@ function UsageMetric({
         )}
       </div>
       <div className="h-2 overflow-hidden rounded-full bg-panel">
-        <div className={`h-full rounded-full ${barColor}`} style={{ width: `${pct}%` }} />
+        <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: `${pct}%` }} />
       </div>
       <div className="mt-1 flex justify-between gap-3">
         <span className="text-[11px] text-gray-400">{t("ai_usage.source.label")}: {status ? sourceLabel(status, t) : t("ai_usage.source.none")}</span>
@@ -641,7 +645,7 @@ function PathRow({
   );
 }
 
-function StatusBadge({ status }: { status: string }) {
+function StatusBadge({ status }: { status: AiUsageStatusKind }) {
   const { t } = useLang();
   const color =
     status === "ok"
@@ -654,23 +658,8 @@ function StatusBadge({ status }: { status: string }) {
   return (
     <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${color}`}>
       <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />
-      {t(`ai_usage.status.${status}` as TranslationKey)}
+      {t(aiStatusKey(status))}
     </span>
-  );
-}
-
-function Notice({ tone, children }: { tone: "info" | "error" | "warn"; children: React.ReactNode }) {
-  const color =
-    tone === "error"
-      ? "bg-red-50 text-red-700 ring-red-200"
-      : tone === "warn"
-        ? "bg-amber-50 text-amber-800 ring-amber-200"
-        : "bg-blue-50 text-blue-700 ring-blue-200";
-  return (
-    <div className={`flex items-start gap-2.5 rounded-lg px-4 py-3 text-sm ring-1 ${color}`}>
-      <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
-      <span>{children}</span>
-    </div>
   );
 }
 
@@ -691,51 +680,4 @@ function sourceLabel(status: AiUsageProviderStatus, t: TFn) {
 function errorCodeLabel(code: number | null, t: TFn) {
   if (code === null) return t("ai_usage.error.unknown");
   return t(`ai_usage.error.${code}` as TranslationKey);
-}
-
-function formatUsedBp(bp: number) {
-  return `${(bp / 100).toFixed(2)}%`;
-}
-
-function formatUnixShort(value: number | null | undefined) {
-  if (!value) return "-";
-  return new Date(value * 1000).toLocaleString(undefined, {
-    weekday: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
-}
-
-function usageTextColor(bp: number, accent: "primary" | "amber") {
-  if (bp >= 9000) return "#ef4444";
-  if (bp >= 8000) return "#d97706";
-  return accent === "amber" ? "#d97706" : "#5B7092";
-}
-
-function usageBarColor(bp: number, valid: boolean, accent: "primary" | "amber") {
-  if (!valid) return "bg-gray-300";
-  if (bp >= 9000) return "bg-red-500";
-  if (bp >= 8000) return "bg-orange-400";
-  return accent === "amber" ? "bg-amber-600" : "bg-primary";
-}
-
-function aiUsageStatusSignature(statuses: AiUsageProviderStatus[]) {
-  return statuses
-    .map((status) =>
-      [
-        status.provider,
-        status.status,
-        status.updated_unix ?? "",
-        status.last_error_code ?? "",
-        status.five_hour_used_bp ?? "",
-        status.seven_day_used_bp ?? "",
-        status.five_hour_valid ? "1" : "0",
-        status.seven_day_valid ? "1" : "0",
-        status.stale ? "1" : "0",
-        status.error_present ? "1" : "0",
-        status.credential_source ?? "",
-      ].join(":")
-    )
-    .sort()
-    .join("|");
 }

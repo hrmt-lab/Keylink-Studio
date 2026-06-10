@@ -67,6 +67,9 @@ cargo run -p rawhid-host-cli -- config-path
 ## 設定例
 
 ```toml
+[app]
+start_monitoring_on_launch = false
+
 [polling]
 interval_ms = 500
 
@@ -114,11 +117,11 @@ api_timeout_sec = 10
 ## GUI 画面
 
 - Dashboard: 監視開始 / 停止、接続状況、現在レイヤー、ログ、AI Usage 簡易サマリ
-- Layer Rules: アプリごとのレイヤールール編集。変更は自動保存です。
+- Layer Rules: アプリごとのレイヤールール編集。変更は自動保存です。アプリ一覧には実行ファイルから抽出した実アイコンを表示します。
 - Time Sync: `TIME_SYNC` の有効化、表示形式、同期間隔などの設定
 - AI Usage: Codex / Claude Code 使用量送信の設定、状態表示、手動更新
 - Devices: Raw HID 候補のスキャンと HELLO 検証結果
-- Settings: polling と HID の基本設定
+- Settings: polling と HID の基本設定、アプリ起動時の自動監視、Windows ログイン時の自動起動
 
 UI は日本語 / 英語切り替えに対応しています。
 
@@ -182,9 +185,13 @@ See [CHANGELOG.md](CHANGELOG.md), [Compatibility](docs/compatibility.md), and th
 
 ## Current implementation notes
 
+- Foreground app changes are detected instantly via `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)` while monitoring is running. Polling remains as a fallback.
+- `[app] start_monitoring_on_launch` starts monitoring automatically when the app launches. Launch at Windows login is managed from Settings via the HKCU Run registry key.
+- The app is single-instance. Launching a second instance focuses the existing window.
+- The tray menu includes start/stop monitoring items in addition to show/quit.
 - `hid.rescan_interval_sec` controls periodic Host Link HID rescan while monitoring is running. The default is 5 seconds.
-- AI Usage collection runs independently from monitoring. The UI can refresh usage while monitoring is stopped; Raw HID sending still happens only while monitoring is running.
-- Dashboard quick toggles are auto-saved. On save failure, an error is shown and the UI state rolls back to the previous config.
+- AI Usage collection runs independently from monitoring. The UI can refresh usage while monitoring is stopped; Raw HID sending still happens only while monitoring is running. After a manual refresh completes, the backend emits a `status-update` event even when monitoring is stopped.
+- Dashboard quick toggles are auto-saved. A brief "saved" indicator is shown on success. On save failure, an error is shown and the UI state rolls back to the previous config.
 - Pages with a Save button do not show a success message. They only show an error when saving fails.
 - Claude Code credentials can be auto-detected from Windows default, WSL default, and extra credentials paths. On API 401 / 403, the next valid candidate is tried.
 - Keymap Viewer is a read-only ZMK Studio RPC viewer. It uses USB serial / CDC ACM transport in v1 and does not edit, write, save, restore, or unlock Studio state.

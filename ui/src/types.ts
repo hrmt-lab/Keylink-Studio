@@ -84,7 +84,12 @@ export interface LayerSwitchConfig {
   devices: Record<string, DeviceLayerSwitchConfig>;
 }
 
+export interface AppBehaviorConfig {
+  start_monitoring_on_launch: boolean;
+}
+
 export interface AppConfig {
+  app: AppBehaviorConfig;
   polling: PollingConfig;
   hid: HidConfig;
   layer_switch: LayerSwitchConfig;

@@ -123,7 +123,7 @@ export default function TimeSync({ config, setConfig }: Props) {
                   periodic_sync_sec: Math.max(0, Number(e.target.value)),
                 })
               }
-              className="input w-24 text-right"
+              className="input !w-24 text-right"
             />
             <span className="text-sm text-gray-500">{t("timesync.sync_interval.unit")}</span>
           </div>
@@ -144,7 +144,7 @@ export default function TimeSync({ config, setConfig }: Props) {
               })
             }
             aria-label={t("timesync.timezone")}
-            className="input w-48"
+            className="input !w-32"
           >
             <option value="">{t("timesync.timezone.auto")}</option>
             {(draft.tz_offset_min == null || TZ_PRESETS_MIN.includes(draft.tz_offset_min)

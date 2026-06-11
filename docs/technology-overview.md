@@ -164,7 +164,11 @@ interval_ms = 500
 [layer_switch]
 enabled = true
 
-[[layer_switch.rules]]
+# Layer rules are per keyboard (keyed by device uid).
+[layer_switch.devices."uid:7a91c3e4d102ab55"]
+display_name = "Example Keyboard"
+
+[[layer_switch.devices."uid:7a91c3e4d102ab55".rules]]
 name = "Notepad"
 exe = "notepad.exe"
 layer = 1

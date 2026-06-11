@@ -101,7 +101,6 @@ impl Default for StudioConfig {
 pub struct LayerSwitchConfig {
     pub enabled: bool,
     pub unmatched_action: UnmatchedAction,
-    pub rules: Vec<RuleConfig>,
     pub devices: BTreeMap<String, DeviceLayerSwitchConfig>,
 }
 
@@ -110,7 +109,6 @@ impl Default for LayerSwitchConfig {
         Self {
             enabled: true,
             unmatched_action: UnmatchedAction::ClearManaged,
-            rules: Vec::new(),
             devices: BTreeMap::new(),
         }
     }
@@ -411,31 +409,16 @@ keymap_read_timeout_ms = 8000
 enabled = true
 unmatched_action = "clear_managed"
 
-[[layer_switch.rules]]
-name = "Notepad"
-# exe matches the full executable file name, including ".exe".
-exe = "notepad.exe"
-layer = 1
-
-[[layer_switch.rules]]
-name = "Browser title example"
-title = "GitHub"
-layer = 2
-
-# Prefer path rules when the same exe name can appear in multiple locations.
-#[[layer_switch.rules]]
-#name = "Specific app"
-#path = "C:\\Program Files\\Example\\example.exe"
-#layer = 3
-
-# Device-specific rules are keyed by the stable uid returned in DEVICE_HELLO.
-# If a device entry exists, its rules are used exclusively, even when empty.
+# Layer rules are configured per device, keyed by the stable uid returned
+# in DEVICE_HELLO. Devices without an entry are not layer-managed.
 #[layer_switch.devices."uid:7a91c3e4d102ab55"]
 #display_name = "Example Keyboard"
 #enabled = true
 #
+# exe matches the full executable file name, including ".exe".
+# Prefer path rules when the same exe name can appear in multiple locations.
 #[[layer_switch.devices."uid:7a91c3e4d102ab55".rules]]
-#name = "VS Code for this device"
+#name = "VS Code"
 #exe = "Code.exe"
 #layer = 3
 
@@ -518,7 +501,7 @@ mod tests {
             config.layer_switch.unmatched_action,
             UnmatchedAction::ClearManaged
         );
-        assert_eq!(config.layer_switch.rules.len(), 2);
+        assert!(config.layer_switch.devices.is_empty());
         assert!(!config.time.enabled);
         assert_eq!(config.time.format_hint, TimeFormatHint::TimeHm);
         assert_eq!(config.time.clock_mode, ClockMode::TwentyFourHour);

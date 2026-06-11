@@ -76,9 +76,10 @@ const T = {
     "rules.add": "追加",
     "rules.duplicate": "同じルールがすでに存在します",
     "rules.count": "設定済みルール ({n})",
-    "rules.device_count": "デバイス別ルール ({n})",
     "rules.device_target": "編集対象デバイス",
-    "rules.global_fallback": "Global fallback",
+    "rules.no_devices": "対応キーボードがまだありません",
+    "rules.target_disconnected": "(未接続)",
+    "rules.delete_device_config": "このデバイスの設定を削除",
     "rules.empty.title": "ルールがまだありません",
     "rules.empty.hint": "左のリストからアプリを選んで追加しましょう",
 
@@ -98,7 +99,7 @@ const T = {
     "timesync.timezone": "タイムゾーン",
     "timesync.timezone.desc":
       "「自動」は PC のタイムゾーン設定を使用します",
-    "timesync.timezone.auto": "自動 (PC の設定)",
+    "timesync.timezone.auto": "自動",
     "timesync.disabled.hint":
       "有効にすると、キーボードのディスプレイに時刻を表示できます。",
 
@@ -399,9 +400,10 @@ const T = {
     "rules.add": "Add",
     "rules.duplicate": "This rule already exists",
     "rules.count": "Configured rules ({n})",
-    "rules.device_count": "Device rules ({n})",
     "rules.device_target": "Rule target device",
-    "rules.global_fallback": "Global fallback",
+    "rules.no_devices": "No compatible keyboards yet",
+    "rules.target_disconnected": "(disconnected)",
+    "rules.delete_device_config": "Delete this device's rules",
     "rules.empty.title": "No rules yet",
     "rules.empty.hint": "Select an app from the left and add a rule",
 
@@ -422,7 +424,7 @@ const T = {
     "timesync.timezone": "Timezone",
     "timesync.timezone.desc":
       "\"Auto\" uses the PC's timezone setting",
-    "timesync.timezone.auto": "Auto (PC setting)",
+    "timesync.timezone.auto": "Auto",
     "timesync.disabled.hint":
       "Enable it to display the current time on your keyboard.",
 

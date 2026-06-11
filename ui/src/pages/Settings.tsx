@@ -138,7 +138,7 @@ export default function Settings({ config, setConfig }: Props) {
                   },
                 })
               }
-              className="input w-28 text-right"
+              className="input !w-28 text-right"
             />
             <span className="text-sm text-gray-500 w-8">ms</span>
           </div>
@@ -154,7 +154,7 @@ export default function Settings({ config, setConfig }: Props) {
           <div className="flex items-center gap-2">
             <span className="text-sm text-gray-400 font-mono">0x</span>
             <input
-              className="input w-24 font-mono"
+              className="input !w-24 font-mono"
               value={draft.hid.usage_page.toString(16).toUpperCase()}
               onChange={(e) => updateHex("usage_page", e.target.value)}
               placeholder="FF60"
@@ -169,7 +169,7 @@ export default function Settings({ config, setConfig }: Props) {
           <div className="flex items-center gap-2">
             <span className="text-sm text-gray-400 font-mono">0x</span>
             <input
-              className="input w-24 font-mono"
+              className="input !w-24 font-mono"
               value={draft.hid.usage.toString(16).toUpperCase()}
               onChange={(e) => updateHex("usage", e.target.value)}
               placeholder="61"
@@ -196,7 +196,7 @@ export default function Settings({ config, setConfig }: Props) {
                   },
                 })
               }
-              className="input w-28 text-right"
+              className="input !w-28 text-right"
             />
             <span className="text-sm text-gray-500 w-8">ms</span>
           </div>
@@ -221,7 +221,7 @@ export default function Settings({ config, setConfig }: Props) {
                   },
                 })
               }
-              className="input w-28 text-right"
+              className="input !w-28 text-right"
             />
             <span className="text-sm text-gray-500 w-8">sec</span>
           </div>

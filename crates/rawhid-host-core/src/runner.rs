@@ -188,8 +188,10 @@ where
                     (LayerAction::Clear, None)
                 }
             } else {
-                let (action, matched) = match_action(app, &layer_switch.rules);
-                (action, matched.map(|m| m.rule.name.clone()))
+                // No device-specific config: this device is not layer-managed.
+                // Clear only removes a leftover managed layer if the device
+                // config was deleted while monitoring was running.
+                (LayerAction::Clear, None)
             };
 
             let state = self.managed_layers.entry(device_key.clone()).or_default();
@@ -374,21 +376,33 @@ mod tests {
         }
     }
 
+    fn single_device_config(rules: Vec<RuleConfig>) -> crate::config::LayerSwitchConfig {
+        let mut devices = std::collections::BTreeMap::new();
+        devices.insert(
+            // Matches the uid (1) used by `device()`.
+            "uid:0000000000000001".to_string(),
+            crate::config::DeviceLayerSwitchConfig {
+                rules,
+                ..Default::default()
+            },
+        );
+        crate::config::LayerSwitchConfig {
+            enabled: true,
+            unmatched_action: crate::config::UnmatchedAction::ClearManaged,
+            devices,
+        }
+    }
+
     #[test]
     fn unchanged_state_does_not_send_again() {
         let config = AppConfig {
-            layer_switch: crate::config::LayerSwitchConfig {
-                enabled: true,
-                unmatched_action: crate::config::UnmatchedAction::ClearManaged,
-                devices: std::collections::BTreeMap::new(),
-                rules: vec![RuleConfig {
-                    name: "notepad".to_string(),
-                    layer: 1,
-                    path: None,
-                    exe: Some("notepad.exe".to_string()),
-                    title: None,
-                }],
-            },
+            layer_switch: single_device_config(vec![RuleConfig {
+                name: "notepad".to_string(),
+                layer: 1,
+                path: None,
+                exe: Some("notepad.exe".to_string()),
+                title: None,
+            }]),
             ..AppConfig::default()
         };
         let provider = MockAppProvider {
@@ -409,18 +423,13 @@ mod tests {
     #[test]
     fn no_foreground_window_does_not_clear() {
         let config = AppConfig {
-            layer_switch: crate::config::LayerSwitchConfig {
-                enabled: true,
-                unmatched_action: crate::config::UnmatchedAction::ClearManaged,
-                devices: std::collections::BTreeMap::new(),
-                rules: vec![RuleConfig {
-                    name: "notepad".to_string(),
-                    layer: 1,
-                    path: None,
-                    exe: Some("notepad.exe".to_string()),
-                    title: None,
-                }],
-            },
+            layer_switch: single_device_config(vec![RuleConfig {
+                name: "notepad".to_string(),
+                layer: 1,
+                path: None,
+                exe: Some("notepad.exe".to_string()),
+                title: None,
+            }]),
             ..AppConfig::default()
         };
         let transport = MockTransport::default();
@@ -504,7 +513,7 @@ mod tests {
     }
 
     #[test]
-    fn device_config_rules_override_global_rules_per_uid() {
+    fn device_config_rules_apply_per_uid() {
         let mut devices = std::collections::BTreeMap::new();
         devices.insert(
             "uid:00000000000000aa".to_string(),
@@ -513,6 +522,7 @@ mod tests {
                 ..Default::default()
             },
         );
+        // Device B has a config entry but no rules: nothing is sent to it.
         devices.insert(
             "uid:00000000000000bb".to_string(),
             crate::config::DeviceLayerSwitchConfig::default(),
@@ -521,7 +531,6 @@ mod tests {
             layer_switch: crate::config::LayerSwitchConfig {
                 enabled: true,
                 unmatched_action: crate::config::UnmatchedAction::ClearManaged,
-                rules: vec![code_rule("global", 2)],
                 devices,
             },
             ..AppConfig::default()
@@ -548,12 +557,11 @@ mod tests {
     }
 
     #[test]
-    fn missing_device_config_uses_global_fallback() {
+    fn missing_device_config_does_not_switch() {
         let config = AppConfig {
             layer_switch: crate::config::LayerSwitchConfig {
                 enabled: true,
                 unmatched_action: crate::config::UnmatchedAction::ClearManaged,
-                rules: vec![code_rule("global", 2)],
                 devices: std::collections::BTreeMap::new(),
             },
             ..AppConfig::default()
@@ -570,24 +578,25 @@ mod tests {
         let hid = HidDeviceManager::new(HidConfig::default(), transport);
         let mut runner = Runner::new(config, code_app_provider(), hid);
 
-        assert!(matches!(
-            runner.tick().unwrap(),
-            RunEvent::SetLayer { layer: 2, .. }
-        ));
-        let writes = writes.borrow();
-        assert_eq!(writes.len(), 1);
-        assert_eq!(writes[0].0, "a");
-        assert_eq!(writes[0].1[6], 2);
+        assert_eq!(runner.tick().unwrap(), RunEvent::Unchanged);
+        assert!(writes.borrow().is_empty());
     }
 
     #[test]
     fn app_layer_capability_is_required_for_sending() {
+        let mut devices = std::collections::BTreeMap::new();
+        devices.insert(
+            "uid:00000000000000aa".to_string(),
+            crate::config::DeviceLayerSwitchConfig {
+                rules: vec![code_rule("device", 2)],
+                ..Default::default()
+            },
+        );
         let config = AppConfig {
             layer_switch: crate::config::LayerSwitchConfig {
                 enabled: true,
                 unmatched_action: crate::config::UnmatchedAction::ClearManaged,
-                rules: vec![code_rule("global", 2)],
-                devices: std::collections::BTreeMap::new(),
+                devices,
             },
             ..AppConfig::default()
         };
@@ -630,7 +639,6 @@ mod tests {
                 enabled: true,
                 // Global default would clear, but the device override keeps.
                 unmatched_action: crate::config::UnmatchedAction::ClearManaged,
-                rules: Vec::new(),
                 devices,
             },
             ..AppConfig::default()

@@ -15,22 +15,23 @@ hello_timeout_ms = 200
 [layer_switch]
 enabled = true
 
-[[layer_switch.rules]]
-name = "Notepad"
+# Layer rules are configured per device, keyed by the stable uid returned
+# in DEVICE_HELLO. Devices without an entry are not layer-managed.
+#[layer_switch.devices."uid:7a91c3e4d102ab55"]
+#display_name = "Example Keyboard"
+#enabled = true
+#
 # exe matches the full executable file name, including ".exe".
-exe = "notepad.exe"
-layer = 1
-
-[[layer_switch.rules]]
-name = "Browser title example"
-title = "GitHub"
-layer = 2
-
 # Prefer path rules when the same exe name can appear in multiple locations.
-#[[layer_switch.rules]]
-#name = "Specific app"
-#path = "C:\\Program Files\\Example\\example.exe"
-#layer = 3
+#[[layer_switch.devices."uid:7a91c3e4d102ab55".rules]]
+#name = "Notepad"
+#exe = "notepad.exe"
+#layer = 1
+#
+#[[layer_switch.devices."uid:7a91c3e4d102ab55".rules]]
+#name = "Browser title example"
+#title = "GitHub"
+#layer = 2
 
 [time]
 enabled = false

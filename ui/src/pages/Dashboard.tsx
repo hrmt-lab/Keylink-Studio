@@ -96,6 +96,10 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
   };
 
   const reversedLogs = [...logs].reverse();
+  // Layer rules are per-device only; summarize across all device configs.
+  const allDeviceRules = Object.values(config.layer_switch.devices ?? {}).flatMap(
+    (device) => device.rules
+  );
 
   return (
     <div className="p-6 max-w-4xl mx-auto space-y-5">
@@ -225,19 +229,19 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
                 <FeatureRow
                   label={t("dashboard.feature.rules_count")}
                   value={
-                    config.layer_switch.rules.length > 0
-                      ? `${config.layer_switch.rules.length}`
+                    allDeviceRules.length > 0
+                      ? `${allDeviceRules.length}`
                       : t("dashboard.feature.rules_unset")
                   }
-                  warn={config.layer_switch.rules.length === 0}
+                  warn={allDeviceRules.length === 0}
                 />
                 <FeatureRow
                   label={t("dashboard.feature.polling")}
                   value={`${config.polling.interval_ms} ms`}
                 />
-                {config.layer_switch.rules.length > 0 && (
+                {allDeviceRules.length > 0 && (
                   <div className="pt-1 space-y-1">
-                    {config.layer_switch.rules.slice(0, 3).map((r, i) => (
+                    {allDeviceRules.slice(0, 3).map((r, i) => (
                       <div key={i} className="flex items-center gap-2 text-xs text-gray-500">
                         <span className="inline-flex h-4 w-5 items-center justify-center rounded bg-primary/10 font-mono text-[10px] font-semibold text-primary">
                           L{r.layer}
@@ -245,9 +249,9 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
                         <span className="truncate">{r.name}</span>
                       </div>
                     ))}
-                    {config.layer_switch.rules.length > 3 && (
+                    {allDeviceRules.length > 3 && (
                       <p className="text-[11px] text-gray-400">
-                        {t("dashboard.feature.rules_others", { n: config.layer_switch.rules.length - 3 })}
+                        {t("dashboard.feature.rules_others", { n: allDeviceRules.length - 3 })}
                       </p>
                     )}
                   </div>

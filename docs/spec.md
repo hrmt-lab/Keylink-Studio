@@ -73,13 +73,15 @@ Tauri debug build では、プロジェクトルートの `rawhid-host.toml` を
 
 ## Layer Switching
 
+レイヤールールはデバイス単位 (`layer_switch.devices."uid:..."`) でのみ設定します。グローバルな共通ルールはありません。デバイス専用設定を持たないデバイスはレイヤー切り替えの対象外で、`APP_LAYER` packet を送信しません。
+
 各 tick で次を行います。
 
 1. verified HID device を確保します。
 2. 必要なら `TIME_SYNC` を送信します。
 3. 更新された `AI_USAGE` snapshot があれば provider ごとに送信します。
 4. active app を取得します。
-5. rule matching を行います。
+5. device ごとに、その device の専用 rules で rule matching を行います。
 6. action が前回と同じで device generation も変わっていなければ送信を省略します。
 7. `APP_LAYER set` または `APP_LAYER clear` を送信します。
 

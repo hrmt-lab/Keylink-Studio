@@ -35,12 +35,12 @@ export default function Rules({ config, setConfig, status }: Props) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [justAdded, setJustAdded] = useState<string | null>(null);
-  const [targetKey, setTargetKey] = useState("global");
+  const [targetKey, setTargetKey] = useState("");
 
   const appLayerDevices = status.host_link_devices.filter(isAppLayerDevice);
   const deviceTargets = buildDeviceTargets(config, appLayerDevices);
-  const selectedDeviceConfig = targetKey === "global" ? null : config.layer_switch.devices[targetKey];
-  const rules = targetKey === "global" ? config.layer_switch.rules : selectedDeviceConfig?.rules ?? [];
+  const selectedDeviceConfig = targetKey ? config.layer_switch.devices[targetKey] : undefined;
+  const rules = selectedDeviceConfig?.rules ?? [];
   const maxLayer = 31; // ZMK max layers (0-31)
 
   const loadApps = useCallback(async () => {
@@ -66,9 +66,14 @@ export default function Rules({ config, setConfig, status }: Props) {
 
   useEffect(() => { loadApps(); }, [loadApps]);
 
+  // Keep a valid device selected; fall back to the first known device.
   useEffect(() => {
-    if (targetKey !== "global" && !deviceTargets.some((target) => target.key === targetKey)) {
-      setTargetKey("global");
+    if (deviceTargets.length === 0) {
+      if (targetKey !== "") setTargetKey("");
+      return;
+    }
+    if (!deviceTargets.some((target) => target.key === targetKey)) {
+      setTargetKey(deviceTargets[0].key);
     }
   }, [deviceTargets, targetKey]);
 
@@ -80,12 +85,6 @@ export default function Rules({ config, setConfig, status }: Props) {
 
 
   const updateRulesForTarget = (nextRules: RuleConfig[]): AppConfig => {
-    if (targetKey === "global") {
-      return {
-        ...config,
-        layer_switch: { ...config.layer_switch, rules: nextRules },
-      };
-    }
     const existing = config.layer_switch.devices[targetKey] ?? {
       display_name: deviceTargets.find((target) => target.key === targetKey)?.label ?? null,
       enabled: true,
@@ -104,7 +103,7 @@ export default function Rules({ config, setConfig, status }: Props) {
     };
   };
   const addRule = async () => {
-    if (!selected) return;
+    if (!selected || !targetKey) return;
     setError(null);
     const newRule = buildRule(selected, layer);
     if (rules.some((r) => r.exe === newRule.exe && r.layer === newRule.layer)) {
@@ -145,6 +144,25 @@ export default function Rules({ config, setConfig, status }: Props) {
     setConfig(updated);
   };
 
+  // Remove the device-specific config section entirely. Without a section the
+  // device is no longer layer-managed (there is no global fallback).
+  const deleteDeviceConfig = async () => {
+    if (!targetKey || !selectedDeviceConfig) return;
+    const devices = { ...config.layer_switch.devices };
+    delete devices[targetKey];
+    const updated = { ...config, layer_switch: { ...config.layer_switch, devices } };
+    setSaving(true);
+    setError(null);
+    try {
+      await saveConfig(updated);
+      setConfig(updated);
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="flex h-full flex-col overflow-hidden">
 
@@ -155,19 +173,36 @@ export default function Rules({ config, setConfig, status }: Props) {
           <p className="mt-0.5 text-sm text-gray-500">{t("rules.subtitle")}</p>
         </div>
         <div className="flex items-center gap-3">
-          <select
-            value={targetKey}
-            onChange={(e) => { setTargetKey(e.target.value); setSelected(null); setError(null); }}
-            className="input min-w-48 text-sm"
-            title={t("rules.device_target")}
-          >
-            <option value="global">{t("rules.global_fallback")}</option>
-            {deviceTargets.map((device) => (
-              <option key={device.key} value={device.key}>
-                {device.label}
-              </option>
-            ))}
-          </select>
+          {deviceTargets.length === 0 ? (
+            <span className="text-sm text-gray-400">{t("rules.no_devices")}</span>
+          ) : (
+            <>
+              <select
+                value={targetKey}
+                onChange={(e) => { setTargetKey(e.target.value); setSelected(null); setError(null); }}
+                className="input !w-auto min-w-48 text-sm"
+                title={t("rules.device_target")}
+              >
+                {deviceTargets.map((device) => (
+                  <option key={device.key} value={device.key}>
+                    {device.label}
+                    {device.connected ? "" : ` ${t("rules.target_disconnected")}`}
+                  </option>
+                ))}
+              </select>
+              {selectedDeviceConfig && (
+                <button
+                  onClick={deleteDeviceConfig}
+                  disabled={saving}
+                  title={t("rules.delete_device_config")}
+                  aria-label={t("rules.delete_device_config")}
+                  className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-border bg-white text-gray-400 hover:border-red-300 hover:text-red-500 disabled:opacity-50"
+                >
+                  <Trash2 size={13} />
+                </button>
+              )}
+            </>
+          )}
           <span className="text-sm text-gray-600">{t("rules.toggle_label")}</span>
           <Toggle checked={config.layer_switch.enabled} onChange={toggleEnabled} disabled={saving} label={t("rules.toggle_label")} />
         </div>
@@ -277,7 +312,7 @@ export default function Rules({ config, setConfig, status }: Props) {
                   <select
                     value={layer}
                     onChange={(e) => setLayer(Number(e.target.value))}
-                    className="input w-20 cursor-pointer"
+                    className="input !w-20 cursor-pointer"
                   >
                     {Array.from({ length: maxLayer + 1 }, (_, i) => (
                       <option key={i} value={i}>L{i}</option>
@@ -288,7 +323,7 @@ export default function Rules({ config, setConfig, status }: Props) {
                 {/* Add button */}
                 <button
                   onClick={addRule}
-                  disabled={saving}
+                  disabled={saving || !targetKey}
                   className="flex flex-shrink-0 items-center gap-2 rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-white hover:bg-primary-dark disabled:opacity-60 transition-colors"
                 >
                   {saving
@@ -320,7 +355,7 @@ export default function Rules({ config, setConfig, status }: Props) {
             ) : (
               <div className="space-y-2">
                 <p className="mb-3 text-xs font-medium uppercase tracking-wide text-gray-400">
-                  {targetKey === "global" ? t("rules.count", { n: rules.length }) : t("rules.device_count", { n: rules.length })}
+                  {t("rules.count", { n: rules.length })}
                 </p>
                 {rules.map((rule, idx) => (
                   <RuleCard
@@ -349,14 +384,14 @@ function isAppLayerDevice(device: DeviceInfo) {
 }
 
 function buildDeviceTargets(config: AppConfig, appLayerDevices: DeviceInfo[]) {
-  const targets = new Map<string, { key: string; label: string }>();
+  const targets = new Map<string, { key: string; label: string; connected: boolean }>();
   for (const [key, deviceConfig] of Object.entries(config.layer_switch.devices ?? {})) {
-    targets.set(key, { key, label: deviceConfig.display_name || key });
+    targets.set(key, { key, label: deviceConfig.display_name || key, connected: false });
   }
   for (const device of appLayerDevices) {
     if (!device.device_uid_hash) continue;
     const label = device.product || device.serial_number || device.device_uid_hash;
-    targets.set(device.device_uid_hash, { key: device.device_uid_hash, label });
+    targets.set(device.device_uid_hash, { key: device.device_uid_hash, label, connected: true });
   }
   return Array.from(targets.values()).sort((a, b) => a.label.localeCompare(b.label));
 }

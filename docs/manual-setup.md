@@ -118,10 +118,15 @@ hello_timeout_ms = 200
 [layer_switch]
 enabled = true
 
-[[layer_switch.rules]]
-name = "Notepad"
-exe = "notepad.exe"
-layer = 1
+# レイヤールールはデバイスごとに設定します。
+# 設定がないキーボードはレイヤー切り替えの対象外です。
+#[layer_switch.devices."uid:7a91c3e4d102ab55"]
+#display_name = "Example Keyboard"
+#
+#[[layer_switch.devices."uid:7a91c3e4d102ab55".rules]]
+#name = "Notepad"
+#exe = "notepad.exe"
+#layer = 1
 
 [time]
 enabled = false

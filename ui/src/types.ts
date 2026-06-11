@@ -80,7 +80,6 @@ export interface DeviceLayerSwitchConfig {
 export interface LayerSwitchConfig {
   enabled: boolean;
   unmatched_action: UnmatchedAction;
-  rules: RuleConfig[];
   devices: Record<string, DeviceLayerSwitchConfig>;
 }
 

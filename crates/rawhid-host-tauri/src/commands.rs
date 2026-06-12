@@ -11,9 +11,11 @@ use std::{
 use rawhid_host_core::{
     active_app::SystemActiveAppProvider,
     ai_usage::{AiUsageRefreshError, AiUsageRuntime, AiUsageShared},
-    config::{load_config, AppConfig, ConfigPaths},
-    hid::{HidDeviceManager, ProbeResult},
-    runner::{RunEvent, Runner},
+    config::{load_config, ActionsConfig, AppConfig, ConfigPaths},
+    hid::{DeviceInfo, HidDeviceManager, ProbeResult},
+    packet::UplinkPacket,
+    runner::{uplink_device_key, RunEvent, Runner},
+    stats::{KeyStatsSummary, SharedKeyStatsStore, StatsPeriod},
     studio::{
         probe_usb_serial_devices, read_keymap_for_device, StudioDeviceStatus, StudioError,
         StudioKeymapSnapshot,
@@ -23,9 +25,18 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::foreground::ForegroundWatcher;
 use crate::state::{add_log, AppState, LogEntry, MonitorCommand, MonitorStatus};
-use crate::{icon, startup};
+use crate::{actions, icon, startup};
 
 type MonitorRunner = Runner<SystemActiveAppProvider, rawhid_host_core::hid::RealHidTransport>;
+
+/// Shared handles the monitor loop needs beyond its own status/log arcs,
+/// mainly for executing HOST_ACTION packets and persisting key stats.
+pub struct MonitorExtras {
+    pub config: Arc<std::sync::Mutex<AppConfig>>,
+    pub ai_usage_runtime: Arc<std::sync::Mutex<Option<AiUsageRuntime>>>,
+    pub ai_usage_refreshing: Arc<AtomicBool>,
+    pub key_stats: SharedKeyStatsStore,
+}
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct RunningApp {
@@ -384,6 +395,12 @@ pub fn begin_monitoring(app: AppHandle, state: &AppState) -> Result<(), String> 
         .unwrap()
         .as_ref()
         .map(AiUsageRuntime::shared);
+    let extras = MonitorExtras {
+        config: Arc::clone(&state.config),
+        ai_usage_runtime: Arc::clone(&state.ai_usage_runtime),
+        ai_usage_refreshing: Arc::clone(&state.ai_usage_refreshing),
+        key_stats: Arc::clone(&state.key_stats),
+    };
 
     let (tx, rx) = mpsc::channel();
     let watcher_tx = tx.clone();
@@ -401,6 +418,7 @@ pub fn begin_monitoring(app: AppHandle, state: &AppState) -> Result<(), String> 
             log_counter,
             rx,
             ai_usage_shared,
+            extras,
         );
         *stop_tx_arc.lock().unwrap() = None;
     });
@@ -464,7 +482,7 @@ pub fn refresh_ai_usage(app: AppHandle, state: State<AppState>) -> Result<(), St
     Ok(())
 }
 
-fn spawn_ai_refresh_watcher(
+pub(crate) fn spawn_ai_refresh_watcher(
     app: AppHandle,
     config: Arc<std::sync::Mutex<AppConfig>>,
     runtime: Arc<std::sync::Mutex<Option<AiUsageRuntime>>>,
@@ -551,6 +569,8 @@ fn apply_runner_view(s: &mut MonitorStatus, runner: &MonitorRunner) {
     s.connected_device_names = runner.verified_device_names();
     s.host_link_devices = runner.verified_devices();
     s.ai_usage = runner.ai_usage_statuses();
+    s.device_battery = runner.battery_statuses();
+    s.device_layers = runner.layer_states();
 }
 
 fn apply_monitor_config(
@@ -560,8 +580,15 @@ fn apply_monitor_config(
     interval: &mut Duration,
     status: &Arc<std::sync::Mutex<MonitorStatus>>,
     ai_usage_shared: Option<AiUsageShared>,
+    extras: &MonitorExtras,
+    actions_cfg: &mut ActionsConfig,
 ) -> Result<(), String> {
+    *actions_cfg = next_config.actions.clone();
+    if let Ok(mut store) = extras.key_stats.lock() {
+        store.set_flush_interval(Duration::from_secs(next_config.stats.flush_interval_sec.max(1)));
+    }
     *runner = rebuild_runner(&next_config, ai_usage_shared)?;
+    runner.set_key_stats_store(Arc::clone(&extras.key_stats));
     *interval = Duration::from_millis(next_config.polling.interval_ms);
 
     let mut s = status.lock().unwrap();
@@ -570,6 +597,8 @@ fn apply_monitor_config(
     s.connected_devices = 0;
     s.connected_device_names = Vec::new();
     s.host_link_devices = Vec::new();
+    s.device_battery = Vec::new();
+    s.device_layers = Vec::new();
     s.ai_usage = runner.ai_usage_statuses();
     s.last_error = None;
     let _ = app.emit("status-update", &*s);
@@ -586,10 +615,16 @@ fn process_command(
     status: &Arc<std::sync::Mutex<MonitorStatus>>,
     log_entries: &Arc<std::sync::Mutex<std::collections::VecDeque<LogEntry>>>,
     log_counter: &Arc<std::sync::Mutex<u64>>,
+    extras: &MonitorExtras,
+    actions_cfg: &mut ActionsConfig,
 ) -> bool {
     match command {
         MonitorCommand::Stop => true,
         MonitorCommand::ForegroundChanged => false,
+        MonitorCommand::InjectUplink(device, packet) => {
+            runner.inject_uplink(device, packet);
+            false
+        }
         MonitorCommand::UpdateConfig(next_config, ai_usage_shared) => {
             if let Err(e) = apply_monitor_config(
                 app,
@@ -598,6 +633,8 @@ fn process_command(
                 interval,
                 status,
                 ai_usage_shared,
+                extras,
+                actions_cfg,
             ) {
                 let msg = format!("HID init error: {}", e);
                 {
@@ -613,6 +650,79 @@ fn process_command(
     }
 }
 
+/// Handle uplink events drained from the runner. Returns `true` when a
+/// HOST_ACTION requested the monitor loop to stop.
+fn handle_uplink_events(
+    app: &AppHandle,
+    runner: &mut MonitorRunner,
+    actions_cfg: &ActionsConfig,
+    extras: &MonitorExtras,
+    status: &Arc<std::sync::Mutex<MonitorStatus>>,
+    log_entries: &Arc<std::sync::Mutex<std::collections::VecDeque<LogEntry>>>,
+    log_counter: &Arc<std::sync::Mutex<u64>>,
+) -> bool {
+    let mut should_stop = false;
+    for event in runner.take_uplink_events() {
+        match &event.packet {
+            UplinkPacket::HostAction(action) => {
+                // Bindings are per device; a device without an (enabled)
+                // config section only has its actions logged.
+                let device_key = uplink_device_key(&event.device);
+                let binding = actions_cfg
+                    .enabled
+                    .then(|| {
+                        actions_cfg
+                            .devices
+                            .get(&device_key)
+                            .filter(|device_cfg| device_cfg.enabled)
+                            .and_then(|device_cfg| {
+                                device_cfg
+                                    .bindings
+                                    .iter()
+                                    .find(|b| b.action_id == action.action_id)
+                            })
+                    })
+                    .flatten();
+                let message = match binding {
+                    Some(binding) => {
+                        match actions::execute(app, binding, action.value, extras, status) {
+                            Ok(actions::ActionOutcome::Continue) => format!(
+                                "host action {} executed ({:?})",
+                                action.action_id, binding.action
+                            ),
+                            Ok(actions::ActionOutcome::StopRequested) => {
+                                should_stop = true;
+                                format!("host action {}: stop monitoring", action.action_id)
+                            }
+                            Err(error) => {
+                                format!("host action {} failed: {}", action.action_id, error)
+                            }
+                        }
+                    }
+                    None if actions_cfg.enabled => format!(
+                        "unbound host action id={} value={} ({})",
+                        action.action_id, action.value, device_key
+                    ),
+                    None => format!(
+                        "host action id={} ignored (actions disabled)",
+                        action.action_id
+                    ),
+                };
+                let entry = add_log(log_entries, log_counter, "info", &message);
+                let _ = app.emit("log-added", entry);
+            }
+            UplinkPacket::KeyStats(_) => {
+                let _ = app.emit("key-stats-updated", uplink_device_key(&event.device));
+            }
+            // Battery / layer state are part of MonitorStatus and flow
+            // through the regular status-update emission.
+            UplinkPacket::Battery(_) | UplinkPacket::LayerState(_) => {}
+        }
+    }
+    should_stop
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_monitor_loop(
     app: AppHandle,
     config: AppConfig,
@@ -621,7 +731,9 @@ fn run_monitor_loop(
     log_counter: Arc<std::sync::Mutex<u64>>,
     rx: mpsc::Receiver<MonitorCommand>,
     ai_usage_shared: Option<AiUsageShared>,
+    extras: MonitorExtras,
 ) {
+    let mut actions_cfg = config.actions.clone();
     let mut runner = match rebuild_runner(&config, ai_usage_shared) {
         Ok(runner) => runner,
         Err(e) => {
@@ -636,6 +748,7 @@ fn run_monitor_loop(
             return;
         }
     };
+    runner.set_key_stats_store(Arc::clone(&extras.key_stats));
 
     {
         let mut s = status.lock().unwrap();
@@ -662,6 +775,8 @@ fn run_monitor_loop(
                         &status,
                         &log_entries,
                         &log_counter,
+                        &extras,
+                        &mut actions_cfg,
                     ) {
                         should_stop = true;
                         break;
@@ -703,10 +818,14 @@ fn run_monitor_loop(
                 let devices = runner.verified_device_count();
                 let host_link_devices = runner.verified_devices();
                 let ai_usage = runner.ai_usage_statuses();
+                let device_battery = runner.battery_statuses();
+                let device_layers = runner.layer_states();
                 let mut s = status.lock().unwrap();
                 if s.connected_devices != devices
                     || s.ai_usage != ai_usage
                     || s.host_link_devices != host_link_devices
+                    || s.device_battery != device_battery
+                    || s.device_layers != device_layers
                 {
                     apply_runner_view(&mut s, &runner);
                     let _ = app.emit("status-update", &*s);
@@ -724,6 +843,18 @@ fn run_monitor_loop(
             }
         }
 
+        if handle_uplink_events(
+            &app,
+            &mut runner,
+            &actions_cfg,
+            &extras,
+            &status,
+            &log_entries,
+            &log_counter,
+        ) {
+            break;
+        }
+
         match rx.recv_timeout(interval) {
             Ok(command) => {
                 if process_command(
@@ -734,6 +865,8 @@ fn run_monitor_loop(
                     &status,
                     &log_entries,
                     &log_counter,
+                    &extras,
+                    &mut actions_cfg,
                 ) {
                     break;
                 }
@@ -741,6 +874,10 @@ fn run_monitor_loop(
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
             Err(mpsc::RecvTimeoutError::Timeout) => {}
         }
+    }
+
+    if let Ok(mut store) = extras.key_stats.lock() {
+        store.flush_all();
     }
 
     {
@@ -751,11 +888,95 @@ fn run_monitor_loop(
         s.host_link_devices = Vec::new();
         s.current_layer = None;
         s.current_rule = None;
+        s.device_battery = Vec::new();
+        s.device_layers = Vec::new();
         let _ = app.emit("status-update", &*s);
     }
 
     let entry = add_log(&log_entries, &log_counter, "info", "Monitoring stopped");
     let _ = app.emit("log-added", entry);
+}
+
+#[tauri::command]
+pub fn get_key_stats(
+    device_uid: String,
+    period: String,
+    state: State<AppState>,
+) -> Result<KeyStatsSummary, String> {
+    let period = StatsPeriod::parse(&period).ok_or_else(|| "invalid_period".to_string())?;
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let mut store = state.key_stats.lock().map_err(|_| "stats_unavailable")?;
+    Ok(store.summary(&device_uid, period, &today))
+}
+
+#[tauri::command]
+pub fn list_key_stats_devices(state: State<AppState>) -> Vec<String> {
+    state
+        .key_stats
+        .lock()
+        .map(|store| store.device_keys())
+        .unwrap_or_default()
+}
+
+/// Debug-only helper to exercise the uplink path without firmware. Accepts a
+/// 32-byte packet payload as hex and feeds it through the monitor loop.
+#[tauri::command]
+pub fn debug_inject_uplink(
+    device_uid: String,
+    payload_hex: String,
+    state: State<AppState>,
+) -> Result<(), String> {
+    #[cfg(not(debug_assertions))]
+    {
+        let _ = (device_uid, payload_hex, state);
+        Err("debug_only".to_string())
+    }
+    #[cfg(debug_assertions)]
+    {
+        let bytes = decode_hex(&payload_hex)?;
+        if bytes.len() != rawhid_host_core::PACKET_SIZE {
+            return Err(format!(
+                "payload must be {} bytes, got {}",
+                rawhid_host_core::PACKET_SIZE,
+                bytes.len()
+            ));
+        }
+        let packet = UplinkPacket::decode_payload(&bytes).map_err(|e| e.to_string())?;
+        let uid = device_uid
+            .strip_prefix("uid:")
+            .and_then(|hex| u64::from_str_radix(hex, 16).ok());
+        let device = DeviceInfo {
+            path: format!("debug:{device_uid}"),
+            vendor_id: 0,
+            product_id: 0,
+            usage_page: 0,
+            usage: 0,
+            manufacturer: None,
+            product: Some("debug".to_string()),
+            serial_number: None,
+            capabilities: packet.required_capability(),
+            device_uid_hash: uid,
+        };
+        let tx = state.stop_tx.lock().unwrap();
+        match tx.as_ref() {
+            Some(tx) => tx
+                .send(MonitorCommand::InjectUplink(device, packet))
+                .map_err(|_| "monitor_loop_gone".to_string()),
+            None => Err("not_running".to_string()),
+        }
+    }
+}
+
+#[cfg(debug_assertions)]
+fn decode_hex(input: &str) -> Result<Vec<u8>, String> {
+    let cleaned: String = input.chars().filter(|c| !c.is_whitespace()).collect();
+    if cleaned.len() % 2 != 0 {
+        return Err("hex string must have even length".to_string());
+    }
+    (0..cleaned.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&cleaned[i..i + 2], 16).map_err(|e| e.to_string()))
+        .collect()
 }
 
 #[tauri::command]

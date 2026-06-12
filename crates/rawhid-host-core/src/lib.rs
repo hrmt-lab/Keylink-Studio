@@ -5,6 +5,7 @@ pub mod config;
 pub mod hid;
 pub mod packet;
 pub mod runner;
+pub mod stats;
 pub mod studio;
 pub mod time;
 
@@ -20,11 +21,17 @@ pub use config::{
 };
 pub use hid::{DeviceInfo, HidDeviceManager, HidTransport, ProbeResult};
 pub use packet::{
-    AiUsageErrorCode, AiUsageFlags, AiUsagePacket, AiUsageProvider, AppLayerAction, DeviceHello,
-    Packet, PacketType, TimeSyncPacket, CAPABILITY_AI_USAGE, CAPABILITY_APP_LAYER,
-    CAPABILITY_THEME, CAPABILITY_TIME_SYNC, PACKET_SIZE, REPORT_SIZE,
+    AiUsageErrorCode, AiUsageFlags, AiUsagePacket, AiUsageProvider, AppLayerAction, BatteryEntry,
+    BatteryStatusPacket, DeviceHello, HostActionPacket, KeyStatsEntry, KeyStatsPacket,
+    LayerStatePacket, Packet, PacketType, TimeSyncPacket, UplinkPacket, CAPABILITY_AI_USAGE,
+    CAPABILITY_APP_LAYER, CAPABILITY_BATTERY, CAPABILITY_HOST_ACTION, CAPABILITY_KEY_STATS,
+    CAPABILITY_LAYER_STATE, CAPABILITY_THEME, CAPABILITY_TIME_SYNC, PACKET_SIZE, REPORT_SIZE,
 };
-pub use runner::{RunEvent, Runner};
+pub use runner::{
+    uplink_device_key, DeviceBatterySource, DeviceBatteryStatus, DeviceLayerState, RunEvent,
+    Runner, UplinkEvent,
+};
+pub use stats::{KeyStatsStore, KeyStatsSummary, SharedKeyStatsStore, StatsPeriod};
 pub use studio::{
     KeymapViewerStatus, StudioBinding, StudioDeviceStatus, StudioError, StudioErrorCode,
     StudioKeymapSnapshot, StudioLayer, StudioLayoutSource, StudioLockState, StudioPhysicalKey,

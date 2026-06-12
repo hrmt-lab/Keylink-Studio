@@ -331,6 +331,54 @@ function CodexAdvanced({
       />
       <SettingRow
         compact
+        label={t("ai_usage.codex.auto_detect")}
+        description={t("ai_usage.codex.auto_detect.desc")}
+      >
+        <Toggle
+          checked={draft.ai_usage.codex.sessions_auto_detect}
+          onChange={(sessions_auto_detect) =>
+            updateAiUsage({
+              ...draft.ai_usage,
+              codex: { ...draft.ai_usage.codex, sessions_auto_detect },
+            })
+          }
+        />
+      </SettingRow>
+      <SettingRow
+        compact
+        label={t("ai_usage.codex.include_wsl")}
+        description={t("ai_usage.codex.include_wsl.desc")}
+      >
+        <Toggle
+          checked={draft.ai_usage.codex.include_wsl_sessions}
+          onChange={(include_wsl_sessions) =>
+            updateAiUsage({
+              ...draft.ai_usage,
+              codex: { ...draft.ai_usage.codex, include_wsl_sessions },
+            })
+          }
+        />
+      </SettingRow>
+      <TextAreaRow
+        label={t("ai_usage.codex.extra_paths")}
+        description={t("ai_usage.codex.extra_paths.desc")}
+        value={draft.ai_usage.codex.extra_sessions_paths.join("\n")}
+        placeholder="\\\\wsl.localhost\\Ubuntu\\home\\<user>\\.codex\\sessions"
+        onChange={(value) =>
+          updateAiUsage({
+            ...draft.ai_usage,
+            codex: {
+              ...draft.ai_usage.codex,
+              extra_sessions_paths: value
+                .split("\n")
+                .map((line) => line.trim())
+                .filter(Boolean),
+            },
+          })
+        }
+      />
+      <SettingRow
+        compact
         label={t("ai_usage.codex.history_fallback")}
         description={t("ai_usage.codex.history_fallback.desc")}
       >

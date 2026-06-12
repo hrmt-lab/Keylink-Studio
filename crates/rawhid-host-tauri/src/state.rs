@@ -2,13 +2,16 @@ use std::{
     collections::VecDeque,
     path::PathBuf,
     sync::{atomic::AtomicBool, Arc, Mutex},
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use rawhid_host_core::{
     ai_usage::{AiUsageProviderStatus, AiUsageRuntime, AiUsageShared},
     config::AppConfig,
     hid::DeviceInfo,
+    packet::UplinkPacket,
+    runner::{DeviceBatteryStatus, DeviceLayerState},
+    stats::{default_stats_dir, KeyStatsStore, SharedKeyStatsStore},
 };
 
 pub const MAX_LOG_ENTRIES: usize = 200;
@@ -31,6 +34,8 @@ pub struct MonitorStatus {
     pub current_rule: Option<String>,
     pub last_error: Option<String>,
     pub ai_usage: Vec<AiUsageProviderStatus>,
+    pub device_battery: Vec<DeviceBatteryStatus>,
+    pub device_layers: Vec<DeviceLayerState>,
 }
 
 impl Default for MonitorStatus {
@@ -44,6 +49,8 @@ impl Default for MonitorStatus {
             current_rule: None,
             last_error: None,
             ai_usage: Vec::new(),
+            device_battery: Vec::new(),
+            device_layers: Vec::new(),
         }
     }
 }
@@ -57,6 +64,7 @@ pub struct AppState {
     pub stop_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<MonitorCommand>>>>,
     pub ai_usage_refreshing: Arc<AtomicBool>,
     pub ai_usage_runtime: Arc<Mutex<Option<AiUsageRuntime>>>,
+    pub key_stats: SharedKeyStatsStore,
 }
 
 #[derive(Debug, Clone)]
@@ -65,6 +73,8 @@ pub enum MonitorCommand {
     UpdateConfig(AppConfig, Option<AiUsageShared>),
     /// The OS foreground window changed; wake the loop to re-evaluate immediately.
     ForegroundChanged,
+    /// Debug-only: feed a synthetic uplink packet through the normal path.
+    InjectUplink(DeviceInfo, UplinkPacket),
 }
 
 impl AppState {
@@ -76,6 +86,12 @@ impl AppState {
             .unwrap_or_default();
         let mut status = MonitorStatus::default();
         status.ai_usage = ai_usage_statuses;
+        let stats_dir = default_stats_dir()
+            .unwrap_or_else(|| std::env::temp_dir().join("rawhid-host").join("stats"));
+        let key_stats = Arc::new(Mutex::new(KeyStatsStore::new(
+            stats_dir,
+            Duration::from_secs(config.stats.flush_interval_sec.max(1)),
+        )));
         Self {
             config: Arc::new(Mutex::new(config)),
             config_path: Arc::new(Mutex::new(config_path)),
@@ -85,6 +101,7 @@ impl AppState {
             stop_tx: Arc::new(Mutex::new(None)),
             ai_usage_refreshing: Arc::new(AtomicBool::new(false)),
             ai_usage_runtime: Arc::new(Mutex::new(ai_usage_runtime)),
+            key_stats,
         }
     }
 }

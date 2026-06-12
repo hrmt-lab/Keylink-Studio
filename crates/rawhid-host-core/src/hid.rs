@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     ffi::CString,
     fmt,
     time::{Duration, Instant},
@@ -12,7 +12,10 @@ use tracing::{debug, warn};
 
 use crate::{
     config::HidConfig,
-    packet::{AiUsagePacket, DeviceHello, Packet, TimeSyncPacket, PACKET_SIZE, REPORT_SIZE},
+    packet::{
+        AiUsagePacket, DeviceHello, Packet, TimeSyncPacket, UplinkPacket, MAGIC, PACKET_SIZE,
+        REPORT_SIZE, VERSION,
+    },
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -72,12 +75,24 @@ pub trait HidTransport {
     ) -> Result<Option<DeviceHello>, HidError>;
     fn write_report(&self, device: &DeviceInfo, report: &[u8; REPORT_SIZE])
         -> Result<(), HidError>;
+    /// Read one 32-byte input report if available. The default no-op keeps
+    /// transports without an uplink path (and test mocks) working unchanged.
+    fn read_packet(
+        &self,
+        _device: &DeviceInfo,
+        _timeout_ms: i32,
+    ) -> Result<Option<[u8; PACKET_SIZE]>, HidError> {
+        Ok(None)
+    }
     fn forget_device(&self, _device: &DeviceInfo) {}
 }
 
 pub struct RealHidTransport {
     api: RefCell<HidApi>,
     handles: RefCell<HashMap<String, hidapi::HidDevice>>,
+    /// Uplink packets that arrived while waiting for a DEVICE_HELLO response;
+    /// they are handed back out through `read_packet` instead of being lost.
+    pending_uplink: RefCell<HashMap<String, VecDeque<[u8; PACKET_SIZE]>>>,
 }
 
 impl RealHidTransport {
@@ -85,6 +100,7 @@ impl RealHidTransport {
         Ok(Self {
             api: RefCell::new(HidApi::new().map_err(HidError::Hid)?),
             handles: RefCell::new(HashMap::new()),
+            pending_uplink: RefCell::new(HashMap::new()),
         })
     }
 
@@ -133,19 +149,38 @@ impl HidTransport for RealHidTransport {
         let hid = self.open_device(&device.path)?;
         hid.write(&packet.encode_report()).map_err(HidError::Hid)?;
 
+        // Devices may emit uplink packets at any time, so the HELLO response
+        // is not necessarily the next report. Skip (and keep) other valid HL
+        // packets until the matching DEVICE_HELLO arrives or the timeout ends.
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(0) as u64);
         let mut buffer = [0u8; PACKET_SIZE];
-        let read = hid
-            .read_timeout(&mut buffer, timeout_ms)
-            .map_err(HidError::Hid)?;
-        if read == 0 || read != PACKET_SIZE {
-            return Ok(None);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let read = hid
+                .read_timeout(&mut buffer, (remaining.as_millis() as i32).max(1))
+                .map_err(HidError::Hid)?;
+            if read == PACKET_SIZE {
+                match DeviceHello::decode_payload(&buffer) {
+                    Ok(response) if response.seq == packet.seq => {
+                        self.handles.borrow_mut().insert(device.path.clone(), hid);
+                        return Ok(Some(response));
+                    }
+                    Ok(_) => {} // stale HELLO from an earlier probe; keep waiting
+                    Err(_) => {
+                        if buffer[0..2] == MAGIC && buffer[2] == VERSION {
+                            self.pending_uplink
+                                .borrow_mut()
+                                .entry(device.path.clone())
+                                .or_default()
+                                .push_back(buffer);
+                        }
+                    }
+                }
+            }
+            if Instant::now() >= deadline {
+                return Ok(None);
+            }
         }
-        let response = DeviceHello::decode_payload(&buffer).map_err(HidError::Packet)?;
-        if response.seq != packet.seq {
-            return Ok(None);
-        }
-        self.handles.borrow_mut().insert(device.path.clone(), hid);
-        Ok(Some(response))
     }
 
     fn write_report(
@@ -164,8 +199,40 @@ impl HidTransport for RealHidTransport {
         Ok(())
     }
 
+    fn read_packet(
+        &self,
+        device: &DeviceInfo,
+        timeout_ms: i32,
+    ) -> Result<Option<[u8; PACKET_SIZE]>, HidError> {
+        if let Some(queue) = self.pending_uplink.borrow_mut().get_mut(&device.path) {
+            if let Some(buffered) = queue.pop_front() {
+                return Ok(Some(buffered));
+            }
+        }
+
+        let mut handles = self.handles.borrow_mut();
+        if !handles.contains_key(&device.path) {
+            let hid = self.open_device(&device.path)?;
+            handles.insert(device.path.clone(), hid);
+        }
+        let hid = handles
+            .get(&device.path)
+            .expect("handle inserted above is present");
+
+        let mut buffer = [0u8; PACKET_SIZE];
+        let read = hid
+            .read_timeout(&mut buffer, timeout_ms)
+            .map_err(HidError::Hid)?;
+        if read == PACKET_SIZE {
+            Ok(Some(buffer))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn forget_device(&self, device: &DeviceInfo) {
         self.handles.borrow_mut().remove(&device.path);
+        self.pending_uplink.borrow_mut().remove(&device.path);
     }
 }
 
@@ -358,6 +425,38 @@ impl<T: HidTransport> HidDeviceManager<T> {
         Ok(sent)
     }
 
+    /// Drain pending device-initiated packets from all verified devices.
+    /// Invalid packets are logged and skipped; read errors drop the device
+    /// (same policy as write failures).
+    pub fn drain_uplink(&mut self) -> Vec<(DeviceInfo, UplinkPacket)> {
+        // Livelock guard: a chattering device cannot pin the monitor loop.
+        const MAX_PACKETS_PER_DEVICE: usize = 64;
+
+        let devices = self.verified.clone();
+        let mut events = Vec::new();
+        for device in devices {
+            for _ in 0..MAX_PACKETS_PER_DEVICE {
+                match self.transport.read_packet(&device, 0) {
+                    Ok(Some(payload)) => match UplinkPacket::decode_payload(&payload) {
+                        Ok(packet) => events.push((device.clone(), packet)),
+                        Err(error) => {
+                            warn!("invalid uplink packet from {}: {}", device.path, error);
+                        }
+                    },
+                    Ok(None) => break,
+                    Err(error) => {
+                        warn!("Raw HID read failed for {}: {}", device.path, error);
+                        self.transport.forget_device(&device);
+                        self.verified.retain(|d| d.path != device.path);
+                        self.generation = self.generation.wrapping_add(1);
+                        break;
+                    }
+                }
+            }
+        }
+        events
+    }
+
     fn next_seq(&mut self) -> u8 {
         let seq = self.seq;
         self.seq = self.seq.wrapping_add(1);
@@ -385,7 +484,9 @@ mod tests {
         candidates: RefCell<Vec<DeviceInfo>>,
         hello_paths: RefCell<HashSet<String>>,
         failing_writes: RefCell<HashSet<String>>,
+        failing_reads: RefCell<HashSet<String>>,
         writes: RefCell<Vec<(String, [u8; REPORT_SIZE])>>,
+        uplink: RefCell<HashMap<String, VecDeque<[u8; PACKET_SIZE]>>>,
     }
 
     impl HidTransport for MockTransport {
@@ -424,6 +525,21 @@ mod tests {
                 .borrow_mut()
                 .push((device.path.clone(), *report));
             Ok(())
+        }
+
+        fn read_packet(
+            &self,
+            device: &DeviceInfo,
+            _timeout_ms: i32,
+        ) -> Result<Option<[u8; PACKET_SIZE]>, HidError> {
+            if self.failing_reads.borrow().contains(&device.path) {
+                return Err(HidError::InvalidDevicePath);
+            }
+            Ok(self
+                .uplink
+                .borrow_mut()
+                .get_mut(&device.path)
+                .and_then(VecDeque::pop_front))
         }
     }
 
@@ -507,6 +623,96 @@ mod tests {
         assert_eq!(manager.verified_devices(), &[device("b")]);
         assert_eq!(manager.device_generation(), 2);
     }
+    #[test]
+    fn drain_uplink_decodes_pending_packets_in_order() {
+        use crate::packet::{
+            BatteryEntry, BatteryStatusPacket, LayerStatePacket, UplinkPacket,
+        };
+
+        let transport = MockTransport {
+            candidates: RefCell::new(vec![device("a")]),
+            ..MockTransport::default()
+        };
+        transport.hello_paths.borrow_mut().insert("a".to_string());
+        let battery = UplinkPacket::Battery(BatteryStatusPacket {
+            entries: vec![BatteryEntry {
+                source: 0,
+                level: Some(80),
+            }],
+        });
+        let layer = UplinkPacket::LayerState(LayerStatePacket {
+            active_layer: 2,
+            layer_mask: 0,
+            seq: 1,
+        });
+        transport.uplink.borrow_mut().insert(
+            "a".to_string(),
+            VecDeque::from(vec![battery.encode_payload(), layer.encode_payload()]),
+        );
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        manager.probe().unwrap();
+
+        let events = manager.drain_uplink();
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0].1, battery);
+        assert_eq!(events[1].1, layer);
+        assert!(manager.drain_uplink().is_empty());
+    }
+
+    #[test]
+    fn drain_uplink_skips_invalid_packets() {
+        use crate::packet::{LayerStatePacket, UplinkPacket};
+
+        let transport = MockTransport {
+            candidates: RefCell::new(vec![device("a")]),
+            ..MockTransport::default()
+        };
+        transport.hello_paths.borrow_mut().insert("a".to_string());
+        let mut garbage = [0u8; PACKET_SIZE];
+        garbage[0..2].copy_from_slice(b"HL");
+        garbage[2] = 1;
+        garbage[3] = 0x70;
+        garbage[4] = 99; // invalid layer
+        let valid = UplinkPacket::LayerState(LayerStatePacket {
+            active_layer: 1,
+            layer_mask: 0,
+            seq: 0,
+        });
+        transport.uplink.borrow_mut().insert(
+            "a".to_string(),
+            VecDeque::from(vec![garbage, valid.encode_payload()]),
+        );
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        manager.probe().unwrap();
+
+        let events = manager.drain_uplink();
+
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].1, valid);
+        assert_eq!(manager.verified_devices().len(), 1);
+    }
+
+    #[test]
+    fn drain_uplink_read_error_removes_device() {
+        let transport = MockTransport {
+            candidates: RefCell::new(vec![device("a"), device("b")]),
+            ..MockTransport::default()
+        };
+        transport.hello_paths.borrow_mut().insert("a".to_string());
+        transport.hello_paths.borrow_mut().insert("b".to_string());
+        transport.failing_reads.borrow_mut().insert("a".to_string());
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        manager.probe().unwrap();
+        let generation = manager.device_generation();
+
+        let events = manager.drain_uplink();
+
+        assert!(events.is_empty());
+        assert_eq!(manager.verified_devices(), &[device("b")]);
+        assert_ne!(manager.device_generation(), generation);
+    }
+
     #[test]
     fn periodic_rescan_adds_new_verified_devices() {
         let start = Instant::now();

@@ -29,6 +29,12 @@ interface Props {
   logs: LogEntry[];
 }
 
+/** Case-insensitive serial match between a connected device and battery data. */
+function serialsMatch(a: string | null, b: string | null): boolean {
+  if (!a || !b) return false;
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
 export default function Dashboard({ config, setConfig, status, logs }: Props) {
   const { t, lang } = useLang();
   const [actionLoading, setActionLoading] = useState(false);
@@ -180,12 +186,33 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
 
             {status.connected_device_names.length > 0 ? (
               <div className="space-y-1 border-t border-border/60 pt-2.5">
-                {status.connected_device_names.slice(0, 2).map((name, i) => (
-                  <div key={i} className="flex items-center gap-1.5 truncate text-[11px] text-gray-400">
-                    <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-primary/40" />
-                    <span className="truncate">{name}</span>
-                  </div>
-                ))}
+                {status.connected_device_names.slice(0, 2).map((name, i) => {
+                  // connected_device_names and host_link_devices share the same order.
+                  const device = status.host_link_devices[i] ?? null;
+                  const battery = device
+                    ? status.device_battery.find(
+                        (b) =>
+                          serialsMatch(b.serial_number, device.serial_number) ||
+                          (b.product !== null && b.product === device.product)
+                      ) ?? null
+                    : null;
+                  return (
+                    <div key={i} className="flex items-center gap-1.5 text-[11px] text-gray-400">
+                      <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-primary/40" />
+                      <span className="min-w-0 truncate">{name}</span>
+                      {battery && (
+                        <span className="ml-auto flex flex-shrink-0 items-center gap-1.5">
+                          {battery.sources.map((source) => (
+                            <span key={source.source} className="font-mono">
+                              {t(`battery.source.${source.source}` as Parameters<typeof t>[0])}{" "}
+                              {source.level === null ? "--" : `${source.level}%`}
+                            </span>
+                          ))}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
                 {status.connected_device_names.length > 2 && (
                   <div className="text-[11px] text-gray-400">
                     {t("dashboard.feature.rules_others", { n: status.connected_device_names.length - 2 })}

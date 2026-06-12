@@ -1,6 +1,15 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
-import type { AppConfig, MonitorStatus, LogEntry, ProbeResult, StudioDeviceStatus, StudioKeymapSnapshot } from "./types";
+import type {
+  AppConfig,
+  KeyStatsSummary,
+  LogEntry,
+  MonitorStatus,
+  ProbeResult,
+  StatsPeriod,
+  StudioDeviceStatus,
+  StudioKeymapSnapshot,
+} from "./types";
 
 export interface ConfigLocationResult {
   path: string;
@@ -55,6 +64,13 @@ export const startMonitoring = () => invoke<void>("start_monitoring");
 export const stopMonitoring = () => invoke<void>("stop_monitoring");
 export const refreshAiUsage = () => invoke<void>("refresh_ai_usage");
 
+// ─── Key Stats ────────────────────────────────────────────────────────────────
+
+export const getKeyStats = (deviceUid: string, period: StatsPeriod) =>
+  invoke<KeyStatsSummary>("get_key_stats", { deviceUid, period });
+export const listKeyStatsDevices = () =>
+  invoke<string[]>("list_key_stats_devices");
+
 // ─── Events ───────────────────────────────────────────────────────────────────
 
 export const onStatusUpdate = (
@@ -66,3 +82,8 @@ export const onLogAdded = (
   cb: (entry: LogEntry) => void
 ): Promise<UnlistenFn> =>
   listen<LogEntry>("log-added", (e) => cb(e.payload));
+
+export const onKeyStatsUpdated = (
+  cb: (deviceKey: string) => void
+): Promise<UnlistenFn> =>
+  listen<string>("key-stats-updated", (e) => cb(e.payload));

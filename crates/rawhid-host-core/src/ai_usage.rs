@@ -444,16 +444,12 @@ fn stale_or_error(
 }
 
 fn collect_codex(config: &CodexAiUsageConfig) -> AiUsageSnapshot {
-    let sessions_dir = config
-        .sessions_dir
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(default_codex_sessions_dir);
-    if let Some(snapshot) = codex_rate_limits_snapshot(&sessions_dir) {
+    let sessions_dirs = codex_sessions_dirs(config);
+    if let Some(snapshot) = codex_rate_limits_snapshot(&sessions_dirs) {
         return snapshot;
     }
     if config.history_fallback_enabled {
-        return codex_history_snapshot(&sessions_dir, config);
+        return codex_history_snapshot(&sessions_dirs, config);
     }
     AiUsageSnapshot::error(
         AiUsageProvider::Codex,
@@ -462,8 +458,38 @@ fn collect_codex(config: &CodexAiUsageConfig) -> AiUsageSnapshot {
     )
 }
 
-fn codex_rate_limits_snapshot(sessions_dir: &Path) -> Option<AiUsageSnapshot> {
-    for path in sorted_jsonl_files(sessions_dir) {
+/// Resolve the set of Codex session directories to read. An explicit
+/// `sessions_dir` is always included; when auto-detection is on we also add the
+/// Windows default, every WSL distro's `~/.codex/sessions`, and any extra paths.
+fn codex_sessions_dirs(config: &CodexAiUsageConfig) -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    let mut seen = HashSet::new();
+    if let Some(dir) = &config.sessions_dir {
+        push_unique_path(&mut dirs, &mut seen, PathBuf::from(dir));
+    }
+    if config.sessions_auto_detect {
+        push_unique_path(&mut dirs, &mut seen, default_codex_sessions_dir());
+        if config.include_wsl_sessions {
+            for path in wsl_codex_sessions_paths() {
+                push_unique_path(&mut dirs, &mut seen, path);
+            }
+        }
+        for path in &config.extra_sessions_paths {
+            push_unique_path(&mut dirs, &mut seen, PathBuf::from(path));
+        }
+    }
+    dirs
+}
+
+fn push_unique_path(dirs: &mut Vec<PathBuf>, seen: &mut HashSet<String>, path: PathBuf) {
+    let key = path.to_string_lossy().to_ascii_lowercase();
+    if seen.insert(key) {
+        dirs.push(path);
+    }
+}
+
+fn codex_rate_limits_snapshot(sessions_dirs: &[PathBuf]) -> Option<AiUsageSnapshot> {
+    for path in sorted_jsonl_files(sessions_dirs) {
         let Some(text) = read_session_text(&path) else {
             continue;
         };
@@ -522,12 +548,12 @@ fn rate_limit_window(value: Option<&Value>) -> Option<(u64, AiUsageWindow)> {
     ))
 }
 
-fn codex_history_snapshot(sessions_dir: &Path, config: &CodexAiUsageConfig) -> AiUsageSnapshot {
+fn codex_history_snapshot(sessions_dirs: &[PathBuf], config: &CodexAiUsageConfig) -> AiUsageSnapshot {
     let now = unix_now();
     let mut five_tokens = 0u64;
     let mut seven_tokens = 0u64;
     let mut saw_usage = false;
-    for event in codex_token_events(sessions_dir) {
+    for event in codex_token_events(sessions_dirs) {
         saw_usage = true;
         if now.saturating_sub(event.timestamp_unix) <= FIVE_HOUR_SECONDS {
             five_tokens = five_tokens.saturating_add(event.tokens);
@@ -584,9 +610,9 @@ struct TokenEvent {
     tokens: u64,
 }
 
-fn codex_token_events(sessions_dir: &Path) -> Vec<TokenEvent> {
+fn codex_token_events(sessions_dirs: &[PathBuf]) -> Vec<TokenEvent> {
     let mut events = Vec::new();
-    for path in sorted_jsonl_files(sessions_dir).into_iter().rev() {
+    for path in sorted_jsonl_files(sessions_dirs).into_iter().rev() {
         let Some(text) = read_session_text(&path) else {
             continue;
         };
@@ -817,7 +843,23 @@ fn push_claude_candidate(
 }
 
 fn wsl_claude_credentials_paths() -> Vec<PathBuf> {
-    let mut paths = Vec::new();
+    wsl_home_dirs()
+        .into_iter()
+        .map(|home| home.join(".claude").join(".credentials.json"))
+        .collect()
+}
+
+fn wsl_codex_sessions_paths() -> Vec<PathBuf> {
+    wsl_home_dirs()
+        .into_iter()
+        .map(|home| home.join(".codex").join("sessions"))
+        .collect()
+}
+
+/// Enumerate per-user home directories (`\\wsl$\<distro>\home\<user>`) across
+/// every detectable WSL distro, deduplicating distro roots.
+fn wsl_home_dirs() -> Vec<PathBuf> {
+    let mut homes = Vec::new();
     let mut distro_paths = Vec::new();
     for root in [PathBuf::from(r"\\wsl$"), PathBuf::from(r"\\wsl.localhost")] {
         let Ok(distros) = fs::read_dir(&root) else {
@@ -847,11 +889,11 @@ fn wsl_claude_credentials_paths() -> Vec<PathBuf> {
                 continue;
             };
             if meta.is_dir() {
-                paths.push(user.path().join(".claude").join(".credentials.json"));
+                homes.push(user.path());
             }
         }
     }
-    paths
+    homes
 }
 
 fn wsl_distro_names_from_command() -> Vec<String> {
@@ -1025,9 +1067,11 @@ fn read_session_text(path: &Path) -> Option<String> {
     })
 }
 
-fn sorted_jsonl_files(root: &Path) -> Vec<PathBuf> {
+fn sorted_jsonl_files(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut files = Vec::new();
-    collect_jsonl_files(root, &mut files);
+    for root in roots {
+        collect_jsonl_files(root, &mut files);
+    }
     files.sort_by(|a, b| {
         let a_mtime = file_mtime(a);
         let b_mtime = file_mtime(b);
@@ -1149,12 +1193,79 @@ mod tests {
             ],
         );
 
-        let snapshot = codex_rate_limits_snapshot(dir.path()).unwrap();
+        let snapshot = codex_rate_limits_snapshot(&[dir.path().to_path_buf()]).unwrap();
 
         assert!(snapshot.quota_source);
         assert!(!snapshot.estimated);
         assert_eq!(snapshot.five_hour.unwrap().used_bp, 1250);
         assert_eq!(snapshot.seven_day.unwrap().reset_unix, 1_800_100_000);
+    }
+
+    #[test]
+    fn codex_rate_limits_merge_picks_most_recent_across_dirs() {
+        let older = tempfile::tempdir().unwrap();
+        let newer = tempfile::tempdir().unwrap();
+        let older_file = write_jsonl(
+            older.path(),
+            "a.jsonl",
+            &[
+                r#"{"type":"event_msg","timestamp":"2026-01-01T00:00:00Z","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":10.0,"window_minutes":300,"resets_at":1800000000}}}}"#,
+            ],
+        );
+        let newer_file = write_jsonl(
+            newer.path(),
+            "b.jsonl",
+            &[
+                r#"{"type":"event_msg","timestamp":"2026-01-02T00:00:00Z","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":42.0,"window_minutes":300,"resets_at":1800500000}}}}"#,
+            ],
+        );
+        // Pin mtimes so the second directory's file sorts as most recent regardless
+        // of filesystem timestamp resolution.
+        let base = SystemTime::now();
+        fs::File::options()
+            .write(true)
+            .open(&older_file)
+            .unwrap()
+            .set_modified(base)
+            .unwrap();
+        fs::File::options()
+            .write(true)
+            .open(&newer_file)
+            .unwrap()
+            .set_modified(base + Duration::from_secs(10))
+            .unwrap();
+
+        let snapshot = codex_rate_limits_snapshot(&[
+            older.path().to_path_buf(),
+            newer.path().to_path_buf(),
+        ])
+        .unwrap();
+
+        assert_eq!(snapshot.five_hour.unwrap().used_bp, 4200);
+    }
+
+    #[test]
+    fn codex_token_events_merge_aggregates_across_dirs() {
+        let win = tempfile::tempdir().unwrap();
+        let wsl = tempfile::tempdir().unwrap();
+        write_jsonl(
+            win.path(),
+            "a.jsonl",
+            &[
+                r#"{"timestamp":"2026-01-01T00:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":30}}}}"#,
+            ],
+        );
+        write_jsonl(
+            wsl.path(),
+            "b.jsonl",
+            &[
+                r#"{"timestamp":"2026-01-01T00:00:01Z","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":12}}}}"#,
+            ],
+        );
+
+        let events = codex_token_events(&[win.path().to_path_buf(), wsl.path().to_path_buf()]);
+
+        assert_eq!(events.iter().map(|e| e.tokens).sum::<u64>(), 42);
     }
 
     #[test]
@@ -1170,7 +1281,7 @@ mod tests {
             ],
         );
 
-        let events = codex_token_events(dir.path());
+        let events = codex_token_events(&[dir.path().to_path_buf()]);
 
         assert_eq!(
             events.iter().map(|e| e.tokens).collect::<Vec<_>>(),
@@ -1184,7 +1295,7 @@ mod tests {
         let line = r#"{"timestamp":"2026-01-01T00:00:00Z","payload":{"type":"token_count","info":{"last_token_usage":{"total_tokens":42}}}}"#;
         write_jsonl(dir.path(), "a.jsonl", &[line, line]);
 
-        let events = codex_token_events(dir.path());
+        let events = codex_token_events(&[dir.path().to_path_buf()]);
 
         assert_eq!(
             events.iter().map(|e| e.tokens).collect::<Vec<_>>(),
@@ -1211,7 +1322,7 @@ mod tests {
             ..CodexAiUsageConfig::default()
         };
 
-        let snapshot = codex_history_snapshot(dir.path(), &config);
+        let snapshot = codex_history_snapshot(&[dir.path().to_path_buf()], &config);
 
         assert!(snapshot.estimated);
         assert!(snapshot.local_history_source);

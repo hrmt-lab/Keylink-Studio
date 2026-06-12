@@ -1,8 +1,17 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode, type Dispatch, type SetStateAction } from "react";
-import { AlertCircle, Keyboard, Lock, RefreshCw, XCircle } from "lucide-react";
-import { readStudioKeymap } from "../api";
+import { AlertCircle, BarChart3, Keyboard, Lock, RefreshCw, XCircle } from "lucide-react";
+import { getKeyStats, onKeyStatsUpdated, readStudioKeymap } from "../api";
+import { KeymapCanvas } from "../components/KeymapCanvas";
 import { useLang, type TranslationKey } from "../i18n";
-import type { StudioBinding, StudioDeviceStatus, StudioKeymapSnapshot, StudioLayer, StudioPhysicalKey } from "../types";
+import type {
+  KeyStatsSummary,
+  MonitorStatus,
+  StatsPeriod,
+  StudioBinding,
+  StudioDeviceStatus,
+  StudioKeymapSnapshot,
+  StudioLayer,
+} from "../types";
 
 interface KeymapViewerProps {
   studioDevices: StudioDeviceStatus[];
@@ -11,6 +20,13 @@ interface KeymapViewerProps {
   refreshStudioDevices: () => Promise<StudioDeviceStatus[]>;
   snapshotsByDeviceId: Record<string, StudioKeymapSnapshot>;
   setSnapshotsByDeviceId: Dispatch<SetStateAction<Record<string, StudioKeymapSnapshot>>>;
+  status: MonitorStatus;
+}
+
+/** Case-insensitive serial match between a Studio device and Host Link data. */
+function serialsMatch(a: string | null, b: string | null): boolean {
+  if (!a || !b) return false;
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 
 export default function KeymapViewer({
@@ -20,10 +36,12 @@ export default function KeymapViewer({
   refreshStudioDevices,
   snapshotsByDeviceId,
   setSnapshotsByDeviceId,
+  status,
 }: KeymapViewerProps) {
   const { t } = useLang();
   const [selectedId, setSelectedId] = useState<string>("");
   const [activeLayer, setActiveLayer] = useState(0);
+  const [viewMode, setViewMode] = useState<"keymap" | "heatmap">("keymap");
   const [reading, setReading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -38,12 +56,42 @@ export default function KeymapViewer({
   const snapshot = selectedId ? snapshotsByDeviceId[selectedId] ?? null : null;
   const layer = snapshot?.layers[activeLayer] ?? null;
 
+  // Best-effort correlation with Host Link data via the USB serial number.
+  const reportedLayer = useMemo(
+    () =>
+      selected
+        ? status.device_layers.find((entry) =>
+            serialsMatch(entry.serial_number, selected.serial_number)
+          ) ?? null
+        : null,
+    [selected, status.device_layers]
+  );
+  const statsUid = useMemo(
+    () =>
+      selected
+        ? status.host_link_devices.find((device) =>
+            serialsMatch(device.serial_number, selected.serial_number)
+          )?.device_uid_hash ?? null
+        : null,
+    [selected, status.host_link_devices]
+  );
+
   useEffect(() => {
     const ids = new Set(devices.map((device) => device.id));
     setSelectedId((current) => current && ids.has(current) ? current : devices[0]?.id ?? "");
   }, [devices]);
 
   useEffect(() => { setActiveLayer(0); }, [selectedId]);
+
+  // Follow keyboard-side layer changes (LAYER_STATE uplink): switch the
+  // displayed layer too, not just the live ring. Manual tab clicks still
+  // work until the keyboard next changes layers.
+  const reportedLayerIndex = reportedLayer?.active_layer ?? null;
+  useEffect(() => {
+    if (reportedLayerIndex === null || !snapshot) return;
+    const index = snapshot.layers.findIndex((item) => item.index === reportedLayerIndex);
+    if (index >= 0) setActiveLayer(index);
+  }, [reportedLayerIndex, snapshot]);
 
   const readDevice = useCallback(async (device: StudioDeviceStatus) => {
     setReading(true);
@@ -150,7 +198,33 @@ export default function KeymapViewer({
           ) : !snapshot ? (
             <EmptyState icon={<Keyboard size={32} />} title={reading ? t("keymap.reading") : t("keymap.ready_title")} body={reading ? undefined : t("keymap.ready_body")} />
           ) : (
-            <KeymapContent snapshot={snapshot} activeLayer={activeLayer} setActiveLayer={setActiveLayer} layer={layer} />
+            <>
+              <div className="flex items-center gap-1 border-b border-border/60 pb-3">
+                <ViewTab
+                  active={viewMode === "keymap"}
+                  onClick={() => setViewMode("keymap")}
+                  icon={<Keyboard size={13} />}
+                  label={t("keymap.view.keymap")}
+                />
+                <ViewTab
+                  active={viewMode === "heatmap"}
+                  onClick={() => setViewMode("heatmap")}
+                  icon={<BarChart3 size={13} />}
+                  label={t("keymap.view.heatmap")}
+                />
+              </div>
+              {viewMode === "keymap" ? (
+                <KeymapContent
+                  snapshot={snapshot}
+                  activeLayer={activeLayer}
+                  setActiveLayer={setActiveLayer}
+                  layer={layer}
+                  reportedLayerIndex={reportedLayerIndex}
+                />
+              ) : (
+                <HeatmapContent snapshot={snapshot} statsUid={statsUid} />
+              )}
+            </>
           )}
         </section>
       </div>
@@ -158,111 +232,304 @@ export default function KeymapViewer({
   );
 }
 
-function KeymapContent({ snapshot, activeLayer, setActiveLayer, layer }: {
+function ViewTab({ active, onClick, icon, label }: {
+  active: boolean;
+  onClick: () => void;
+  icon: ReactNode;
+  label: string;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
+        active ? "bg-primary/10 text-primary" : "text-gray-500 hover:bg-background"
+      }`}
+    >
+      {icon}
+      {label}
+    </button>
+  );
+}
+
+function KeymapContent({ snapshot, activeLayer, setActiveLayer, layer, reportedLayerIndex }: {
   snapshot: StudioKeymapSnapshot;
   activeLayer: number;
   setActiveLayer: (value: number) => void;
   layer: StudioLayer | null;
+  /** Layer the keyboard itself reports as active (LAYER_STATE uplink), or null. */
+  reportedLayerIndex: number | null;
 }) {
   const { t } = useLang();
+  const bindingsByPosition = useMemo(() => {
+    const map = new Map<number, StudioBinding>();
+    if (layer) for (const binding of layer.bindings) map.set(binding.position, binding);
+    return map;
+  }, [layer]);
+
   return (
     <div className="min-w-0 space-y-4">
       <div>
         <div className="text-sm font-semibold text-gray-800">{snapshot.device_name}</div>
       </div>
       <div className="flex flex-wrap gap-2">
-        {snapshot.layers.map((item, index) => (
-          <button
-            key={item.id}
-            onClick={() => setActiveLayer(index)}
-            className={`rounded-lg px-3 py-1.5 text-sm font-medium ring-1 transition-colors ${
-              activeLayer === index ? "bg-primary text-white ring-primary" : "bg-background text-gray-600 ring-border hover:bg-panel"
-            }`}
-          >
-            {item.name}
-          </button>
-        ))}
+        {snapshot.layers.map((item, index) => {
+          const live = reportedLayerIndex !== null && item.index === reportedLayerIndex;
+          return (
+            <button
+              key={item.id}
+              onClick={() => setActiveLayer(index)}
+              title={live ? t("keymap.active_layer") : undefined}
+              className={`relative rounded-lg px-3 py-1.5 text-sm font-medium ring-1 transition-colors ${
+                activeLayer === index ? "bg-primary text-white ring-primary" : "bg-background text-gray-600 ring-border hover:bg-panel"
+              } ${live ? "ring-2 ring-emerald-400" : ""}`}
+            >
+              {item.name}
+              {live && (
+                <span className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-emerald-400 ring-2 ring-white" />
+              )}
+            </button>
+          );
+        })}
       </div>
       {!layer || snapshot.selected_layout_keys.length === 0 ? (
         <EmptyState icon={<Keyboard size={32} />} title={t("keymap.empty_keymap_title")} body={t("keymap.empty_keymap_body")} />
       ) : (
-        <KeymapCanvas keys={snapshot.selected_layout_keys} layer={layer} />
+        <KeymapCanvas
+          keys={snapshot.selected_layout_keys}
+          keyTitle={(key) => bindingsByPosition.get(key.position)?.full_label ?? "--"}
+          keyContent={(key) => {
+            const binding = bindingsByPosition.get(key.position);
+            return (
+              <>
+                <div className="w-full truncate text-[11px] font-semibold leading-tight text-gray-800">
+                  {binding?.primary_label ?? "--"}
+                </div>
+                {binding?.primary_label && (
+                  <div className="absolute bottom-1 right-1 text-[9px] leading-none text-gray-500">
+                    {`#${key.position}`}
+                  </div>
+                )}
+              </>
+            );
+          }}
+        />
       )}
     </div>
   );
 }
 
-function KeymapCanvas({ keys, layer }: { keys: StudioPhysicalKey[]; layer: StudioLayer }) {
-  const metrics = useMemo(() => layoutMetrics(keys), [keys]);
-  const bindingsByPosition = useMemo(() => {
-    const map = new Map<number, StudioBinding>();
-    for (const binding of layer.bindings) map.set(binding.position, binding);
+function HeatmapContent({ snapshot, statsUid }: {
+  snapshot: StudioKeymapSnapshot;
+  statsUid: string | null;
+}) {
+  const { t } = useLang();
+  const [period, setPeriod] = useState<StatsPeriod>("today");
+  const [summary, setSummary] = useState<KeyStatsSummary | null>(null);
+  const [statsError, setStatsError] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    if (!statsUid) return;
+    try {
+      setSummary(await getKeyStats(statsUid, period));
+      setStatsError(null);
+    } catch (e) {
+      setStatsError(String(e));
+    }
+  }, [statsUid, period]);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  // Live refresh while the keyboard keeps reporting stats.
+  useEffect(() => {
+    if (!statsUid) return;
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    void onKeyStatsUpdated((deviceKey) => {
+      if (deviceKey === statsUid) void load();
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
+  }, [statsUid, load]);
+
+  const counts = useMemo(() => {
+    const map = new Map<number, number>();
+    for (const entry of summary?.per_position ?? []) map.set(entry.position, entry.count);
     return map;
-  }, [layer]);
+  }, [summary]);
+  const maxCount = useMemo(
+    () => Math.max(1, ...Array.from(counts.values())),
+    [counts]
+  );
+  const baseLayer = snapshot.layers[0] ?? null;
+  const labelByPosition = useMemo(() => {
+    const map = new Map<number, string>();
+    if (baseLayer) {
+      for (const binding of baseLayer.bindings) {
+        if (binding.primary_label) map.set(binding.position, binding.primary_label);
+      }
+    }
+    return map;
+  }, [baseLayer]);
+
+  const topKeys = useMemo(
+    () =>
+      [...(summary?.per_position ?? [])]
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 5),
+    [summary]
+  );
+
+  const balance = useMemo(() => {
+    const keys = snapshot.selected_layout_keys;
+    if (keys.length === 0 || counts.size === 0) return null;
+    const minX = Math.min(...keys.map((k) => k.x));
+    const maxX = Math.max(...keys.map((k) => k.x + Math.abs(k.width)));
+    const mid = (minX + maxX) / 2;
+    let left = 0;
+    let right = 0;
+    for (const key of keys) {
+      const count = counts.get(key.position) ?? 0;
+      if (key.x + Math.abs(key.width) / 2 < mid) left += count;
+      else right += count;
+    }
+    const total = left + right;
+    if (total === 0) return null;
+    return {
+      left: Math.round((left / total) * 100),
+      right: Math.round((right / total) * 100),
+    };
+  }, [snapshot.selected_layout_keys, counts]);
+
+  if (!statsUid) {
+    return (
+      <EmptyState
+        icon={<BarChart3 size={32} />}
+        title={t("stats.no_link")}
+        body={t("stats.no_link.hint")}
+      />
+    );
+  }
+
+  const periods: { value: StatsPeriod; key: TranslationKey }[] = [
+    { value: "today", key: "stats.period.today" },
+    { value: "last7days", key: "stats.period.last7days" },
+    { value: "all", key: "stats.period.all" },
+  ];
 
   return (
-    <div className="max-w-full overflow-x-auto overflow-y-hidden rounded-xl bg-background p-4 ring-1 ring-border">
-      <div
-        className="relative flex-shrink-0"
-        style={{ width: metrics.width, height: metrics.height }}
-      >
-        {keys.map((key) => {
-          const binding = bindingsByPosition.get(key.position);
-          const x = (key.x - metrics.minX) * metrics.scale + metrics.padding;
-          const y = (key.y - metrics.minY) * metrics.scale + metrics.padding;
-          const width = Math.max(16, Math.abs(key.width) * metrics.scale);
-          const height = Math.max(16, Math.abs(key.height) * metrics.scale);
-          const originX = (key.rx - key.x) * metrics.scale;
-          const originY = (key.ry - key.y) * metrics.scale;
-          return (
-            <div
-              key={`${key.position}-${key.x}-${key.y}`}
-              title={binding?.full_label ?? "--"}
-              className="absolute flex flex-col items-center justify-center rounded-lg border border-border bg-white px-1.5 text-center shadow-sm ring-1 ring-white/70"
-              style={{
-                left: x,
-                top: y,
-                width,
-                height,
-                // ZMK physical-layout rotation is in 1/100 of a degree.
-                transform: key.r ? `rotate(${key.r / 100}deg)` : undefined,
-                transformOrigin: `${originX}px ${originY}px`,
-              }}
+    <div className="min-w-0 space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex items-center gap-1">
+          {periods.map((item) => (
+            <button
+              key={item.value}
+              onClick={() => setPeriod(item.value)}
+              className={`rounded-lg px-3 py-1.5 text-sm font-medium ring-1 transition-colors ${
+                period === item.value
+                  ? "bg-primary text-white ring-primary"
+                  : "bg-background text-gray-600 ring-border hover:bg-panel"
+              }`}
             >
-              <div className="w-full truncate text-[11px] font-semibold leading-tight text-gray-800">
-                {binding?.primary_label ?? "--"}
-              </div>
-              {binding?.primary_label && (
-                <div className="absolute bottom-1 right-1 text-[9px] leading-none text-gray-500">
-                  {`#${key.position}`}
-                </div>
-              )}
-            </div>
-          );
-        })}
+              {t(item.key)}
+            </button>
+          ))}
+        </div>
+        <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600">
+          <span>
+            {t("stats.total")}:{" "}
+            <span className="font-semibold text-gray-800">
+              {(summary?.total ?? 0).toLocaleString()}
+            </span>
+          </span>
+          {balance && (
+            <span>
+              {t("stats.balance")}:{" "}
+              <span className="font-semibold text-gray-800">
+                {balance.left}% / {balance.right}%
+              </span>
+            </span>
+          )}
+        </div>
       </div>
+
+      {statsError && <Notice>{statsError}</Notice>}
+
+      {summary && summary.total === 0 && (
+        <p className="text-sm text-gray-400">{t("stats.no_data")}</p>
+      )}
+
+      {snapshot.selected_layout_keys.length === 0 ? (
+        <EmptyState icon={<Keyboard size={32} />} title={t("keymap.empty_keymap_title")} body={t("keymap.empty_keymap_body")} />
+      ) : (
+        <KeymapCanvas
+          keys={snapshot.selected_layout_keys}
+          keyTitle={(key) => {
+            const label = labelByPosition.get(key.position) ?? `#${key.position}`;
+            const count = counts.get(key.position) ?? 0;
+            return `${label}: ${count.toLocaleString()}`;
+          }}
+          keyStyle={(key) => {
+            const count = counts.get(key.position) ?? 0;
+            return count > 0 ? { backgroundColor: heatColor(count / maxCount) } : undefined;
+          }}
+          keyContent={(key) => {
+            const count = counts.get(key.position) ?? 0;
+            return (
+              <>
+                <div className="w-full truncate text-[10px] font-medium leading-tight text-gray-700">
+                  {labelByPosition.get(key.position) ?? ""}
+                </div>
+                <div className="w-full truncate text-[10px] font-semibold leading-tight text-gray-900">
+                  {count > 0 ? count.toLocaleString() : ""}
+                </div>
+              </>
+            );
+          }}
+        />
+      )}
+
+      {topKeys.length > 0 && (
+        <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
+          <span className="font-medium uppercase tracking-wide text-gray-400">
+            {t("stats.top")}
+          </span>
+          {topKeys.map((entry) => (
+            <span
+              key={entry.position}
+              className="inline-flex items-center gap-1 rounded-md bg-background px-2 py-0.5 ring-1 ring-border"
+            >
+              <span className="font-semibold text-gray-700">
+                {labelByPosition.get(entry.position) ?? `#${entry.position}`}
+              </span>
+              <span className="font-mono text-gray-500">{entry.count.toLocaleString()}</span>
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
 
-function layoutMetrics(keys: StudioPhysicalKey[]) {
-  const padding = 24;
-  const rawMinX = Math.min(...keys.map((key) => key.x));
-  const rawMinY = Math.min(...keys.map((key) => key.y));
-  const rawMaxX = Math.max(...keys.map((key) => key.x + Math.abs(key.width)));
-  const rawMaxY = Math.max(...keys.map((key) => key.y + Math.abs(key.height)));
-  const rawWidth = Math.max(1, rawMaxX - rawMinX);
-  const rawHeight = Math.max(1, rawMaxY - rawMinY);
-  const maxWidth = 820;
-  const scale = Math.min(1.2, maxWidth / rawWidth);
-  return {
-    minX: rawMinX,
-    minY: rawMinY,
-    scale,
-    padding,
-    width: rawWidth * scale + padding * 2,
-    height: rawHeight * scale + padding * 2,
-  };
+/** White → primary blue → orange → red, used for per-key heat coloring. */
+function heatColor(ratio: number): string {
+  const clamped = Math.max(0, Math.min(1, ratio));
+  if (clamped < 0.5) {
+    const a = clamped / 0.5;
+    return `rgba(91, 112, 146, ${(0.15 + 0.45 * a).toFixed(3)})`;
+  }
+  if (clamped < 0.8) {
+    const a = (clamped - 0.5) / 0.3;
+    return `rgba(217, 119, 6, ${(0.4 + 0.35 * a).toFixed(3)})`;
+  }
+  const a = (clamped - 0.8) / 0.2;
+  return `rgba(239, 68, 68, ${(0.55 + 0.35 * a).toFixed(3)})`;
 }
 
 function StudioStatusBadge({ device }: { device: StudioDeviceStatus }) {

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   LayoutDashboard,
   List,
+  Zap,
   Clock,
   Activity,
   Usb,
@@ -22,6 +23,7 @@ interface NavItem {
 const NAV_ITEMS: NavItem[] = [
   { id: "dashboard", labelKey: "nav.dashboard", icon: LayoutDashboard },
   { id: "rules", labelKey: "nav.rules", icon: List },
+  { id: "actions", labelKey: "nav.actions", icon: Zap },
   { id: "timesync", labelKey: "nav.timesync", icon: Clock },
   { id: "ai_usage", labelKey: "nav.ai_usage", icon: Activity },
   { id: "keymap_viewer", labelKey: "nav.keymap_viewer", icon: Keyboard },

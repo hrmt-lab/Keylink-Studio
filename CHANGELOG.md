@@ -2,6 +2,30 @@
 
 All notable changes to RawHID Host are documented in this file.
 
+## [0.6.0] - 2026-06-12
+
+### Added
+
+- **device→host (uplink) packet 対応**。キーボード側から host へ送る 4 つの packet type と capability bit を Host Link v1 の拡張として追加 (protocol は `v1` のまま)
+  - `BATTERY_STATUS (0x40)`: 本体/左右ペリフェラルのバッテリー残量。Dashboard と Devices に表示
+  - `HOST_ACTION (0x50)`: キーボードから host 側アクションを起動する仕組み。`[actions]` config の許可リスト制 (既定オフ) で、バインディングはキーボード単位 (`actions.devices."uid:..."`)。専用の「アクション」ページから UI で設定可能。組み込み action: `show_window` / `start_monitoring` / `stop_monitoring` / `refresh_ai_usage` / `launch`。未定義 id はログのみ
+  - `KEY_STATS (0x60)`: キー位置別の打鍵数差分。日別にローカルファイルへ永続化 (`[stats]` config、既定オン)
+  - `LAYER_STATE (0x70)`: キーボード側レイヤー変更の逆同期 (表示専用。ルールエンジンには影響しない)
+- キーマップビューアーに「ヒートマップ」タブを追加。物理レイアウト上に打鍵数を色分け表示し、期間フィルタ (今日/7日/全期間)、総打鍵数、TOP5、左右バランスを表示
+- キーマップビューアーのレイヤーボタンに、キーボードが報告した現在レイヤーをハイライト表示 (シリアル番号での best-effort 対応付け)
+- Tauri command `get_key_stats` / `list_key_stats_devices`、debug ビルド限定の `debug_inject_uplink` (firmware なしでの uplink 動作確認用)
+- Codex の使用量を複数 sessions ディレクトリからマージ取得。`sessions_auto_detect` (既定オン) で Windows default に加え、各 WSL ディストロの `~/.codex/sessions` (`include_wsl_sessions`、既定オン) と `extra_sessions_paths` を自動で読み込む。WSL 上の Codex CLI 使用分が host 側にも反映される (rate_limits は全ディレクトリ中で最も新しいものを採用、history fallback は全ディレクトリのトークンを合算)。AI Usage 設定ページにトグルと追加パス入力を追加
+
+### Fixed
+
+- HELLO 検証中に他の packet が届くと検証に失敗していた問題を修正 (応答以外の正当な HL packet を読み飛ばし、uplink packet は保持)
+
+### Notes
+
+- uplink は best-effort。監視停止中の packet は失われる (KEY_STATS はアンダーカウント許容)
+- HOST_ACTION の応答は最大で polling 間隔 (既定 500ms) 遅延する。即時化 (専用リーダースレッド) は将来課題
+- firmware 側は新 capability bit を立てた機能のみ段階的に実装可能
+
 ## [0.5.0] - 2026-06-11
 
 ### Changed

@@ -18,6 +18,8 @@ pub struct AppConfig {
     pub time: TimeConfig,
     pub ai_usage: AiUsageConfig,
     pub studio: StudioConfig,
+    pub stats: StatsConfig,
+    pub actions: ActionsConfig,
 }
 
 impl Default for AppConfig {
@@ -30,8 +32,86 @@ impl Default for AppConfig {
             time: TimeConfig::default(),
             ai_usage: AiUsageConfig::default(),
             studio: StudioConfig::default(),
+            stats: StatsConfig::default(),
+            actions: ActionsConfig::default(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct StatsConfig {
+    /// Record per-position key statistics reported by KEY_STATS-capable devices.
+    pub enabled: bool,
+    pub flush_interval_sec: u64,
+}
+
+impl Default for StatsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            flush_interval_sec: 60,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct ActionsConfig {
+    /// Execute HOST_ACTION packets. Disabled by default; unbound action ids
+    /// are only logged even when enabled.
+    pub enabled: bool,
+    /// Bindings are configured per device, keyed by the stable uid returned
+    /// in DEVICE_HELLO (same keying as `layer_switch.devices`). Devices
+    /// without an entry only have their actions logged.
+    pub devices: BTreeMap<String, DeviceActionsConfig>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct DeviceActionsConfig {
+    pub display_name: Option<String>,
+    pub enabled: bool,
+    pub bindings: Vec<ActionBinding>,
+}
+
+impl Default for DeviceActionsConfig {
+    fn default() -> Self {
+        Self {
+            display_name: None,
+            enabled: true,
+            bindings: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ActionBinding {
+    pub action_id: u8,
+    pub action: HostActionKind,
+    /// Executable path for `launch`. The HID value byte is never used as a path.
+    pub path: Option<String>,
+}
+
+impl Default for ActionBinding {
+    fn default() -> Self {
+        Self {
+            action_id: 0,
+            action: HostActionKind::ShowWindow,
+            path: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HostActionKind {
+    ShowWindow,
+    StartMonitoring,
+    StopMonitoring,
+    RefreshAiUsage,
+    Launch,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -197,6 +277,9 @@ impl Default for AiUsageConfig {
 pub struct CodexAiUsageConfig {
     pub enabled: bool,
     pub sessions_dir: Option<String>,
+    pub sessions_auto_detect: bool,
+    pub include_wsl_sessions: bool,
+    pub extra_sessions_paths: Vec<String>,
     pub history_fallback_enabled: bool,
     pub allow_activity_baseline: bool,
     pub activity_five_hour_token_baseline: u64,
@@ -208,6 +291,9 @@ impl Default for CodexAiUsageConfig {
         Self {
             enabled: true,
             sessions_dir: None,
+            sessions_auto_detect: true,
+            include_wsl_sessions: true,
+            extra_sessions_paths: Vec::new(),
             history_fallback_enabled: true,
             allow_activity_baseline: false,
             activity_five_hour_token_baseline: 0,
@@ -429,6 +515,31 @@ clock_mode = "24h"
 periodic_sync_sec = 60
 # tz_offset_min = 540
 
+[stats]
+# Record per-position key statistics from KEY_STATS-capable keyboards.
+enabled = true
+flush_interval_sec = 60
+
+[actions]
+# Execute HOST_ACTION packets sent from the keyboard. Disabled by default.
+enabled = false
+
+# Bindings are configured per device, keyed by the stable uid returned in
+# DEVICE_HELLO (same keying as layer_switch.devices). Unbound ids are only
+# logged.
+#[actions.devices."uid:7a91c3e4d102ab55"]
+#display_name = "Example Keyboard"
+#enabled = true
+#
+#[[actions.devices."uid:7a91c3e4d102ab55".bindings]]
+#action_id = 1
+#action = "show_window"  # show_window | start_monitoring | stop_monitoring | refresh_ai_usage | launch
+#
+#[[actions.devices."uid:7a91c3e4d102ab55".bindings]]
+#action_id = 2
+#action = "launch"
+#path = "C:\\tools\\example.exe"
+
 [ai_usage]
 enabled = false
 poll_interval_sec = 300
@@ -437,6 +548,9 @@ stale_after_sec = 900
 [ai_usage.codex]
 enabled = true
 # sessions_dir = "C:\\Users\\<user>\\.codex\\sessions"
+sessions_auto_detect = true
+include_wsl_sessions = true
+extra_sessions_paths = []
 history_fallback_enabled = true
 allow_activity_baseline = false
 activity_five_hour_token_baseline = 0
@@ -502,6 +616,10 @@ mod tests {
             UnmatchedAction::ClearManaged
         );
         assert!(config.layer_switch.devices.is_empty());
+        assert!(config.stats.enabled);
+        assert_eq!(config.stats.flush_interval_sec, 60);
+        assert!(!config.actions.enabled);
+        assert!(config.actions.devices.is_empty());
         assert!(!config.time.enabled);
         assert_eq!(config.time.format_hint, TimeFormatHint::TimeHm);
         assert_eq!(config.time.clock_mode, ClockMode::TwentyFourHour);
@@ -550,6 +668,50 @@ enabled = true
         assert!(left.rules.is_empty());
     }
     #[test]
+    fn parses_actions_config() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[actions]
+enabled = true
+
+[actions.devices."uid:7a91c3e4d102ab55"]
+display_name = "LotusUni Dongle"
+enabled = true
+
+[[actions.devices."uid:7a91c3e4d102ab55".bindings]]
+action_id = 1
+action = "show_window"
+
+[[actions.devices."uid:7a91c3e4d102ab55".bindings]]
+action_id = 7
+action = "launch"
+path = "C:\\tools\\example.exe"
+
+[actions.devices."uid:91ac51d6ef0201aa"]
+enabled = false
+"#,
+        )
+        .unwrap();
+
+        assert!(config.actions.enabled);
+        assert_eq!(config.actions.devices.len(), 2);
+        let lotus = config.actions.devices.get("uid:7a91c3e4d102ab55").unwrap();
+        assert_eq!(lotus.display_name.as_deref(), Some("LotusUni Dongle"));
+        assert!(lotus.enabled);
+        assert_eq!(lotus.bindings.len(), 2);
+        assert_eq!(lotus.bindings[0].action_id, 1);
+        assert_eq!(lotus.bindings[0].action, HostActionKind::ShowWindow);
+        assert_eq!(lotus.bindings[1].action, HostActionKind::Launch);
+        assert_eq!(
+            lotus.bindings[1].path.as_deref(),
+            Some("C:\\tools\\example.exe")
+        );
+        let left = config.actions.devices.get("uid:91ac51d6ef0201aa").unwrap();
+        assert!(!left.enabled);
+        assert!(left.bindings.is_empty());
+    }
+
+    #[test]
     fn parses_time_config() {
         let config: AppConfig = toml::from_str(
             r#"
@@ -595,6 +757,9 @@ stale_after_sec = 600
 [ai_usage.codex]
 enabled = true
 sessions_dir = "C:\\Users\\me\\.codex\\sessions"
+sessions_auto_detect = true
+include_wsl_sessions = true
+extra_sessions_paths = ["\\\\wsl.localhost\\Ubuntu\\home\\me\\.codex\\sessions"]
 history_fallback_enabled = true
 allow_activity_baseline = true
 activity_five_hour_token_baseline = 1000
@@ -618,6 +783,9 @@ api_timeout_sec = 5
             1000
         );
         assert_eq!(config.ai_usage.claude_code.api_timeout_sec, 5);
+        assert!(config.ai_usage.codex.sessions_auto_detect);
+        assert!(config.ai_usage.codex.include_wsl_sessions);
+        assert_eq!(config.ai_usage.codex.extra_sessions_paths.len(), 1);
         assert!(config.ai_usage.claude_code.credentials_auto_detect);
         assert!(config.ai_usage.claude_code.include_wsl_credentials);
         assert_eq!(config.ai_usage.claude_code.extra_credentials_paths.len(), 1);

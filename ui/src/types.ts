@@ -53,6 +53,9 @@ export interface AiUsageConfig {
 export interface CodexAiUsageConfig {
   enabled: boolean;
   sessions_dir: string | null;
+  sessions_auto_detect: boolean;
+  include_wsl_sessions: boolean;
+  extra_sessions_paths: string[];
   history_fallback_enabled: boolean;
   allow_activity_baseline: boolean;
   activity_five_hour_token_baseline: number;
@@ -87,6 +90,31 @@ export interface AppBehaviorConfig {
   start_monitoring_on_launch: boolean;
 }
 
+export type HostActionKind =
+  | "show_window"
+  | "start_monitoring"
+  | "stop_monitoring"
+  | "refresh_ai_usage"
+  | "launch";
+
+export interface ActionBinding {
+  action_id: number;
+  action: HostActionKind;
+  /** Executable path for "launch"; null otherwise. */
+  path: string | null;
+}
+
+export interface DeviceActionsConfig {
+  display_name: string | null;
+  enabled: boolean;
+  bindings: ActionBinding[];
+}
+
+export interface ActionsConfig {
+  enabled: boolean;
+  devices: Record<string, DeviceActionsConfig>;
+}
+
 export interface AppConfig {
   app: AppBehaviorConfig;
   polling: PollingConfig;
@@ -95,9 +123,47 @@ export interface AppConfig {
   time: TimeConfig;
   ai_usage: AiUsageConfig;
   studio: StudioConfig;
+  actions: ActionsConfig;
 }
 
 // 笏笏笏 Runtime Types 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
+
+export interface DeviceBatterySource {
+  /** 0 = self/dongle, 1 = left, 2 = right, 3 = aux. */
+  source: number;
+  /** 0..100, or null when unknown / disconnected. */
+  level: number | null;
+}
+
+export interface DeviceBatteryStatus {
+  device_key: string;
+  serial_number: string | null;
+  product: string | null;
+  sources: DeviceBatterySource[];
+  updated_unix: number;
+}
+
+export interface DeviceLayerState {
+  device_key: string;
+  serial_number: string | null;
+  product: string | null;
+  active_layer: number;
+  layer_mask: number;
+}
+
+export interface PositionCount {
+  position: number;
+  count: number;
+}
+
+export interface KeyStatsSummary {
+  device_key: string;
+  total: number;
+  per_position: PositionCount[];
+  days_covered: number;
+}
+
+export type StatsPeriod = "today" | "last7days" | "all";
 
 export interface MonitorStatus {
   running: boolean;
@@ -108,6 +174,8 @@ export interface MonitorStatus {
   current_rule: string | null;
   last_error: string | null;
   ai_usage: AiUsageProviderStatus[];
+  device_battery: DeviceBatteryStatus[];
+  device_layers: DeviceLayerState[];
 }
 
 export type AiUsageStatusKind =
@@ -268,4 +336,4 @@ export interface ProbeResult {
 
 // 笏笏笏 Page Types 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
-export type Page = "dashboard" | "rules" | "timesync" | "ai_usage" | "keymap_viewer" | "devices" | "settings";
+export type Page = "dashboard" | "rules" | "actions" | "timesync" | "ai_usage" | "keymap_viewer" | "devices" | "settings";

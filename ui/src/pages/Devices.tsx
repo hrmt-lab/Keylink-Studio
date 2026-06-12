@@ -1,17 +1,18 @@
 import { useState, useEffect, useCallback } from "react";
-import { RefreshCw, CheckCircle2, XCircle, Usb, AlertCircle, Keyboard } from "lucide-react";
+import { RefreshCw, CheckCircle2, XCircle, Usb, AlertCircle, BatteryMedium, Keyboard } from "lucide-react";
 import { probeDevices } from "../api";
 import { useLang, type TranslationKey } from "../i18n";
-import type { ProbeResult, StudioDeviceStatus } from "../types";
+import type { DeviceBatteryStatus, MonitorStatus, ProbeResult, StudioDeviceStatus } from "../types";
 
 interface DevicesProps {
   studioDevices: StudioDeviceStatus[];
   studioScanning: boolean;
   studioError: string | null;
   refreshStudioDevices: () => Promise<StudioDeviceStatus[]>;
+  status: MonitorStatus;
 }
 
-export default function Devices({ studioDevices, studioScanning, studioError, refreshStudioDevices }: DevicesProps) {
+export default function Devices({ studioDevices, studioScanning, studioError, refreshStudioDevices, status }: DevicesProps) {
   const { t } = useLang();
   const [results, setResults] = useState<ProbeResult[] | null>(null);
   const [hostLinkLoading, setHostLinkLoading] = useState(false);
@@ -77,7 +78,21 @@ export default function Devices({ studioDevices, studioScanning, studioError, re
         ) : results.length === 0 ? (
           <EmptyCard title={t("devices.empty")} body={t("devices.empty.hint")} />
         ) : (
-          <div className="space-y-3">{results.map((result, idx) => <HostLinkDeviceCard key={idx} result={result} />)}</div>
+          <div className="space-y-3">
+            {results.map((result, idx) => (
+              <HostLinkDeviceCard
+                key={idx}
+                result={result}
+                battery={
+                  result.device.device_uid_hash
+                    ? status.device_battery.find(
+                        (entry) => entry.device_key === result.device.device_uid_hash
+                      ) ?? null
+                    : null
+                }
+              />
+            ))}
+          </div>
         )}
       </DeviceSection>
 
@@ -134,7 +149,7 @@ function EmptyCard({ title, body }: { title: string; body: string }) {
   );
 }
 
-function HostLinkDeviceCard({ result }: { result: ProbeResult }) {
+function HostLinkDeviceCard({ result, battery }: { result: ProbeResult; battery: DeviceBatteryStatus | null }) {
   const { t } = useLang();
   const { device, verified, error } = result;
   const name = device.product ?? device.manufacturer ?? "Unknown Device";
@@ -151,12 +166,37 @@ function HostLinkDeviceCard({ result }: { result: ProbeResult }) {
           {device.manufacturer && <div className="text-xs text-gray-400 mt-0.5">{device.manufacturer}</div>}
           <DeviceBadges device={device} />
           {verified && <HostLinkCapabilityBadges device={device} />}
+          {battery && battery.sources.length > 0 && (
+            <div className="mt-2 flex flex-wrap items-center gap-2">
+              <BatteryMedium size={13} className="text-gray-400" />
+              {battery.sources.map((source) => (
+                <span
+                  key={source.source}
+                  className="inline-flex items-center gap-1 rounded-md bg-background px-2 py-0.5 text-[11px] ring-1 ring-border"
+                >
+                  <span className="text-gray-400">
+                    {t(`battery.source.${source.source}` as TranslationKey)}:
+                  </span>
+                  <span className={`font-mono ${batteryTextClass(source.level)}`}>
+                    {source.level === null ? "--" : `${source.level}%`}
+                  </span>
+                </span>
+              ))}
+            </div>
+          )}
           <div className="mt-1.5 font-mono text-[10px] text-gray-400 truncate" title={device.path}>{device.path}</div>
           {error && <div className="mt-2 rounded-md bg-red-50 px-3 py-1.5 text-xs text-red-600">{error}</div>}
         </div>
       </div>
     </div>
   );
+}
+
+function batteryTextClass(level: number | null): string {
+  if (level === null) return "text-gray-400";
+  if (level <= 15) return "text-red-600";
+  if (level <= 30) return "text-amber-600";
+  return "text-gray-700";
 }
 
 function HostLinkCapabilityBadges({ device }: { device: ProbeResult["device"] }) {
@@ -180,6 +220,10 @@ function capabilityLabels(bits: number) {
   if ((bits & 2) !== 0) labels.push("TIME_SYNC");
   if ((bits & 4) !== 0) labels.push("AI_USAGE");
   if ((bits & 8) !== 0) labels.push("THEME");
+  if ((bits & 16) !== 0) labels.push("BATTERY");
+  if ((bits & 32) !== 0) labels.push("HOST_ACTION");
+  if ((bits & 64) !== 0) labels.push("KEY_STATS");
+  if ((bits & 128) !== 0) labels.push("LAYER_STATE");
   return labels;
 }
 

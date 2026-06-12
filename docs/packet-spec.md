@@ -35,6 +35,12 @@ host が `hidapi` で write する buffer は、先頭 1 byte の Report ID `0x0
 | `0x10` | `AI_USAGE` | Host -> ZMK | AI usage snapshot |
 | `0x20` | `TIME_SYNC` | Host -> ZMK | time display sync |
 | `0x30` | `APP_LAYER` | Host -> ZMK | app layer set/clear |
+| `0x40` | `BATTERY_STATUS` | ZMK -> Host | battery levels (self + peripherals) |
+| `0x50` | `HOST_ACTION` | ZMK -> Host | trigger a host-side action |
+| `0x60` | `KEY_STATS` | ZMK -> Host | per-position key press deltas |
+| `0x70` | `LAYER_STATE` | ZMK -> Host | active layer report (display only) |
+
+`0x40` 以降は device-initiated (uplink) packet です。host は監視中に非ブロッキング読みで受信します。各 type は対応する capability bit を `DEVICE_HELLO` で立てた device からのみ受け付けます。
 
 ## HOST_HELLO / DEVICE_HELLO
 
@@ -148,6 +154,67 @@ Error/status は固定 code として扱います。access token、credentials J
 
 `TIME_SYNC` は毎秒送りません。ZMK 側は `TIME_SYNC` 受信時の uptime を保存し、uptime 差分で表示秒を進める想定です。
 
+## BATTERY_STATUS (ZMK -> Host)
+
+| Offset | Size | Field | Notes |
+| --- | ---: | --- | --- |
+| `0..1` | 2 | magic | `"HL"` |
+| `2` | 1 | version | `0x01` |
+| `3` | 1 | type | `0x40` |
+| `4` | 1 | count | entry count, `1..=4` |
+| `5+2i` | 1 | source[i] | `0=self/dongle`, `1=left`, `2=right`, `3=aux` |
+| `6+2i` | 1 | level[i] | `0..=100`, or `0xFF` = unknown / disconnected |
+| `5+2*count..31` | - | reserved | must be zero |
+
+Validation: count `1..=4`、source `0..=3` かつ packet 内で重複禁止、level は `0..=100` か `0xFF`(`101..=254` は reject)。変化時+定期(~5分)送信を想定します。
+
+## HOST_ACTION (ZMK -> Host)
+
+| Offset | Size | Field | Notes |
+| --- | ---: | --- | --- |
+| `0..1` | 2 | magic | `"HL"` |
+| `2` | 1 | version | `0x01` |
+| `3` | 1 | type | `0x50` |
+| `4` | 1 | action_id | opaque id; meaning is defined by host config |
+| `5` | 1 | value | action argument, `0` if unused |
+| `6` | 1 | reserved | must be zero |
+| `7` | 1 | seq | u8 wrapping counter |
+| `8..31` | 24 | reserved | must be zero |
+
+host は同一 device からの **同じ seq の連続受信を 1 回として扱います**(firmware の二重送信対策)。リトライは不要です。action の実行内容は host 側 config の許可リスト(`[actions]`)で device 単位 (`actions.devices."uid:..."`) に定義し、未定義 id・未設定 device はログのみです。`value` を path やコマンドとして解釈することはありません。
+
+## KEY_STATS (ZMK -> Host)
+
+| Offset | Size | Field | Notes |
+| --- | ---: | --- | --- |
+| `0..1` | 2 | magic | `"HL"` |
+| `2` | 1 | version | `0x01` |
+| `3` | 1 | type | `0x60` |
+| `4` | 1 | entry_count | `1..=8` |
+| `5` | 1 | flags | bit0 = `MORE_FOLLOWS`; other bits reserved zero |
+| `6` | 1 | reserved | must be zero |
+| `7` | 1 | seq | u8 wrapping counter (gap = lost packets) |
+| `8+3i` | 1 | position[i] | key position (ZMK Studio physical layout position) |
+| `9+3i..10+3i` | 2 | delta[i] | u16 LE presses since last report; `0` is rejected |
+| `8+3*entry_count..31` | - | reserved | must be zero |
+
+firmware は位置別カウンタを保持し、定期的(30〜60秒)に **非ゼロの position だけ** を送って 0 クリアします。8 entry を超える場合は複数 packet に分割し、最後以外に `MORE_FOLLOWS` を立てます。host は seq gap を警告ログにしつつ受信分を加算します(欠落はアンダーカウントとして許容)。
+
+## LAYER_STATE (ZMK -> Host)
+
+| Offset | Size | Field | Notes |
+| --- | ---: | --- | --- |
+| `0..1` | 2 | magic | `"HL"` |
+| `2` | 1 | version | `0x01` |
+| `3` | 1 | type | `0x70` |
+| `4` | 1 | active_layer | highest active layer, `0..=31` |
+| `5..6` | 2 | reserved | must be zero |
+| `7` | 1 | seq | u8 wrapping counter |
+| `8..11` | 4 | layer_mask | u32 LE, bit i = layer i active; `0` = top layer only |
+| `12..31` | 20 | reserved | must be zero |
+
+`layer_mask` が非ゼロの場合、`active_layer` の bit が立っていなければ reject します。layer-state-changed イベント時に送信(~50ms デバウンス推奨)します。**host はこの報告を表示にのみ使い、APP_LAYER としてエコーバックしません。**
+
 ## ZMK 実装時の要点
 
 - 33 byte write の先頭は Report ID `0x00` です。
@@ -157,6 +224,9 @@ Error/status は固定 code として扱います。access token、credentials J
 - `HOST_HELLO` に対して、同じ `seq` の `DEVICE_HELLO` を返してください。
 - `APP_LAYER` は packet type ではなく `action` で set / clear を分岐してください。
 - `AI_USAGE` の history fallback は quota ではありません。`quota_source=0` の reset は表示しないでください。
+- uplink packet (`0x40`〜`0x70`) を送る場合は、対応する capability bit を `DEVICE_HELLO` で立ててください。bit が立っていない type は host が破棄します。
+- uplink は best-effort です。host が読んでいない間(監視停止中など)の packet は失われます。`KEY_STATS` の欠落はアンダーカウントとして扱われます。
+- `HOST_ACTION` の応答は最大で host の polling 間隔(既定 500ms)遅れます。
 
 ## Device identity and capabilities
 
@@ -189,6 +259,10 @@ bit0 = APP_LAYER
 bit1 = TIME_SYNC
 bit2 = AI_USAGE
 bit3 = THEME
+bit4 = BATTERY      (device sends BATTERY_STATUS)
+bit5 = HOST_ACTION  (device sends HOST_ACTION)
+bit6 = KEY_STATS    (device sends KEY_STATS)
+bit7 = LAYER_STATE  (device sends LAYER_STATE)
 ```
 
 RawHID Host does not send `APP_LAYER` packets to a device unless `APP_LAYER` capability is present. The device is still shown as a Host Link device in the Devices page.

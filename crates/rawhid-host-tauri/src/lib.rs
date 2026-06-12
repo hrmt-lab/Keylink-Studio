@@ -1,3 +1,4 @@
+mod actions;
 mod commands;
 mod foreground;
 mod icon;
@@ -43,6 +44,9 @@ pub fn run() {
             commands::get_app_icons,
             commands::get_launch_at_login,
             commands::set_launch_at_login,
+            commands::get_key_stats,
+            commands::list_key_stats_devices,
+            commands::debug_inject_uplink,
         ])
         .setup(move |app| {
             setup_window_icon(app)?;

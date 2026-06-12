@@ -40,6 +40,32 @@ clock_mode = "24h"
 periodic_sync_sec = 60
 # tz_offset_min = 540
 
+[stats]
+# Record per-position key statistics from KEY_STATS-capable keyboards.
+# Positions only; key contents are never recorded.
+enabled = true
+flush_interval_sec = 60
+
+[actions]
+# Execute HOST_ACTION packets sent from the keyboard. Disabled by default.
+enabled = false
+
+# Bindings are configured per device, keyed by the stable uid returned in
+# DEVICE_HELLO (same keying as layer_switch.devices). Unbound ids are only
+# logged.
+#[actions.devices."uid:7a91c3e4d102ab55"]
+#display_name = "Example Keyboard"
+#enabled = true
+#
+#[[actions.devices."uid:7a91c3e4d102ab55".bindings]]
+#action_id = 1
+#action = "show_window"  # show_window | start_monitoring | stop_monitoring | refresh_ai_usage | launch
+#
+#[[actions.devices."uid:7a91c3e4d102ab55".bindings]]
+#action_id = 2
+#action = "launch"
+#path = "C:\\tools\\example.exe"
+
 [ai_usage]
 enabled = false
 poll_interval_sec = 300
@@ -50,6 +76,12 @@ enabled = true
 # When sessions_dir is omitted, the core default is used.
 # Codex rate_limits are preferred. Local history is only a fallback activity estimate.
 # sessions_dir = "C:\\Users\\<user>\\.codex\\sessions"
+# sessions_auto_detect also reads the Windows default, every WSL distro's
+# ~/.codex/sessions, and extra_sessions_paths, then merges them. Disable to use
+# only sessions_dir.
+sessions_auto_detect = true
+include_wsl_sessions = true
+extra_sessions_paths = []
 history_fallback_enabled = true
 allow_activity_baseline = false
 # Activity estimate baselines are not quota limits.

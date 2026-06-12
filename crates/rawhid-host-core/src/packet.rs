@@ -10,6 +10,14 @@ pub const CAPABILITY_APP_LAYER: u32 = 1 << 0;
 pub const CAPABILITY_TIME_SYNC: u32 = 1 << 1;
 pub const CAPABILITY_AI_USAGE: u32 = 1 << 2;
 pub const CAPABILITY_THEME: u32 = 1 << 3;
+pub const CAPABILITY_BATTERY: u32 = 1 << 4;
+pub const CAPABILITY_HOST_ACTION: u32 = 1 << 5;
+pub const CAPABILITY_KEY_STATS: u32 = 1 << 6;
+pub const CAPABILITY_LAYER_STATE: u32 = 1 << 7;
+
+pub const BATTERY_LEVEL_UNKNOWN: u8 = 0xFF;
+pub const KEY_STATS_MAX_ENTRIES: usize = 8;
+pub const KEY_STATS_FLAG_MORE_FOLLOWS: u8 = 1 << 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -22,6 +30,10 @@ pub enum PacketType {
     AiUsage = 0x10,
     TimeSync = 0x20,
     AppLayer = 0x30,
+    BatteryStatus = 0x40,
+    HostAction = 0x50,
+    KeyStats = 0x60,
+    LayerState = 0x70,
 }
 
 impl TryFrom<u8> for PacketType {
@@ -37,6 +49,10 @@ impl TryFrom<u8> for PacketType {
             0x10 => Ok(Self::AiUsage),
             0x20 => Ok(Self::TimeSync),
             0x30 => Ok(Self::AppLayer),
+            0x40 => Ok(Self::BatteryStatus),
+            0x50 => Ok(Self::HostAction),
+            0x60 => Ok(Self::KeyStats),
+            0x70 => Ok(Self::LayerState),
             other => Err(PacketError::UnknownType(other)),
         }
     }
@@ -284,6 +300,234 @@ impl DeviceHello {
         self.capabilities & CAPABILITY_APP_LAYER != 0
     }
 }
+
+// ─── Device-initiated (uplink) packets ───────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BatteryEntry {
+    /// 0 = self/dongle (central), 1 = left peripheral, 2 = right peripheral, 3 = aux.
+    pub source: u8,
+    /// 0..=100; None when the device reported 0xFF (unknown / disconnected).
+    pub level: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BatteryStatusPacket {
+    pub entries: Vec<BatteryEntry>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostActionPacket {
+    pub action_id: u8,
+    pub value: u8,
+    pub seq: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyStatsEntry {
+    pub position: u8,
+    pub delta: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyStatsPacket {
+    pub entries: Vec<KeyStatsEntry>,
+    pub more_follows: bool,
+    pub seq: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayerStatePacket {
+    pub active_layer: u8,
+    /// Bit i set = layer i active. 0 means the firmware reports the top layer only.
+    pub layer_mask: u32,
+    pub seq: u8,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UplinkPacket {
+    Battery(BatteryStatusPacket),
+    HostAction(HostActionPacket),
+    KeyStats(KeyStatsPacket),
+    LayerState(LayerStatePacket),
+}
+
+impl UplinkPacket {
+    pub fn packet_type(&self) -> PacketType {
+        match self {
+            Self::Battery(_) => PacketType::BatteryStatus,
+            Self::HostAction(_) => PacketType::HostAction,
+            Self::KeyStats(_) => PacketType::KeyStats,
+            Self::LayerState(_) => PacketType::LayerState,
+        }
+    }
+
+    pub fn required_capability(&self) -> u32 {
+        match self {
+            Self::Battery(_) => CAPABILITY_BATTERY,
+            Self::HostAction(_) => CAPABILITY_HOST_ACTION,
+            Self::KeyStats(_) => CAPABILITY_KEY_STATS,
+            Self::LayerState(_) => CAPABILITY_LAYER_STATE,
+        }
+    }
+
+    pub fn decode_payload(bytes: &[u8]) -> Result<Self, PacketError> {
+        if bytes.len() != PACKET_SIZE {
+            return Err(PacketError::InvalidLength {
+                expected: PACKET_SIZE,
+                actual: bytes.len(),
+            });
+        }
+        if bytes[0..2] != MAGIC {
+            return Err(PacketError::InvalidMagic);
+        }
+        if bytes[2] != VERSION {
+            return Err(PacketError::UnsupportedVersion(bytes[2]));
+        }
+        match PacketType::try_from(bytes[3])? {
+            PacketType::BatteryStatus => Self::decode_battery(bytes),
+            PacketType::HostAction => Self::decode_host_action(bytes),
+            PacketType::KeyStats => Self::decode_key_stats(bytes),
+            PacketType::LayerState => Self::decode_layer_state(bytes),
+            other => Err(PacketError::DecodeUnsupportedType(other as u8)),
+        }
+    }
+
+    fn decode_battery(bytes: &[u8]) -> Result<Self, PacketError> {
+        let count = bytes[4] as usize;
+        if !(1..=4).contains(&count) {
+            return Err(PacketError::InvalidBatteryCount(bytes[4]));
+        }
+        let mut entries = Vec::with_capacity(count);
+        for i in 0..count {
+            let source = bytes[5 + 2 * i];
+            let raw_level = bytes[6 + 2 * i];
+            if source > 3 {
+                return Err(PacketError::InvalidBatterySource(source));
+            }
+            if entries.iter().any(|e: &BatteryEntry| e.source == source) {
+                return Err(PacketError::DuplicateBatterySource(source));
+            }
+            let level = match raw_level {
+                0..=100 => Some(raw_level),
+                BATTERY_LEVEL_UNKNOWN => None,
+                other => return Err(PacketError::InvalidBatteryLevel(other)),
+            };
+            entries.push(BatteryEntry { source, level });
+        }
+        if bytes[5 + 2 * count..].iter().any(|b| *b != 0) {
+            return Err(PacketError::ReservedNotZero);
+        }
+        Ok(Self::Battery(BatteryStatusPacket { entries }))
+    }
+
+    fn decode_host_action(bytes: &[u8]) -> Result<Self, PacketError> {
+        if bytes[6] != 0 || bytes[8..].iter().any(|b| *b != 0) {
+            return Err(PacketError::ReservedNotZero);
+        }
+        Ok(Self::HostAction(HostActionPacket {
+            action_id: bytes[4],
+            value: bytes[5],
+            seq: bytes[7],
+        }))
+    }
+
+    fn decode_key_stats(bytes: &[u8]) -> Result<Self, PacketError> {
+        let count = bytes[4] as usize;
+        if !(1..=KEY_STATS_MAX_ENTRIES).contains(&count) {
+            return Err(PacketError::InvalidKeyStatsEntryCount(bytes[4]));
+        }
+        let flags = bytes[5];
+        if flags & !KEY_STATS_FLAG_MORE_FOLLOWS != 0 {
+            return Err(PacketError::InvalidKeyStatsFlags(flags));
+        }
+        if bytes[6] != 0 {
+            return Err(PacketError::ReservedNotZero);
+        }
+        let mut entries = Vec::with_capacity(count);
+        for i in 0..count {
+            let base = 8 + 3 * i;
+            let position = bytes[base];
+            let delta = u16::from_le_bytes(bytes[base + 1..base + 3].try_into().unwrap());
+            if delta == 0 {
+                return Err(PacketError::InvalidKeyStatsDelta(position));
+            }
+            entries.push(KeyStatsEntry { position, delta });
+        }
+        if bytes[8 + 3 * count..].iter().any(|b| *b != 0) {
+            return Err(PacketError::ReservedNotZero);
+        }
+        Ok(Self::KeyStats(KeyStatsPacket {
+            entries,
+            more_follows: flags & KEY_STATS_FLAG_MORE_FOLLOWS != 0,
+            seq: bytes[7],
+        }))
+    }
+
+    fn decode_layer_state(bytes: &[u8]) -> Result<Self, PacketError> {
+        if bytes[5] != 0 || bytes[6] != 0 || bytes[12..].iter().any(|b| *b != 0) {
+            return Err(PacketError::ReservedNotZero);
+        }
+        let active_layer = bytes[4];
+        validate_layer(active_layer)?;
+        let layer_mask = u32::from_le_bytes(bytes[8..12].try_into().unwrap());
+        if layer_mask != 0 && layer_mask & (1 << active_layer) == 0 {
+            return Err(PacketError::InvalidLayerMask {
+                active_layer,
+                layer_mask,
+            });
+        }
+        Ok(Self::LayerState(LayerStatePacket {
+            active_layer,
+            layer_mask,
+            seq: bytes[7],
+        }))
+    }
+
+    /// Encode for round-trip tests and debug injection. Not used in the
+    /// production send path (these packets are device-initiated).
+    pub fn encode_payload(&self) -> [u8; PACKET_SIZE] {
+        let mut bytes = [0u8; PACKET_SIZE];
+        bytes[0..2].copy_from_slice(&MAGIC);
+        bytes[2] = VERSION;
+        bytes[3] = self.packet_type() as u8;
+        match self {
+            Self::Battery(p) => {
+                bytes[4] = p.entries.len() as u8;
+                for (i, entry) in p.entries.iter().enumerate() {
+                    bytes[5 + 2 * i] = entry.source;
+                    bytes[6 + 2 * i] = entry.level.unwrap_or(BATTERY_LEVEL_UNKNOWN);
+                }
+            }
+            Self::HostAction(p) => {
+                bytes[4] = p.action_id;
+                bytes[5] = p.value;
+                bytes[7] = p.seq;
+            }
+            Self::KeyStats(p) => {
+                bytes[4] = p.entries.len() as u8;
+                bytes[5] = if p.more_follows {
+                    KEY_STATS_FLAG_MORE_FOLLOWS
+                } else {
+                    0
+                };
+                bytes[7] = p.seq;
+                for (i, entry) in p.entries.iter().enumerate() {
+                    let base = 8 + 3 * i;
+                    bytes[base] = entry.position;
+                    bytes[base + 1..base + 3].copy_from_slice(&entry.delta.to_le_bytes());
+                }
+            }
+            Self::LayerState(p) => {
+                bytes[4] = p.active_layer;
+                bytes[7] = p.seq;
+                bytes[8..12].copy_from_slice(&p.layer_mask.to_le_bytes());
+            }
+        }
+        bytes
+    }
+}
+
 impl Packet {
     pub fn set_layer(layer: u8, seq: u8) -> Result<Self, PacketError> {
         validate_layer(layer)?;
@@ -330,7 +574,13 @@ impl Packet {
                 bytes[5] = self.layer;
                 bytes[7] = self.seq;
             }
-            PacketType::Error | PacketType::AiUsage | PacketType::TimeSync => {}
+            PacketType::Error
+            | PacketType::AiUsage
+            | PacketType::TimeSync
+            | PacketType::BatteryStatus
+            | PacketType::HostAction
+            | PacketType::KeyStats
+            | PacketType::LayerState => {}
         }
         bytes
     }
@@ -396,7 +646,13 @@ impl Packet {
                     seq: bytes[7],
                 })
             }
-            PacketType::Error | PacketType::AiUsage | PacketType::TimeSync => {
+            PacketType::Error
+            | PacketType::AiUsage
+            | PacketType::TimeSync
+            | PacketType::BatteryStatus
+            | PacketType::HostAction
+            | PacketType::KeyStats
+            | PacketType::LayerState => {
                 Err(PacketError::DecodeUnsupportedType(packet_type as u8))
             }
         }
@@ -440,6 +696,22 @@ pub enum PacketError {
     InvalidAiUsageBasisPoints(u16),
     #[error("packet type {0:#04x} is not decoded as a generic packet")]
     DecodeUnsupportedType(u8),
+    #[error("invalid battery entry count {0}; expected 1-4")]
+    InvalidBatteryCount(u8),
+    #[error("invalid battery source {0}; expected 0-3")]
+    InvalidBatterySource(u8),
+    #[error("invalid battery level {0}; expected 0-100 or 255")]
+    InvalidBatteryLevel(u8),
+    #[error("duplicate battery source {0}")]
+    DuplicateBatterySource(u8),
+    #[error("invalid key stats entry count {0}; expected 1-8")]
+    InvalidKeyStatsEntryCount(u8),
+    #[error("invalid key stats flags {0:#04x}")]
+    InvalidKeyStatsFlags(u8),
+    #[error("key stats delta for position {0} must be non-zero")]
+    InvalidKeyStatsDelta(u8),
+    #[error("layer mask {layer_mask:#010x} does not include active layer {active_layer}")]
+    InvalidLayerMask { active_layer: u8, layer_mask: u32 },
 }
 
 #[cfg(test)]
@@ -612,6 +884,256 @@ mod tests {
         assert_eq!(
             TimeSyncPacket::new(0, 1441, 1, 0, 0).unwrap_err(),
             PacketError::InvalidTimezoneOffset(1441)
+        );
+    }
+
+    #[test]
+    fn battery_status_round_trips() {
+        let packet = UplinkPacket::Battery(BatteryStatusPacket {
+            entries: vec![
+                BatteryEntry {
+                    source: 0,
+                    level: Some(87),
+                },
+                BatteryEntry {
+                    source: 1,
+                    level: Some(42),
+                },
+                BatteryEntry {
+                    source: 2,
+                    level: None,
+                },
+            ],
+        });
+
+        let decoded = UplinkPacket::decode_payload(&packet.encode_payload()).unwrap();
+        assert_eq!(decoded, packet);
+        assert_eq!(decoded.required_capability(), CAPABILITY_BATTERY);
+    }
+
+    #[test]
+    fn battery_status_rejects_invalid_fields() {
+        let base = UplinkPacket::Battery(BatteryStatusPacket {
+            entries: vec![BatteryEntry {
+                source: 0,
+                level: Some(50),
+            }],
+        })
+        .encode_payload();
+
+        let mut payload = base;
+        payload[4] = 0;
+        assert_eq!(
+            UplinkPacket::decode_payload(&payload).unwrap_err(),
+            PacketError::InvalidBatteryCount(0)
+        );
+
+        let mut payload = base;
+        payload[4] = 5;
+        assert_eq!(
+            UplinkPacket::decode_payload(&payload).unwrap_err(),
+            PacketError::InvalidBatteryCount(5)
+        );
+
+        let mut payload = base;
+        payload[6] = 101;
+        assert_eq!(
+            UplinkPacket::decode_payload(&payload).unwrap_err(),
+            PacketError::InvalidBatteryLevel(101)
+        );
+
+        let mut payload = base;
+        payload[5] = 4;
+        assert_eq!(
+            UplinkPacket::decode_payload(&payload).unwrap_err(),
+            PacketError::InvalidBatterySource(4)
+        );
+
+        // Two entries with the same source.
+        let mut payload = base;
+        payload[4] = 2;
+        payload[7] = 0; // source duplicate of entry 0
+        payload[8] = 60;
+        assert_eq!(
+            UplinkPacket::decode_payload(&payload).unwrap_err(),
+            PacketError::DuplicateBatterySource(0)
+        );
+
+        let mut payload = base;
+        payload[31] = 1;
+        assert_eq!(
+            UplinkPacket::decode_payload(&payload).unwrap_err(),
+            PacketError::ReservedNotZero
+        );
+    }
+
+    #[test]
+    fn host_action_round_trips() {
+        let packet = UplinkPacket::HostAction(HostActionPacket {
+            action_id: 7,
+            value: 3,
+            seq: 200,
+        });
+
+        let decoded = UplinkPacket::decode_payload(&packet.encode_payload()).unwrap();
+        assert_eq!(decoded, packet);
+        assert_eq!(decoded.required_capability(), CAPABILITY_HOST_ACTION);
+    }
+
+    #[test]
+    fn host_action_rejects_reserved_bytes() {
+        let mut payload = UplinkPacket::HostAction(HostActionPacket {
+            action_id: 1,
+            value: 0,
+            seq: 0,
+        })
+        .encode_payload();
+        payload[8] = 1;
+
+        assert_eq!(
+            UplinkPacket::decode_payload(&payload).unwrap_err(),
+            PacketError::ReservedNotZero
+        );
+    }
+
+    #[test]
+    fn key_stats_round_trips_with_full_packet() {
+        let entries: Vec<KeyStatsEntry> = (0..KEY_STATS_MAX_ENTRIES as u8)
+            .map(|i| KeyStatsEntry {
+                position: 10 + i,
+                delta: 100 + u16::from(i),
+            })
+            .collect();
+        let packet = UplinkPacket::KeyStats(KeyStatsPacket {
+            entries,
+            more_follows: true,
+            seq: 9,
+        });
+
+        let payload = packet.encode_payload();
+        // 8 entries * 3 bytes fill bytes 8..32 exactly.
+        assert!(payload[8..].iter().any(|b| *b != 0));
+        let decoded = UplinkPacket::decode_payload(&payload).unwrap();
+        assert_eq!(decoded, packet);
+    }
+
+    #[test]
+    fn key_stats_rejects_invalid_fields() {
+        let base = UplinkPacket::KeyStats(KeyStatsPacket {
+            entries: vec![KeyStatsEntry {
+                position: 4,
+                delta: 2,
+            }],
+            more_follows: false,
+            seq: 1,
+        })
+        .encode_payload();
+
+        let mut payload = base;
+        payload[4] = 0;
+        assert_eq!(
+            UplinkPacket::decode_payload(&payload).unwrap_err(),
+            PacketError::InvalidKeyStatsEntryCount(0)
+        );
+
+        let mut payload = base;
+        payload[4] = 9;
+        assert_eq!(
+            UplinkPacket::decode_payload(&payload).unwrap_err(),
+            PacketError::InvalidKeyStatsEntryCount(9)
+        );
+
+        let mut payload = base;
+        payload[5] = 0x02;
+        assert_eq!(
+            UplinkPacket::decode_payload(&payload).unwrap_err(),
+            PacketError::InvalidKeyStatsFlags(0x02)
+        );
+
+        let mut payload = base;
+        payload[9] = 0;
+        payload[10] = 0;
+        assert_eq!(
+            UplinkPacket::decode_payload(&payload).unwrap_err(),
+            PacketError::InvalidKeyStatsDelta(4)
+        );
+
+        let mut payload = base;
+        payload[31] = 1;
+        assert_eq!(
+            UplinkPacket::decode_payload(&payload).unwrap_err(),
+            PacketError::ReservedNotZero
+        );
+    }
+
+    #[test]
+    fn layer_state_round_trips() {
+        let packet = UplinkPacket::LayerState(LayerStatePacket {
+            active_layer: 3,
+            layer_mask: 0b1001,
+            seq: 17,
+        });
+
+        let decoded = UplinkPacket::decode_payload(&packet.encode_payload()).unwrap();
+        assert_eq!(decoded, packet);
+        assert_eq!(decoded.required_capability(), CAPABILITY_LAYER_STATE);
+    }
+
+    #[test]
+    fn layer_state_allows_zero_mask() {
+        let packet = UplinkPacket::LayerState(LayerStatePacket {
+            active_layer: 5,
+            layer_mask: 0,
+            seq: 0,
+        });
+
+        assert_eq!(
+            UplinkPacket::decode_payload(&packet.encode_payload()).unwrap(),
+            packet
+        );
+    }
+
+    #[test]
+    fn layer_state_rejects_invalid_fields() {
+        let base = UplinkPacket::LayerState(LayerStatePacket {
+            active_layer: 2,
+            layer_mask: 0b0100,
+            seq: 0,
+        })
+        .encode_payload();
+
+        let mut payload = base;
+        payload[4] = 32;
+        assert_eq!(
+            UplinkPacket::decode_payload(&payload).unwrap_err(),
+            PacketError::InvalidLayer(32)
+        );
+
+        // Mask set but missing the active layer bit.
+        let mut payload = base;
+        payload[8..12].copy_from_slice(&0b0010u32.to_le_bytes());
+        assert_eq!(
+            UplinkPacket::decode_payload(&payload).unwrap_err(),
+            PacketError::InvalidLayerMask {
+                active_layer: 2,
+                layer_mask: 0b0010
+            }
+        );
+
+        let mut payload = base;
+        payload[12] = 1;
+        assert_eq!(
+            UplinkPacket::decode_payload(&payload).unwrap_err(),
+            PacketError::ReservedNotZero
+        );
+    }
+
+    #[test]
+    fn uplink_decode_rejects_downlink_types() {
+        let payload = Packet::host_hello(1).encode_payload();
+        assert_eq!(
+            UplinkPacket::decode_payload(&payload).unwrap_err(),
+            PacketError::DecodeUnsupportedType(PacketType::HostHello as u8)
         );
     }
 }

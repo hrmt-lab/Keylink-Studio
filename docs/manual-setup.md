@@ -142,6 +142,9 @@ stale_after_sec = 900
 [ai_usage.codex]
 enabled = true
 # sessions_dir = "C:\\Users\\<user>\\.codex\\sessions"
+sessions_auto_detect = true
+include_wsl_sessions = true
+extra_sessions_paths = []
 history_fallback_enabled = true
 allow_activity_baseline = false
 activity_five_hour_token_baseline = 0
@@ -191,6 +194,7 @@ Thumbs.db
 - The app is single-instance. A second launch focuses the existing window instead of starting another process.
 - Add `hid.rescan_interval_sec` to configure Host Link HID rescan while monitoring is running. The default is 5 seconds.
 - AI Usage collection runs independently from monitoring. Raw HID sending still requires monitoring.
+- Codex sessions auto-detect (`sessions_auto_detect`, default on) reads the Windows default, every WSL distro's `~/.codex/sessions` (`include_wsl_sessions`), and `extra_sessions_paths`, merging them so Codex usage from WSL is reflected too. rate_limits use the most recent across all directories; the history fallback sums tokens across all directories.
 - Claude Code credentials auto-detect supports Windows default, WSL default, and extra credentials paths. Refresh token updates are not implemented in v1.
 - ZMK Studio Keymap Viewer requires ZMK Studio USB serial RPC transport. BLE transport is out of scope for v1.
 - For device-specific App Layer rules, firmware should return `APP_LAYER` capability and a stable non-zero `device_uid_hash` in `DEVICE_HELLO`.

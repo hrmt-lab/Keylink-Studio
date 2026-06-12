@@ -2,6 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { Sidebar } from "./components/Sidebar";
 import Dashboard from "./pages/Dashboard";
 import Rules from "./pages/Rules";
+import Actions from "./pages/Actions";
 import TimeSync from "./pages/TimeSync";
 import AiUsage from "./pages/AiUsage";
 import KeymapViewer from "./pages/KeymapViewer";
@@ -47,6 +48,8 @@ function AppInner() {
     current_rule: null,
     last_error: null,
     ai_usage: [],
+    device_battery: [],
+    device_layers: [],
   });
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [studioDevices, setStudioDevices] = useState<StudioDeviceStatus[]>([]);
@@ -147,6 +150,9 @@ function AppInner() {
         {page === "rules" && (
           <Rules config={config} setConfig={updateConfig} status={status} />
         )}
+        {page === "actions" && (
+          <Actions config={config} setConfig={updateConfig} status={status} />
+        )}
         {page === "timesync" && (
           <TimeSync config={config} setConfig={updateConfig} />
         )}
@@ -161,6 +167,7 @@ function AppInner() {
             refreshStudioDevices={refreshStudioDevices}
             snapshotsByDeviceId={keymapSnapshotsByDeviceId}
             setSnapshotsByDeviceId={setKeymapSnapshotsByDeviceId}
+            status={status}
           />
         )}
         {page === "devices" && (
@@ -169,6 +176,7 @@ function AppInner() {
             studioScanning={studioScanning}
             studioError={studioError}
             refreshStudioDevices={refreshStudioDevices}
+            status={status}
           />
         )}
         {page === "settings" && (

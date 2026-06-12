@@ -1,4 +1,8 @@
-use std::{collections::HashMap, thread, time::Duration};
+use std::{
+    collections::HashMap,
+    thread,
+    time::{Duration, Instant},
+};
 
 use tracing::{debug, info, warn};
 
@@ -10,7 +14,9 @@ use crate::{
     app_match::{match_action, LayerAction},
     config::{AppConfig, UnmatchedAction},
     hid::{DeviceInfo, HidDeviceManager, HidError, HidTransport},
-    time::{Clock, SystemClock, TimeError, TimeSyncState},
+    packet::UplinkPacket,
+    stats::SharedKeyStatsStore,
+    time::{Clock, SystemClock, TimeError, TimeSnapshot, TimeSyncState},
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +24,39 @@ pub enum RunEvent {
     SetLayer { layer: u8, rule_name: String },
     Clear,
     Unchanged,
+}
+
+/// A device-initiated packet drained from a verified device.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UplinkEvent {
+    pub device: DeviceInfo,
+    pub packet: UplinkPacket,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DeviceBatterySource {
+    /// 0 = self/dongle, 1 = left peripheral, 2 = right peripheral, 3 = aux.
+    pub source: u8,
+    /// 0..=100; None = unknown / disconnected.
+    pub level: Option<u8>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DeviceBatteryStatus {
+    pub device_key: String,
+    pub serial_number: Option<String>,
+    pub product: Option<String>,
+    pub sources: Vec<DeviceBatterySource>,
+    pub updated_unix: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct DeviceLayerState {
+    pub device_key: String,
+    pub serial_number: Option<String>,
+    pub product: Option<String>,
+    pub active_layer: u8,
+    pub layer_mask: u32,
 }
 
 #[derive(Debug)]
@@ -32,6 +71,12 @@ pub struct Runner<P, T, C = SystemClock> {
     ai_usage_send: AiUsageSendState,
     managed_layers: HashMap<String, ManagedLayerState>,
     last_device_generation: u64,
+    pending_uplink_events: Vec<UplinkEvent>,
+    battery: HashMap<String, DeviceBatteryStatus>,
+    layer_states: HashMap<String, DeviceLayerState>,
+    last_host_action_seq: HashMap<String, u8>,
+    last_key_stats_seq: HashMap<String, u8>,
+    key_stats: Option<SharedKeyStatsStore>,
 }
 
 impl<P, T> Runner<P, T, SystemClock>
@@ -69,6 +114,12 @@ where
             ai_usage_send: AiUsageSendState::default(),
             managed_layers: HashMap::new(),
             last_device_generation: 0,
+            pending_uplink_events: Vec::new(),
+            battery: HashMap::new(),
+            layer_states: HashMap::new(),
+            last_host_action_seq: HashMap::new(),
+            last_key_stats_seq: HashMap::new(),
+            key_stats: None,
         }
     }
 
@@ -90,11 +141,18 @@ where
             ai_usage_send: AiUsageSendState::default(),
             managed_layers: HashMap::new(),
             last_device_generation: 0,
+            pending_uplink_events: Vec::new(),
+            battery: HashMap::new(),
+            layer_states: HashMap::new(),
+            last_host_action_seq: HashMap::new(),
+            last_key_stats_seq: HashMap::new(),
+            key_stats: None,
         }
     }
 
     pub fn tick(&mut self) -> Result<RunEvent, RunnerError> {
         self.hid.ensure_verified()?;
+        self.process_uplink();
         let device_generation = self.hid.device_generation();
         self.sync_time_if_due(device_generation)?;
         self.sync_ai_usage_if_due(device_generation)?;
@@ -106,6 +164,154 @@ where
         let event = self.sync_app_layers(&app, device_generation)?;
         self.last_device_generation = self.hid.device_generation();
         Ok(event)
+    }
+
+    /// Attach the shared key-stats store fed by KEY_STATS uplink packets.
+    pub fn set_key_stats_store(&mut self, store: SharedKeyStatsStore) {
+        self.key_stats = Some(store);
+    }
+
+    /// Take all uplink events drained since the previous call.
+    pub fn take_uplink_events(&mut self) -> Vec<UplinkEvent> {
+        std::mem::take(&mut self.pending_uplink_events)
+    }
+
+    pub fn battery_statuses(&self) -> Vec<DeviceBatteryStatus> {
+        let mut statuses: Vec<DeviceBatteryStatus> = self.battery.values().cloned().collect();
+        statuses.sort_by(|a, b| a.device_key.cmp(&b.device_key));
+        statuses
+    }
+
+    pub fn layer_states(&self) -> Vec<DeviceLayerState> {
+        let mut states: Vec<DeviceLayerState> = self.layer_states.values().cloned().collect();
+        states.sort_by(|a, b| a.device_key.cmp(&b.device_key));
+        states
+    }
+
+    fn process_uplink(&mut self) {
+        let drained = self.hid.drain_uplink();
+        if !drained.is_empty() {
+            let snapshot = self.clock.now().ok();
+            for (device, packet) in drained {
+                self.ingest_uplink(device, packet, &snapshot);
+            }
+        }
+
+        if let Some(store) = &self.key_stats {
+            if let Ok(mut store) = store.lock() {
+                store.flush_if_due(Instant::now());
+            }
+        }
+        self.prune_uplink_state();
+    }
+
+    /// Feed a single uplink packet through the normal handling path. Public
+    /// for debug injection; production packets arrive via `drain_uplink`.
+    pub fn inject_uplink(&mut self, device: DeviceInfo, packet: UplinkPacket) {
+        let snapshot = self.clock.now().ok();
+        self.ingest_uplink(device, packet, &snapshot);
+    }
+
+    fn ingest_uplink(
+        &mut self,
+        device: DeviceInfo,
+        packet: UplinkPacket,
+        snapshot: &Option<TimeSnapshot>,
+    ) {
+        {
+            {
+                if device.capabilities & packet.required_capability() == 0 {
+                    debug!(
+                        "dropping uplink {:?} from {}: capability not advertised",
+                        packet.packet_type(),
+                        device.path
+                    );
+                    return;
+                }
+                let device_key = uplink_device_key(&device);
+                match &packet {
+                    UplinkPacket::Battery(battery) => {
+                        self.battery.insert(
+                            device_key,
+                            DeviceBatteryStatus {
+                                device_key: uplink_device_key(&device),
+                                serial_number: device.serial_number.clone(),
+                                product: device.product.clone(),
+                                sources: battery
+                                    .entries
+                                    .iter()
+                                    .map(|entry| DeviceBatterySource {
+                                        source: entry.source,
+                                        level: entry.level,
+                                    })
+                                    .collect(),
+                                updated_unix: snapshot
+                                    .as_ref()
+                                    .map(|s| s.unix_time_sec)
+                                    .unwrap_or(0),
+                            },
+                        );
+                    }
+                    UplinkPacket::LayerState(state) => {
+                        // Display-only: this must never feed back into
+                        // managed_layers / APP_LAYER sending.
+                        self.layer_states.insert(
+                            device_key,
+                            DeviceLayerState {
+                                device_key: uplink_device_key(&device),
+                                serial_number: device.serial_number.clone(),
+                                product: device.product.clone(),
+                                active_layer: state.active_layer,
+                                layer_mask: state.layer_mask,
+                            },
+                        );
+                    }
+                    UplinkPacket::HostAction(action) => {
+                        // Debounce a firmware double-send of the same seq.
+                        if self.last_host_action_seq.get(&device_key) == Some(&action.seq) {
+                            return;
+                        }
+                        self.last_host_action_seq.insert(device_key, action.seq);
+                    }
+                    UplinkPacket::KeyStats(stats) => {
+                        if let Some(previous) = self.last_key_stats_seq.get(&device_key) {
+                            let expected = previous.wrapping_add(1);
+                            if stats.seq != expected {
+                                warn!(
+                                    "key stats seq gap for {device_key}: expected {expected}, got {}",
+                                    stats.seq
+                                );
+                            }
+                        }
+                        self.last_key_stats_seq.insert(device_key.clone(), stats.seq);
+                        if self.config.stats.enabled {
+                            if let (Some(store), Some(snapshot)) = (&self.key_stats, &snapshot) {
+                                if let Ok(mut store) = store.lock() {
+                                    store.apply_diff(
+                                        &device_key,
+                                        &stats.entries,
+                                        &local_date(snapshot),
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                self.pending_uplink_events.push(UplinkEvent { device, packet });
+            }
+        }
+    }
+
+    /// Drop battery / layer entries for devices that are no longer verified.
+    fn prune_uplink_state(&mut self) {
+        let keys: Vec<String> = self
+            .hid
+            .verified_devices()
+            .iter()
+            .map(uplink_device_key)
+            .collect();
+        self.battery.retain(|key, _| keys.contains(key));
+        self.layer_states.retain(|key, _| keys.contains(key));
     }
 
     pub fn verified_device_count(&self) -> usize {
@@ -148,6 +354,10 @@ where
         loop {
             if let Err(error) = self.tick() {
                 warn!("run tick failed: {}", error);
+            }
+            // CLI surface for device-initiated packets: log only.
+            for event in self.take_uplink_events() {
+                info!("uplink from {}: {:?}", event.device.path, event.packet);
             }
             thread::sleep(interval);
         }
@@ -278,6 +488,23 @@ fn supports_app_layer(device: &DeviceInfo) -> bool {
 
 fn device_uid_key(uid: u64) -> String {
     format!("uid:{uid:016x}")
+}
+
+/// Stable key for uplink state maps: the device uid when available,
+/// otherwise the HID path.
+pub fn uplink_device_key(device: &DeviceInfo) -> String {
+    match device.device_uid_hash {
+        Some(uid) => device_uid_key(uid),
+        None => format!("path:{}", device.path),
+    }
+}
+
+/// Local calendar date ("YYYY-MM-DD") for a clock snapshot.
+fn local_date(snapshot: &TimeSnapshot) -> String {
+    let local_secs = snapshot.unix_time_sec as i64 + i64::from(snapshot.tz_offset_min) * 60;
+    chrono::DateTime::from_timestamp(local_secs, 0)
+        .map(|dt| dt.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "1970-01-01".to_string())
 }
 #[derive(Debug, thiserror::Error)]
 pub enum RunnerError {
@@ -443,6 +670,7 @@ mod tests {
     struct MultiMockTransport {
         devices: Vec<DeviceInfo>,
         writes: Rc<RefCell<Vec<(String, [u8; crate::REPORT_SIZE])>>>,
+        uplink: Rc<RefCell<HashMap<String, std::collections::VecDeque<[u8; crate::PACKET_SIZE]>>>>,
     }
 
     impl HidTransport for MultiMockTransport {
@@ -474,6 +702,18 @@ mod tests {
                 .borrow_mut()
                 .push((device.path.clone(), *report));
             Ok(())
+        }
+
+        fn read_packet(
+            &self,
+            device: &DeviceInfo,
+            _timeout_ms: i32,
+        ) -> Result<Option<[u8; crate::PACKET_SIZE]>, HidError> {
+            Ok(self
+                .uplink
+                .borrow_mut()
+                .get_mut(&device.path)
+                .and_then(std::collections::VecDeque::pop_front))
         }
     }
 
@@ -541,6 +781,7 @@ mod tests {
                 device_with_uid("b", 0xbb, crate::packet::CAPABILITY_APP_LAYER),
             ],
             writes: Rc::new(RefCell::new(Vec::new())),
+            uplink: Rc::default(),
         };
         let writes = transport.writes.clone();
         let hid = HidDeviceManager::new(HidConfig::default(), transport);
@@ -573,6 +814,7 @@ mod tests {
                 crate::packet::CAPABILITY_APP_LAYER,
             )],
             writes: Rc::new(RefCell::new(Vec::new())),
+            uplink: Rc::default(),
         };
         let writes = transport.writes.clone();
         let hid = HidDeviceManager::new(HidConfig::default(), transport);
@@ -603,6 +845,7 @@ mod tests {
         let transport = MultiMockTransport {
             devices: vec![device_with_uid("a", 0xaa, 0)],
             writes: Rc::new(RefCell::new(Vec::new())),
+            uplink: Rc::default(),
         };
         let writes = transport.writes.clone();
         let hid = HidDeviceManager::new(HidConfig::default(), transport);
@@ -650,6 +893,7 @@ mod tests {
                 crate::packet::CAPABILITY_APP_LAYER,
             )],
             writes: Rc::new(RefCell::new(Vec::new())),
+            uplink: Rc::default(),
         };
         let writes = transport.writes.clone();
         let hid = HidDeviceManager::new(HidConfig::default(), transport);
@@ -678,6 +922,276 @@ mod tests {
         // Only the initial set was written; no clear packet.
         assert_eq!(writes.borrow().len(), 1);
         assert_eq!(writes.borrow()[0].1[5], 1); // AppLayerAction::Set
+    }
+
+    fn push_uplink(
+        uplink: &Rc<
+            RefCell<HashMap<String, std::collections::VecDeque<[u8; crate::PACKET_SIZE]>>>,
+        >,
+        path: &str,
+        packet: &crate::packet::UplinkPacket,
+    ) {
+        uplink
+            .borrow_mut()
+            .entry(path.to_string())
+            .or_default()
+            .push_back(packet.encode_payload());
+    }
+
+    #[test]
+    fn uplink_updates_battery_and_layer_views() {
+        use crate::packet::{
+            BatteryEntry, BatteryStatusPacket, LayerStatePacket, UplinkPacket,
+            CAPABILITY_BATTERY, CAPABILITY_LAYER_STATE,
+        };
+
+        let transport = MultiMockTransport {
+            devices: vec![device_with_uid(
+                "a",
+                0xaa,
+                CAPABILITY_BATTERY | CAPABILITY_LAYER_STATE,
+            )],
+            writes: Rc::new(RefCell::new(Vec::new())),
+            uplink: Rc::default(),
+        };
+        let uplink = transport.uplink.clone();
+        push_uplink(
+            &uplink,
+            "a",
+            &UplinkPacket::Battery(BatteryStatusPacket {
+                entries: vec![
+                    BatteryEntry {
+                        source: 0,
+                        level: Some(90),
+                    },
+                    BatteryEntry {
+                        source: 1,
+                        level: None,
+                    },
+                ],
+            }),
+        );
+        push_uplink(
+            &uplink,
+            "a",
+            &UplinkPacket::LayerState(LayerStatePacket {
+                active_layer: 4,
+                layer_mask: 0b10001,
+                seq: 1,
+            }),
+        );
+        let hid = HidDeviceManager::new(HidConfig::default(), transport);
+        let mut runner = Runner::new(AppConfig::default(), code_app_provider(), hid);
+
+        runner.tick().unwrap();
+
+        let battery = runner.battery_statuses();
+        assert_eq!(battery.len(), 1);
+        assert_eq!(battery[0].device_key, "uid:00000000000000aa");
+        assert_eq!(
+            battery[0].sources,
+            vec![
+                DeviceBatterySource {
+                    source: 0,
+                    level: Some(90)
+                },
+                DeviceBatterySource {
+                    source: 1,
+                    level: None
+                },
+            ]
+        );
+
+        let layers = runner.layer_states();
+        assert_eq!(layers.len(), 1);
+        assert_eq!(layers[0].active_layer, 4);
+        assert_eq!(layers[0].layer_mask, 0b10001);
+
+        assert_eq!(runner.take_uplink_events().len(), 2);
+        assert!(runner.take_uplink_events().is_empty());
+    }
+
+    #[test]
+    fn layer_state_uplink_does_not_affect_managed_layers() {
+        use crate::packet::{
+            LayerStatePacket, UplinkPacket, CAPABILITY_APP_LAYER, CAPABILITY_LAYER_STATE,
+        };
+
+        let mut devices = std::collections::BTreeMap::new();
+        devices.insert(
+            "uid:00000000000000aa".to_string(),
+            crate::config::DeviceLayerSwitchConfig {
+                rules: vec![code_rule("device", 3)],
+                ..Default::default()
+            },
+        );
+        let config = AppConfig {
+            layer_switch: crate::config::LayerSwitchConfig {
+                enabled: true,
+                unmatched_action: crate::config::UnmatchedAction::ClearManaged,
+                devices,
+            },
+            ..AppConfig::default()
+        };
+        let transport = MultiMockTransport {
+            devices: vec![device_with_uid(
+                "a",
+                0xaa,
+                CAPABILITY_APP_LAYER | CAPABILITY_LAYER_STATE,
+            )],
+            writes: Rc::new(RefCell::new(Vec::new())),
+            uplink: Rc::default(),
+        };
+        let writes = transport.writes.clone();
+        let uplink = transport.uplink.clone();
+        let hid = HidDeviceManager::new(HidConfig::default(), transport);
+        let mut runner = Runner::new(config, code_app_provider(), hid);
+
+        assert!(matches!(
+            runner.tick().unwrap(),
+            RunEvent::SetLayer { layer: 3, .. }
+        ));
+        assert_eq!(writes.borrow().len(), 1);
+
+        // The keyboard reports a manual layer change. This must be reflected
+        // in the view only: no extra APP_LAYER write, managed state untouched.
+        push_uplink(
+            &uplink,
+            "a",
+            &UplinkPacket::LayerState(LayerStatePacket {
+                active_layer: 7,
+                layer_mask: 0,
+                seq: 0,
+            }),
+        );
+        assert_eq!(runner.tick().unwrap(), RunEvent::Unchanged);
+
+        assert_eq!(writes.borrow().len(), 1);
+        assert_eq!(runner.layer_states()[0].active_layer, 7);
+    }
+
+    #[test]
+    fn host_action_duplicate_seq_is_dropped() {
+        use crate::packet::{HostActionPacket, UplinkPacket, CAPABILITY_HOST_ACTION};
+
+        let transport = MultiMockTransport {
+            devices: vec![device_with_uid("a", 0xaa, CAPABILITY_HOST_ACTION)],
+            writes: Rc::new(RefCell::new(Vec::new())),
+            uplink: Rc::default(),
+        };
+        let uplink = transport.uplink.clone();
+        let action = |seq: u8| {
+            UplinkPacket::HostAction(HostActionPacket {
+                action_id: 1,
+                value: 0,
+                seq,
+            })
+        };
+        push_uplink(&uplink, "a", &action(5));
+        push_uplink(&uplink, "a", &action(5)); // duplicate, dropped
+        push_uplink(&uplink, "a", &action(6));
+        let hid = HidDeviceManager::new(HidConfig::default(), transport);
+        let mut runner = Runner::new(AppConfig::default(), code_app_provider(), hid);
+
+        runner.tick().unwrap();
+
+        let events = runner.take_uplink_events();
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn uplink_without_capability_is_dropped() {
+        use crate::packet::{BatteryEntry, BatteryStatusPacket, UplinkPacket};
+
+        let transport = MultiMockTransport {
+            devices: vec![device_with_uid(
+                "a",
+                0xaa,
+                crate::packet::CAPABILITY_APP_LAYER,
+            )],
+            writes: Rc::new(RefCell::new(Vec::new())),
+            uplink: Rc::default(),
+        };
+        let uplink = transport.uplink.clone();
+        push_uplink(
+            &uplink,
+            "a",
+            &UplinkPacket::Battery(BatteryStatusPacket {
+                entries: vec![BatteryEntry {
+                    source: 0,
+                    level: Some(50),
+                }],
+            }),
+        );
+        let hid = HidDeviceManager::new(HidConfig::default(), transport);
+        let mut runner = Runner::new(AppConfig::default(), code_app_provider(), hid);
+
+        runner.tick().unwrap();
+
+        assert!(runner.battery_statuses().is_empty());
+        assert!(runner.take_uplink_events().is_empty());
+    }
+
+    #[test]
+    fn key_stats_uplink_feeds_store() {
+        use crate::packet::{KeyStatsEntry, KeyStatsPacket, UplinkPacket, CAPABILITY_KEY_STATS};
+        use crate::stats::{KeyStatsStore, StatsPeriod};
+        use std::sync::{Arc, Mutex};
+
+        let dir = std::env::temp_dir().join(format!(
+            "rawhid-host-runner-stats-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let store = Arc::new(Mutex::new(KeyStatsStore::new(
+            dir.clone(),
+            Duration::from_secs(3600),
+        )));
+
+        let transport = MultiMockTransport {
+            devices: vec![device_with_uid("a", 0xaa, CAPABILITY_KEY_STATS)],
+            writes: Rc::new(RefCell::new(Vec::new())),
+            uplink: Rc::default(),
+        };
+        let uplink = transport.uplink.clone();
+        push_uplink(
+            &uplink,
+            "a",
+            &UplinkPacket::KeyStats(KeyStatsPacket {
+                entries: vec![
+                    KeyStatsEntry {
+                        position: 2,
+                        delta: 5,
+                    },
+                    KeyStatsEntry {
+                        position: 9,
+                        delta: 1,
+                    },
+                ],
+                more_follows: false,
+                seq: 0,
+            }),
+        );
+        let hid = HidDeviceManager::new(HidConfig::default(), transport);
+        let clock = FakeClock {
+            snapshot: crate::TimeSnapshot {
+                unix_time_sec: 1_765_000_000,
+                tz_offset_min: 540,
+            },
+        };
+        let mut runner =
+            Runner::new_with_clock(AppConfig::default(), code_app_provider(), hid, clock);
+        runner.set_key_stats_store(store.clone());
+
+        runner.tick().unwrap();
+
+        let summary = store
+            .lock()
+            .unwrap()
+            .summary("uid:00000000000000aa", StatsPeriod::All, "2026-01-01");
+        assert_eq!(summary.total, 6);
+        assert_eq!(runner.take_uplink_events().len(), 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

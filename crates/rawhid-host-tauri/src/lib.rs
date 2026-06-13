@@ -1,5 +1,6 @@
 mod actions;
 mod commands;
+mod explorer;
 mod foreground;
 mod icon;
 mod startup;
@@ -21,6 +22,7 @@ pub fn run() {
         // Single-instance must be the first plugin registered.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
             if let Some(win) = app.get_webview_window("main") {
+                let _ = win.unminimize();
                 let _ = win.show();
                 let _ = win.set_focus();
             }
@@ -88,7 +90,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         .items(&[&show, &quit])
         .build()?;
 
-    let _tray = TrayIconBuilder::new()
+    let _tray = TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().unwrap().clone())
         .tooltip("RawHID Host")
         .menu(&menu)
@@ -103,6 +105,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
             }
             "show" => {
                 if let Some(win) = app.get_webview_window("main") {
+                    let _ = win.unminimize();
                     let _ = win.show();
                     let _ = win.set_focus();
                 }
@@ -124,6 +127,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                     if win.is_visible().unwrap_or(false) {
                         let _ = win.hide();
                     } else {
+                        let _ = win.unminimize();
                         let _ = win.show();
                         let _ = win.set_focus();
                     }

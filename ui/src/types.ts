@@ -95,13 +95,16 @@ export type HostActionKind =
   | "start_monitoring"
   | "stop_monitoring"
   | "refresh_ai_usage"
-  | "launch";
+  | "launch"
+  | "open_folder";
 
 export interface ActionBinding {
   action_id: number;
   action: HostActionKind;
-  /** Executable path for "launch"; null otherwise. */
+  /** Filesystem path: executable for "launch", folder for "open_folder"; null otherwise. */
   path: string | null;
+  /** "open_folder" only: prefer reusing an existing Explorer window's tab (best-effort). */
+  prefer_tab: boolean;
 }
 
 export interface DeviceActionsConfig {

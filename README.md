@@ -128,6 +128,7 @@ api_timeout_sec = 10
 
 - Dashboard: 監視開始 / 停止、接続状況、現在レイヤー、ログ、AI Usage 簡易サマリ
 - Layer Rules: アプリごとのレイヤールール編集。変更は自動保存です。アプリ一覧には実行ファイルから抽出した実アイコンを表示します。
+- Actions: キーボードのキーから PC 側操作を実行する `HOST_ACTION` バインディング設定 (画面表示 / 監視停止 / AI 使用量更新 / アプリ起動 / フォルダを開く)。バインディングはアクションID順に並び、パスを持つ動作は編集できます。既定では無効で、許可リスト制です。
 - Time Sync: `TIME_SYNC` の有効化、表示形式、同期間隔などの設定
 - AI Usage: Codex / Claude Code 使用量送信の設定、状態表示、手動更新
 - Keymap Viewer: キーマップ表示 + タイピング統計ヒートマップ (対応キーボードのみ)
@@ -206,8 +207,8 @@ See [CHANGELOG.md](CHANGELOG.md), [Compatibility](docs/compatibility.md), and th
 
 - Foreground app changes are detected instantly via `SetWinEventHook(EVENT_SYSTEM_FOREGROUND)` while monitoring is running. Polling remains as a fallback.
 - `[app] start_monitoring_on_launch` starts monitoring automatically when the app launches. Launch at Windows login is managed from Settings via the HKCU Run registry key.
-- The app is single-instance. Launching a second instance focuses the existing window.
-- The tray menu includes start/stop monitoring items in addition to show/quit.
+- The app is single-instance. Launching a second instance focuses the existing window. Showing the window (tray menu, tray left-click, second-instance launch, or the `show_window` host action) restores it from a minimized or tray-hidden state.
+- The tray menu includes start/stop monitoring items in addition to show/quit. While monitoring a BATTERY-capable keyboard, the tray tooltip shows per-device battery levels (e.g. `L 90% / R 88%`) on hover.
 - `hid.rescan_interval_sec` controls periodic Host Link HID rescan while monitoring is running. The default is 5 seconds.
 - AI Usage collection runs independently from monitoring. The UI can refresh usage while monitoring is stopped; Raw HID sending still happens only while monitoring is running. After a manual refresh completes, the backend emits a `status-update` event even when monitoring is stopped.
 - Dashboard quick toggles are auto-saved. A brief "saved" indicator is shown on success. On save failure, an error is shown and the UI state rolls back to the previous config.

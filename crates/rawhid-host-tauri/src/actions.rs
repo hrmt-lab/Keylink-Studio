@@ -27,6 +27,9 @@ pub fn execute(
     match binding.action {
         HostActionKind::ShowWindow => {
             if let Some(window) = app.get_webview_window("main") {
+                // unminimize() first: show()/set_focus() do not restore a window
+                // that is minimized to the taskbar.
+                let _ = window.unminimize();
                 let _ = window.show();
                 let _ = window.set_focus();
             }
@@ -74,6 +77,14 @@ pub fn execute(
             std::process::Command::new(path)
                 .spawn()
                 .map_err(|e| e.to_string())?;
+            Ok(ActionOutcome::Continue)
+        }
+        HostActionKind::OpenFolder => {
+            let path = binding
+                .path
+                .as_deref()
+                .ok_or_else(|| "open_folder path not configured".to_string())?;
+            crate::explorer::open_folder(path, binding.prefer_tab)?;
             Ok(ActionOutcome::Continue)
         }
     }

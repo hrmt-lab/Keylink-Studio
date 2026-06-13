@@ -90,8 +90,12 @@ impl Default for DeviceActionsConfig {
 pub struct ActionBinding {
     pub action_id: u8,
     pub action: HostActionKind,
-    /// Executable path for `launch`. The HID value byte is never used as a path.
+    /// Filesystem path for `launch` (executable) and `open_folder` (folder).
+    /// The HID value byte is never used as a path.
     pub path: Option<String>,
+    /// `open_folder` only: when true, try to open the folder in a new tab of an
+    /// existing Explorer window instead of a new window. Best-effort.
+    pub prefer_tab: bool,
 }
 
 impl Default for ActionBinding {
@@ -100,6 +104,7 @@ impl Default for ActionBinding {
             action_id: 0,
             action: HostActionKind::ShowWindow,
             path: None,
+            prefer_tab: false,
         }
     }
 }
@@ -112,6 +117,7 @@ pub enum HostActionKind {
     StopMonitoring,
     RefreshAiUsage,
     Launch,
+    OpenFolder,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -533,12 +539,18 @@ enabled = false
 #
 #[[actions.devices."uid:7a91c3e4d102ab55".bindings]]
 #action_id = 1
-#action = "show_window"  # show_window | start_monitoring | stop_monitoring | refresh_ai_usage | launch
+#action = "show_window"  # show_window | start_monitoring | stop_monitoring | refresh_ai_usage | launch | open_folder
 #
 #[[actions.devices."uid:7a91c3e4d102ab55".bindings]]
 #action_id = 2
 #action = "launch"
 #path = "C:\\tools\\example.exe"
+#
+#[[actions.devices."uid:7a91c3e4d102ab55".bindings]]
+#action_id = 3
+#action = "open_folder"
+#path = "C:\\Users\\me\\Documents"
+#prefer_tab = false  # true: try to reuse an existing Explorer window's tab (best-effort)
 
 [ai_usage]
 enabled = false
@@ -687,6 +699,12 @@ action_id = 7
 action = "launch"
 path = "C:\\tools\\example.exe"
 
+[[actions.devices."uid:7a91c3e4d102ab55".bindings]]
+action_id = 8
+action = "open_folder"
+path = "C:\\Users\\me\\Documents"
+prefer_tab = true
+
 [actions.devices."uid:91ac51d6ef0201aa"]
 enabled = false
 "#,
@@ -698,7 +716,7 @@ enabled = false
         let lotus = config.actions.devices.get("uid:7a91c3e4d102ab55").unwrap();
         assert_eq!(lotus.display_name.as_deref(), Some("LotusUni Dongle"));
         assert!(lotus.enabled);
-        assert_eq!(lotus.bindings.len(), 2);
+        assert_eq!(lotus.bindings.len(), 3);
         assert_eq!(lotus.bindings[0].action_id, 1);
         assert_eq!(lotus.bindings[0].action, HostActionKind::ShowWindow);
         assert_eq!(lotus.bindings[1].action, HostActionKind::Launch);
@@ -706,6 +724,14 @@ enabled = false
             lotus.bindings[1].path.as_deref(),
             Some("C:\\tools\\example.exe")
         );
+        // launch binding has no prefer_tab key: defaults to false.
+        assert!(!lotus.bindings[1].prefer_tab);
+        assert_eq!(lotus.bindings[2].action, HostActionKind::OpenFolder);
+        assert_eq!(
+            lotus.bindings[2].path.as_deref(),
+            Some("C:\\Users\\me\\Documents")
+        );
+        assert!(lotus.bindings[2].prefer_tab);
         let left = config.actions.devices.get("uid:91ac51d6ef0201aa").unwrap();
         assert!(!left.enabled);
         assert!(left.bindings.is_empty());

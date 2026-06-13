@@ -518,7 +518,7 @@ pub(crate) fn spawn_ai_refresh_watcher(
             s.ai_usage = statuses;
             s.clone()
         };
-        let _ = app.emit("status-update", &snapshot);
+        emit_status(&app, &snapshot);
     });
 }
 
@@ -563,6 +563,57 @@ fn rebuild_runner(
     ))
 }
 
+/// Emit the status snapshot to the UI and refresh the tray tooltip together so
+/// the tray always reflects the latest device/battery state.
+pub(crate) fn emit_status(app: &AppHandle, status: &MonitorStatus) {
+    let _ = app.emit("status-update", status);
+    update_tray_tooltip(app, status);
+}
+
+fn update_tray_tooltip(app: &AppHandle, status: &MonitorStatus) {
+    if let Some(tray) = app.tray_by_id("main") {
+        let _ = tray.set_tooltip(Some(build_tray_tooltip(status)));
+    }
+}
+
+/// Build the tray tooltip: "RawHID Host" plus one line per battery-reporting
+/// device. Capped to ~128 chars (Windows tray tooltip limit).
+fn build_tray_tooltip(status: &MonitorStatus) -> String {
+    let mut text = String::from("RawHID Host");
+    for dev in &status.device_battery {
+        let name = dev
+            .product
+            .as_deref()
+            .or(dev.serial_number.as_deref())
+            .unwrap_or(&dev.device_key);
+        let multi = dev.sources.len() > 1;
+        let sources: Vec<String> = dev
+            .sources
+            .iter()
+            .map(|src| {
+                let level = src
+                    .level
+                    .map(|v| format!("{}%", v))
+                    .unwrap_or_else(|| "?".to_string());
+                match src.source {
+                    1 => format!("L {}", level),
+                    2 => format!("R {}", level),
+                    3 => format!("AUX {}", level),
+                    // 0 = self/dongle: label only when shown alongside others.
+                    _ if multi => format!("本体 {}", level),
+                    _ => level,
+                }
+            })
+            .collect();
+        text.push('\n');
+        text.push_str(&format!("{}: {}", name, sources.join(" / ")));
+    }
+    if text.chars().count() > 127 {
+        text = text.chars().take(126).collect::<String>() + "…";
+    }
+    text
+}
+
 /// Copy the runner's device/AI-usage view into the shared status.
 fn apply_runner_view(s: &mut MonitorStatus, runner: &MonitorRunner) {
     s.connected_devices = runner.verified_device_count();
@@ -601,7 +652,7 @@ fn apply_monitor_config(
     s.device_layers = Vec::new();
     s.ai_usage = runner.ai_usage_statuses();
     s.last_error = None;
-    let _ = app.emit("status-update", &*s);
+    emit_status(app, &s);
 
     Ok(())
 }
@@ -640,7 +691,7 @@ fn process_command(
                 {
                     let mut s = status.lock().unwrap();
                     s.last_error = Some(msg.clone());
-                    let _ = app.emit("status-update", &*s);
+                    emit_status(app, &s);
                 }
                 let entry = add_log(log_entries, log_counter, "error", &msg);
                 let _ = app.emit("log-added", entry);
@@ -742,7 +793,7 @@ fn run_monitor_loop(
             {
                 let mut s = status.lock().unwrap();
                 s.last_error = Some(msg);
-                let _ = app.emit("status-update", &*s);
+                emit_status(&app, &s);
             }
             let _ = app.emit("log-added", entry);
             return;
@@ -754,7 +805,7 @@ fn run_monitor_loop(
         let mut s = status.lock().unwrap();
         s.running = true;
         s.last_error = None;
-        let _ = app.emit("status-update", &*s);
+        emit_status(&app, &s);
     }
 
     let entry = add_log(&log_entries, &log_counter, "info", "Monitoring started");
@@ -801,7 +852,7 @@ fn run_monitor_loop(
                     s.current_rule = Some(rule_name.clone());
                     apply_runner_view(&mut s, &runner);
                     s.last_error = None;
-                    let _ = app.emit("status-update", &*s);
+                    emit_status(&app, &s);
                 }
                 let msg = format!("Switched to layer {} (rule: {})", layer, rule_name);
                 let entry = add_log(&log_entries, &log_counter, "info", &msg);
@@ -812,7 +863,7 @@ fn run_monitor_loop(
                 s.current_layer = None;
                 s.current_rule = None;
                 apply_runner_view(&mut s, &runner);
-                let _ = app.emit("status-update", &*s);
+                emit_status(&app, &s);
             }
             Ok(RunEvent::Unchanged) => {
                 let devices = runner.verified_device_count();
@@ -828,7 +879,7 @@ fn run_monitor_loop(
                     || s.device_layers != device_layers
                 {
                     apply_runner_view(&mut s, &runner);
-                    let _ = app.emit("status-update", &*s);
+                    emit_status(&app, &s);
                 }
             }
             Err(e) => {
@@ -836,7 +887,7 @@ fn run_monitor_loop(
                 {
                     let mut s = status.lock().unwrap();
                     s.last_error = Some(msg.clone());
-                    let _ = app.emit("status-update", &*s);
+                    emit_status(&app, &s);
                 }
                 let entry = add_log(&log_entries, &log_counter, "error", &msg);
                 let _ = app.emit("log-added", entry);
@@ -890,7 +941,7 @@ fn run_monitor_loop(
         s.current_rule = None;
         s.device_battery = Vec::new();
         s.device_layers = Vec::new();
-        let _ = app.emit("status-update", &*s);
+        emit_status(&app, &s);
     }
 
     let entry = add_log(&log_entries, &log_counter, "info", "Monitoring stopped");

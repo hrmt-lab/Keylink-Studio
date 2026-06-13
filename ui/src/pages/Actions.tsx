@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Plus, Trash2, Zap } from "lucide-react";
+import { Check, Pencil, Plus, Trash2, X, Zap } from "lucide-react";
 import { saveConfig } from "../api";
 import { Toggle } from "../components/Toggle";
 import { useLang, type TranslationKey } from "../i18n";
@@ -25,7 +25,13 @@ const ACTION_KINDS: HostActionKind[] = [
   "stop_monitoring",
   "refresh_ai_usage",
   "launch",
+  "open_folder",
 ];
+
+// Kinds that require a filesystem path argument.
+function needsPath(kind: HostActionKind) {
+  return kind === "launch" || kind === "open_folder";
+}
 
 function isHostActionDevice(device: DeviceInfo) {
   return device.device_uid_hash !== null && (device.capabilities & HOST_ACTION_CAPABILITY) !== 0;
@@ -50,13 +56,26 @@ export default function Actions({ config, setConfig, status }: Props) {
   const [actionId, setActionId] = useState(1);
   const [kind, setKind] = useState<HostActionKind>("show_window");
   const [path, setPath] = useState("");
+  const [preferTab, setPreferTab] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // null = add mode; otherwise the action_id of the binding being edited.
+  const [editingActionId, setEditingActionId] = useState<number | null>(null);
 
   const capableDevices = status.host_link_devices.filter(isHostActionDevice);
   const deviceTargets = buildDeviceTargets(config, capableDevices);
   const selectedDeviceConfig = targetKey ? config.actions.devices[targetKey] : undefined;
   const bindings = selectedDeviceConfig?.bindings ?? [];
+
+  // Leaving a device cancels any in-progress edit (the binding was its own) and
+  // defaults the action_id to the new device's first unused id.
+  useEffect(() => {
+    setPath("");
+    setPreferTab(false);
+    setEditingActionId(null);
+    setActionId(firstUnusedId(bindings));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [targetKey]);
 
   // Keep a valid device selected; fall back to the first known device.
   useEffect(() => {
@@ -100,29 +119,69 @@ export default function Actions({ config, setConfig, status }: Props) {
     }
   };
 
-  const addBinding = async () => {
+  // Smallest action_id (1..255) not yet used; defaulted in the form when adding.
+  const firstUnusedId = (list: ActionBinding[]) => {
+    const used = new Set(list.map((b) => b.action_id));
+    let id = 1;
+    while (id < 256 && used.has(id)) id++;
+    return Math.min(id, 255);
+  };
+
+  const resetForm = (nextId?: number) => {
+    setPath("");
+    setPreferTab(false);
+    setEditingActionId(null);
+    if (nextId !== undefined) setActionId(nextId);
+  };
+
+  // Bindings are stored sorted by action_id so the list renders in ID order and
+  // the index-based delete below stays aligned with what the user sees.
+  const sortById = (list: ActionBinding[]) =>
+    [...list].sort((a, b) => a.action_id - b.action_id);
+
+  const submitBinding = async () => {
     if (!targetKey) return;
     setError(null);
-    if (bindings.some((b) => b.action_id === actionId)) {
+    // Allow the binding being edited to keep its own ID; reject any other clash.
+    const clashes = bindings.some(
+      (b) => b.action_id === actionId && b.action_id !== editingActionId
+    );
+    if (clashes) {
       setError(t("actions.duplicate"));
       return;
     }
     const trimmedPath = path.trim();
-    if (kind === "launch" && !trimmedPath) {
-      setError(t("actions.path_required"));
+    if (needsPath(kind) && !trimmedPath) {
+      setError(t(kind === "open_folder" ? "actions.folder_required" : "actions.path_required"));
       return;
     }
     const binding: ActionBinding = {
       action_id: actionId,
       action: kind,
-      path: kind === "launch" ? trimmedPath : null,
+      path: needsPath(kind) ? trimmedPath : null,
+      prefer_tab: kind === "open_folder" ? preferTab : false,
     };
-    await persist(updateBindingsForTarget([...bindings, binding]));
-    setPath("");
+    const nextBindings =
+      editingActionId === null
+        ? [...bindings, binding]
+        : bindings.map((b) => (b.action_id === editingActionId ? binding : b));
+    await persist(updateBindingsForTarget(sortById(nextBindings)));
+    resetForm(firstUnusedId(nextBindings));
   };
 
-  const deleteBinding = async (idx: number) => {
-    await persist(updateBindingsForTarget(bindings.filter((_, i) => i !== idx)));
+  const startEdit = (binding: ActionBinding) => {
+    setActionId(binding.action_id);
+    setKind(binding.action);
+    setPath(binding.path ?? "");
+    setPreferTab(binding.prefer_tab);
+    setEditingActionId(binding.action_id);
+    setError(null);
+  };
+
+  const deleteBinding = async (id: number) => {
+    const remaining = bindings.filter((b) => b.action_id !== id);
+    if (id === editingActionId) resetForm(firstUnusedId(remaining));
+    await persist(updateBindingsForTarget(remaining));
   };
 
   const toggleEnabled = async (enabled: boolean) => {
@@ -209,7 +268,10 @@ export default function Actions({ config, setConfig, status }: Props) {
                   min={0}
                   max={255}
                   value={actionId}
-                  onChange={(e) => setActionId(Math.max(0, Math.min(255, Number(e.target.value))))}
+                  onChange={(e) => {
+                    setActionId(Math.max(0, Math.min(255, Number(e.target.value))));
+                    setError(null);
+                  }}
                   className="input !w-24 !bg-surface font-mono"
                 />
               </div>
@@ -219,7 +281,10 @@ export default function Actions({ config, setConfig, status }: Props) {
                 </label>
                 <select
                   value={kind}
-                  onChange={(e) => setKind(e.target.value as HostActionKind)}
+                  onChange={(e) => {
+                    setKind(e.target.value as HostActionKind);
+                    setError(null);
+                  }}
                   className="input !w-auto min-w-44 cursor-pointer !bg-surface"
                 >
                   {ACTION_KINDS.map((item) => (
@@ -227,32 +292,61 @@ export default function Actions({ config, setConfig, status }: Props) {
                   ))}
                 </select>
               </div>
-              {kind === "launch" && (
+              {needsPath(kind) && (
                 <div className="min-w-0 flex-1">
                   <label className="mb-1 block text-xs font-medium text-muted">
-                    {t("actions.path")}
+                    {t(kind === "open_folder" ? "actions.folder" : "actions.path")}
                   </label>
                   <input
                     type="text"
                     value={path}
-                    onChange={(e) => setPath(e.target.value)}
-                    placeholder={t("actions.path_placeholder")}
+                    onChange={(e) => {
+                      setPath(e.target.value);
+                      setError(null);
+                    }}
+                    placeholder={t(kind === "open_folder" ? "actions.folder_placeholder" : "actions.path_placeholder")}
                     className="input w-full font-mono text-sm !bg-surface"
                   />
                 </div>
               )}
               <button
-                onClick={addBinding}
+                onClick={submitBinding}
                 disabled={saving || !targetKey}
                 className="btn-neu flex flex-shrink-0 items-center gap-2 rounded-full px-5 py-2 text-sm font-medium text-ink disabled:opacity-60"
               >
                 {saving
                   ? <div className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-accent" />
-                  : <Plus size={15} />
+                  : editingActionId === null ? <Plus size={15} /> : <Check size={15} />
                 }
-                {t("actions.add")}
+                {editingActionId === null ? t("actions.add") : t("actions.update")}
               </button>
             </div>
+            {editingActionId !== null && (
+              <div className="mt-2 flex justify-end">
+                <button
+                  onClick={() => resetForm(firstUnusedId(bindings))}
+                  disabled={saving}
+                  className="flex flex-shrink-0 items-center gap-2 rounded-full border border-border px-4 py-2 text-sm font-medium text-muted hover:text-ink disabled:opacity-60"
+                >
+                  <X size={15} />
+                  {t("actions.cancel_edit")}
+                </button>
+              </div>
+            )}
+            {kind === "open_folder" && (
+              <div className="mt-4 flex items-center gap-3">
+                <Toggle
+                  checked={preferTab}
+                  onChange={setPreferTab}
+                  disabled={saving}
+                  label={t("actions.prefer_tab")}
+                />
+                <div className="min-w-0">
+                  <div className="text-sm text-ink">{t("actions.prefer_tab")}</div>
+                  <div className="text-xs text-faint">{t("actions.prefer_tab.desc")}</div>
+                </div>
+              </div>
+            )}
             {error && <p className="mt-3 text-xs text-red-500">{error}</p>}
           </div>
 
@@ -268,17 +362,24 @@ export default function Actions({ config, setConfig, status }: Props) {
               <p className="text-xs font-medium uppercase tracking-wide text-faint">
                 {t("actions.count", { n: bindings.length })}
               </p>
-              {bindings.map((binding, idx) => (
+              {sortById(bindings).map((binding) => (
                 <div
-                  key={idx}
-                  className="row-lift flex items-center gap-3 rounded-card bg-surface px-4 py-3"
+                  key={binding.action_id}
+                  className={`row-lift flex items-center gap-3 rounded-card bg-surface px-4 py-3 ${
+                    binding.action_id === editingActionId ? "ring-2 ring-accent" : ""
+                  }`}
                 >
                   <span className="inline-flex h-7 w-12 flex-shrink-0 items-center justify-center rounded-lg bg-plate font-mono text-xs font-medium text-ink">
                     {binding.action_id}
                   </span>
                   <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium text-ink">
+                    <div className="flex items-center gap-2 text-sm font-medium text-ink">
                       {actionKindLabel(binding.action, t)}
+                      {binding.action === "open_folder" && binding.prefer_tab && (
+                        <span className="rounded bg-plate px-1.5 py-0.5 text-[10px] font-normal text-muted">
+                          {t("actions.prefer_tab")}
+                        </span>
+                      )}
                     </div>
                     {binding.path && (
                       <div className="truncate font-mono text-[11px] text-faint">
@@ -286,8 +387,19 @@ export default function Actions({ config, setConfig, status }: Props) {
                       </div>
                     )}
                   </div>
+                  {needsPath(binding.action) && (
+                    <button
+                      onClick={() => startEdit(binding)}
+                      disabled={saving}
+                      title={t("actions.edit")}
+                      aria-label={t("actions.edit")}
+                      className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-disabled hover:bg-plate hover:text-ink disabled:opacity-50"
+                    >
+                      <Pencil size={14} />
+                    </button>
+                  )}
                   <button
-                    onClick={() => deleteBinding(idx)}
+                    onClick={() => deleteBinding(binding.action_id)}
                     disabled={saving}
                     title={t("common.delete")}
                     aria-label={t("common.delete")}

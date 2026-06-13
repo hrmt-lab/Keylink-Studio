@@ -1,41 +1,128 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720">
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="580" viewBox="0 0 900 580" font-family="'Hiragino Sans','Meiryo','Segoe UI',sans-serif">
 <defs>
-<style>
-  .bg{fill:#f3f4f6}.side{fill:#5f789c}.card{fill:#fff;stroke:#d7d7d7;stroke-width:1.5}.muted{fill:#8b95a6}.text{fill:#1f2937;font-family:'Segoe UI','Yu Gothic UI',sans-serif}.title{font-size:24px;font-weight:700}.sub{font-size:14px;fill:#667085}.nav{font-size:15px;fill:#e9eef7;font-weight:600}.label{font-size:13px}.small{font-size:11px}.btn{fill:#5f789c}.btn2{fill:#fff;stroke:#d1d5db}.pill{fill:#e5e7eb}.ok{fill:#bff7d7}.warn{fill:#fff3cd;stroke:#f1c36d}.err{fill:#fff7ed;stroke:#f59e0b}.barbg{fill:#ddd9d2}.barok{fill:#5f789c}.barwarn{fill:#f59e0b}.barerr{fill:#ef4444}.key{fill:#fff;stroke:#d1d5db}.panel{fill:#eeeeee;stroke:#d1d5db}.bluebox{fill:#eff6ff;stroke:#bfdbfe}.selected{fill:#eef3fa;stroke:#b7c3d7}.ghost{fill:#f1f1f1;stroke:#d0d0d0}.mono{font-family:'Segoe UI Mono','Consolas',monospace}
-</style>
+  <filter id="s" x="-6%" y="-8%" width="112%" height="120%">
+    <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#BCC7D4" flood-opacity="0.45"/>
+  </filter>
 </defs>
-<rect class="bg" x="0" y="0" width="1200" height="720"/>
-<rect class="side" x="0" y="0" width="210" height="720"/>
-<rect x="20" y="28" width="48" height="48" rx="12" fill="#6f86a8" stroke="#8da0bd"/>
-<text class="text nav" x="82" y="59">RawHID Host</text>
-<text class="text nav" x="24" y="132">▦  ダッシュボード</text>
-<text class="text nav" x="24" y="174">☰  レイヤールール</text>
-<text class="text nav" x="24" y="216">◷  時刻同期</text>
-<text class="text nav" x="24" y="258">⌁  AI 使用量</text>
-<text class="text nav" x="24" y="300">⌨  キーマップ表示</text>
-<text class="text nav" x="24" y="342">🔧  デバイス</text>
-<text class="text nav" x="24" y="384">⚙  設定</text>
-<circle cx="24" cy="682" r="5" fill="#b7c3d7"/><text class="text nav" x="40" y="688">停止中</text>
-<text class="text title" x="260" y="64">ダッシュボード</text>
-<text class="text sub" x="260" y="88">監視状態と主要機能の概要を確認します</text>
-<rect class="btn" x="1010" y="42" width="138" height="44" rx="8"/><text class="text" x="1048" y="70" fill="#fff" font-size="15" font-weight="700">監視開始</text>
 
-<rect class="card" x="260" y="128" width="410" height="150" rx="12"/>
-<rect x="260" y="128" width="410" height="56" rx="12" fill="#f8fafc"/>
-<rect x="286" y="146" width="28" height="28" rx="8" fill="#5f789c"/><text class="text" x="296" y="166" font-size="14" fill="#fff">⌁</text>
-<text class="text" x="326" y="163" font-size="18" font-weight="700">ステータス</text>
-<rect class="pill" x="578" y="146" width="66" height="24" rx="12"/><text class="text small" x="595" y="162" fill="#667085">停止中</text>
-<text class="text sub" x="286" y="222">接続デバイス</text>
-<text class="text" x="604" y="222" font-size="18" text-anchor="end">1 台</text>
+<!-- Background -->
+<rect width="900" height="580" fill="#F1F3F6"/>
 
-<line x1="286" y1="266" x2="644" y2="266" stroke="#e5e7eb"/>
-<circle cx="292" cy="282" r="3" fill="#8da0bd"/><text class="text sub" x="304" y="286">KeyboardA</text>
+<!-- ── Sidebar ── -->
+<rect width="200" height="580" fill="#FFFFFF"/>
+<line x1="200" y1="0" x2="200" y2="580" stroke="#E8ECF1"/>
+<text x="20" y="37" font-size="14" font-weight="bold" fill="#1A1A2E">RawHID Host</text>
 
-<rect class="card" x="700" y="128" width="410" height="150" rx="12"/><rect x="700" y="128" width="410" height="56" rx="12" fill="#f8fafc"/><text class="text" x="756" y="163" font-size="18" font-weight="700">レイヤールール</text><rect x="1032" y="148" width="48" height="24" rx="12" fill="#5f789c"/><circle cx="1066" cy="160" r="10" fill="#fff"/><text class="text sub" x="726" y="214">現在のアプリ</text><text class="text" x="1012" y="214" font-size="18" text-anchor="end">Code.exe</text><text class="text sub" x="726" y="246">送信レイヤー</text><text class="text" x="1044" y="246" font-size="18" text-anchor="end">L1</text>
+<!-- Dashboard ← selected -->
+<rect x="8" y="50" width="184" height="34" rx="8" fill="#FEF0EB"/>
+<rect x="20" y="60" width="3" height="14" rx="2" fill="#EF5B25"/>
+<text x="30" y="72" font-size="13" font-weight="bold" fill="#EF5B25">Dashboard</text>
 
-<rect class="card" x="260" y="310" width="410" height="150" rx="12"/><rect x="260" y="310" width="410" height="56" rx="12" fill="#f8fafc"/><text class="text" x="316" y="345" font-size="18" font-weight="700">時刻同期</text><rect x="592" y="330" width="48" height="24" rx="12" fill="#5f789c"/><circle cx="626" cy="342" r="10" fill="#fff"/><text class="text sub" x="286" y="396">同期間隔</text><text class="text" x="604" y="396" font-size="18" text-anchor="end">60秒</text><text class="text sub" x="286" y="428">表示形式</text><text class="text" x="604" y="428" font-size="18" text-anchor="end">24時間</text>
+<text x="30" y="110" font-size="13" fill="#4B5563">レイヤールール</text>
+<text x="30" y="148" font-size="13" fill="#4B5563">アクション</text>
+<text x="30" y="186" font-size="13" fill="#4B5563">時刻同期</text>
+<text x="30" y="224" font-size="13" fill="#4B5563">AI 使用量</text>
+<text x="30" y="262" font-size="13" fill="#4B5563">キーマップ表示</text>
+<text x="30" y="300" font-size="13" fill="#4B5563">デバイス</text>
+<text x="30" y="338" font-size="13" fill="#4B5563">設定</text>
 
-<rect class="card" x="700" y="310" width="410" height="150" rx="12"/><rect x="700" y="310" width="410" height="56" rx="12" fill="#f8fafc"/><text class="text" x="756" y="345" font-size="18" font-weight="700">AI 使用量</text><rect x="1032" y="330" width="48" height="24" rx="12" fill="#5f789c"/><circle cx="1066" cy="342" r="10" fill="#fff"/><text class="text sub" x="726" y="396">Codex</text><rect class="barbg" x="726" y="412" width="330" height="9" rx="4"/><rect class="barok" x="726" y="412" width="145" height="9" rx="4"/><text class="text sub" x="1064" y="400" text-anchor="end">44.00%</text><text class="text sub" x="726" y="444">Claude Code</text><text class="text sub" x="1064" y="444" text-anchor="end">no data</text>
+<!-- JP/EN toggle -->
+<rect x="14" y="540" width="76" height="28" rx="14" fill="#F0F4F8"/>
+<rect x="16" y="542" width="36" height="24" rx="12" fill="#EF5B25"/>
+<text x="34" y="559" font-size="11" font-weight="bold" fill="white" text-anchor="middle">JP</text>
+<text x="76" y="559" font-size="11" fill="#9CA3AF" text-anchor="middle">EN</text>
 
-<rect class="card" x="260" y="492" width="850" height="132" rx="12"/><text class="text" x="286" y="530" font-size="18" font-weight="700">直近ログ</text><text class="text sub" x="286" y="568">22:10 KeyboardA verified</text><text class="text sub" x="520" y="568">22:11 APP_LAYER sent: L1</text><text class="text sub" x="760" y="568">22:12 AI_USAGE sent</text>
+<!-- ── Content ── -->
+<text x="220" y="37" font-size="18" font-weight="bold" fill="#1A1A2E">Dashboard</text>
+<!-- 監視開始 button -->
+<rect x="756" y="17" width="124" height="34" rx="17" fill="#EF5B25"/>
+<text x="818" y="39" font-size="13" font-weight="bold" fill="white" text-anchor="middle">監視開始</text>
+
+<!-- Status cards -->
+<!-- 監視状態 -->
+<rect x="216" y="56" width="144" height="76" rx="12" fill="#FFFFFF" filter="url(#s)"/>
+<text x="228" y="76" font-size="10" fill="#9CA3AF">監視状態</text>
+<rect x="228" y="84" width="64" height="22" rx="11" fill="#F3F4F6"/>
+<circle cx="241" cy="95" r="4" fill="#9CA3AF"/>
+<text x="265" y="100" font-size="11" fill="#6B7280" text-anchor="middle">停止中</text>
+
+<!-- 接続デバイス -->
+<rect x="368" y="56" width="144" height="76" rx="12" fill="#FFFFFF" filter="url(#s)"/>
+<text x="380" y="76" font-size="10" fill="#9CA3AF">接続デバイス</text>
+<text x="380" y="113" font-size="28" font-weight="bold" fill="#1A1A2E">1</text>
+
+<!-- レイヤールール -->
+<rect x="520" y="56" width="148" height="76" rx="12" fill="#FFFFFF" filter="url(#s)"/>
+<text x="532" y="76" font-size="10" fill="#9CA3AF">レイヤールール</text>
+<rect x="532" y="84" width="46" height="22" rx="11" fill="#FEF0EB"/>
+<text x="555" y="100" font-size="11" fill="#EF5B25" text-anchor="middle">有効</text>
+
+<!-- 時刻同期 -->
+<rect x="676" y="56" width="204" height="76" rx="12" fill="#FFFFFF" filter="url(#s)"/>
+<text x="688" y="76" font-size="10" fill="#9CA3AF">時刻同期</text>
+<rect x="688" y="84" width="46" height="22" rx="11" fill="#FEF0EB"/>
+<text x="711" y="100" font-size="11" fill="#EF5B25" text-anchor="middle">有効</text>
+
+<!-- AI Usage card -->
+<rect x="216" y="144" width="664" height="156" rx="12" fill="#FFFFFF" filter="url(#s)"/>
+<text x="228" y="167" font-size="13" font-weight="bold" fill="#1A1A2E">AI 使用量</text>
+
+<!-- Toggles -->
+<text x="228" y="196" font-size="12" fill="#374151">AI Usage</text>
+<rect x="300" y="184" width="36" height="20" rx="10" fill="#EF5B25"/>
+<circle cx="326" cy="194" r="8" fill="white"/>
+
+<text x="358" y="196" font-size="12" fill="#374151">Codex</text>
+<rect x="400" y="184" width="36" height="20" rx="10" fill="#EF5B25"/>
+<circle cx="426" cy="194" r="8" fill="white"/>
+
+<text x="458" y="196" font-size="12" fill="#374151">Claude Code</text>
+<rect x="546" y="184" width="36" height="20" rx="10" fill="#EF5B25"/>
+<circle cx="572" cy="194" r="8" fill="white"/>
+
+<!-- Codex usage -->
+<text x="228" y="226" font-size="11" fill="#374151">Codex</text>
+<text x="270" y="226" font-size="10" fill="#9CA3AF">5h</text>
+<rect x="292" y="217" width="150" height="8" rx="4" fill="#F3F4F6"/>
+<rect x="292" y="217" width="56" height="8" rx="4" fill="#EF5B25"/>
+<text x="450" y="226" font-size="10" fill="#374151">37%</text>
+
+<text x="270" y="246" font-size="10" fill="#9CA3AF">7d</text>
+<rect x="292" y="237" width="150" height="8" rx="4" fill="#F3F4F6"/>
+<rect x="292" y="237" width="91" height="8" rx="4" fill="#EF5B25"/>
+<text x="450" y="246" font-size="10" fill="#374151">61%</text>
+
+<!-- Claude Code usage -->
+<text x="488" y="226" font-size="11" fill="#374151">Claude Code</text>
+<text x="570" y="226" font-size="10" fill="#9CA3AF">5h</text>
+<rect x="592" y="217" width="150" height="8" rx="4" fill="#F3F4F6"/>
+<rect x="592" y="217" width="119" height="8" rx="4" fill="#F97316"/>
+<text x="750" y="226" font-size="10" fill="#F97316">79%</text>
+
+<text x="570" y="246" font-size="10" fill="#9CA3AF">7d</text>
+<rect x="592" y="237" width="150" height="8" rx="4" fill="#F3F4F6"/>
+<rect x="592" y="237" width="70" height="8" rx="4" fill="#EF5B25"/>
+<text x="750" y="246" font-size="10" fill="#374151">47%</text>
+
+<!-- Recent log card -->
+<rect x="216" y="312" width="664" height="244" rx="12" fill="#FFFFFF" filter="url(#s)"/>
+<text x="228" y="336" font-size="13" font-weight="bold" fill="#1A1A2E">直近ログ</text>
+
+<text x="228" y="362" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#9CA3AF">12:34:02</text>
+<text x="298" y="362" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#374151">デバイス接続: hitsuki46 (Host Link v1)</text>
+
+<text x="228" y="382" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#9CA3AF">12:34:03</text>
+<text x="298" y="382" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#EF5B25">LAYER_STATE: layer 0</text>
+
+<text x="228" y="402" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#9CA3AF">12:34:11</text>
+<text x="298" y="402" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#374151">APP_LAYER: Code.exe → layer 2</text>
+
+<text x="228" y="422" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#9CA3AF">12:34:16</text>
+<text x="298" y="422" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#374151">TIME_SYNC: 2026-06-13T12:34:16+09:00</text>
+
+<text x="228" y="442" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#9CA3AF">12:34:22</text>
+<text x="298" y="442" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#374151">AI_USAGE: Codex 5h=37%, Claude Code 5h=79%</text>
+
+<text x="228" y="462" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#9CA3AF">12:34:30</text>
+<text x="298" y="462" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#374151">BATTERY_STATUS: L=82% R=79%</text>
 </svg>

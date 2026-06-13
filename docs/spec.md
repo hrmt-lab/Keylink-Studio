@@ -181,7 +181,7 @@ AI Usage は任意機能で、既定では無効です。
 - schema 変更、HTTP error、token 期限切れ、missing credentials は fixed error code に変換します。
 - refresh token 更新は v1 では行いません。
 
-Security policy:
+セキュリティポリシー:
 
 - access token、credentials JSON、Authorization header、HTTP request body、HTTP response body、raw parse error を log / UI / status / Raw HID packet に出しません。
 - `reqwest` error や request / response 構造体を Debug 出力しません。
@@ -221,18 +221,18 @@ Security policy:
 
 GitHub には source、docs、examples、icon source、Tauri icons を含めます。`target/`、`ui/node_modules/`、`ui/dist/`、個人用 `rawhid-host.toml`、生成済み installer は含めません。
 
-## Current implementation notes
+## 実装上の注記
 
-- Host Link packet types are `0x01 HOST_HELLO`, `0x02 DEVICE_HELLO`, `0x03 ERROR`, `0x04 PING`, `0x05 PONG`, `0x10 AI_USAGE`, `0x20 TIME_SYNC`, and `0x30 APP_LAYER`.
-- `DEVICE_HELLO` capabilities gate sending: `APP_LAYER` packets are sent only to devices that advertise `APP_LAYER`.
-- `device_uid_hash = 0` is normalized to None. Internal device settings do not create `Some(0)`.
-- AI Usage providers update snapshots in a background worker. `Runner::tick()` sends latest snapshots but does not perform provider fetches.
-- Codex uses `rate_limits` as quota source when available. Local history is fallback/activity estimate only.
-- Claude OAuth usage API is experimental/best-effort. Credentials auto-detect can try explicit path, Windows default, WSL default, and extra paths.
-- Keymap Viewer uses a separate ZMK Studio RPC client module and is read-only in v1.
-- Codex JSONL session files are read with a 4 MB tail cap to bound memory usage. The first (possibly partial) line of the tail window is dropped.
-- Uplink packets (`0x40`-`0x70`) are drained non-blocking each tick and gated by `DEVICE_HELLO` capability bits. `LAYER_STATE` is display-only and never feeds the rule engine.
-- Key statistics are persisted per device uid as daily buckets in `<data_dir>/stats/`; positions only, never key contents.
-- `HOST_ACTION` execution is allowlist-based (`[actions]`, default disabled) with per-device bindings (`actions.devices."uid:..."`, keyed like `layer_switch.devices`); the HID value byte is never interpreted as a path or command.
-- Device-specific `unmatched_action` overrides the global `layer_switch.unmatched_action` when set.
-- Foreground watcher (`foreground.rs`), exe icon extraction (`icon.rs`), and launch-at-login registry handling (`startup.rs`) are Windows-only modules with no-op stubs on other platforms.
+- Host Link packet type は `0x01 HOST_HELLO`、`0x02 DEVICE_HELLO`、`0x03 ERROR`、`0x04 PING`、`0x05 PONG`、`0x10 AI_USAGE`、`0x20 TIME_SYNC`、`0x30 APP_LAYER` です。
+- `DEVICE_HELLO` の capability が送信を制御します。`APP_LAYER` packet は `APP_LAYER` capability を持つデバイスにのみ送信されます。
+- `device_uid_hash = 0` は `None` に正規化されます。内部のデバイス設定が `Some(0)` を生成することはありません。
+- AI Usage provider は background worker でスナップショットを更新します。`Runner::tick()` は最新スナップショットを送信するだけで、provider の取得処理は行いません。
+- Codex は利用可能な場合に `rate_limits` を quota source として使います。local history は fallback / activity estimate 専用です。
+- Claude OAuth usage API は experimental / best-effort です。credentials 自動検出は明示パス・Windows デフォルト・WSL デフォルト・追加パスを試みます。
+- Keymap Viewer は独立した ZMK Studio RPC client モジュールを使い、v1 では読み取り専用です。
+- Codex JSONL session ファイルはメモリ使用を抑えるため 4 MB の末尾キャップで読み込みます。末尾ウィンドウの先頭行 (一部だけの可能性あり) は破棄されます。
+- uplink packet (`0x40`〜`0x70`) は毎 tick 非ブロッキングでドレインし、`DEVICE_HELLO` の capability bits でゲートされます。`LAYER_STATE` は表示専用であり、ルールエンジンには渡されません。
+- キー統計は device uid 単位の日別バケットとして `<data_dir>/stats/` へ永続化されます。記録するのは位置情報のみで、キーの内容は記録しません。
+- `HOST_ACTION` はデバイス単位の許可リスト制 (`[actions]`、既定 disabled、`actions.devices."uid:..."` でキー指定) で実行されます。HID value byte をパスやコマンドとして解釈しません。
+- デバイス固有の `unmatched_action` が設定されている場合、グローバルの `layer_switch.unmatched_action` より優先されます。
+- foreground watcher (`foreground.rs`)、exe アイコン抽出 (`icon.rs`)、起動時登録レジストリ管理 (`startup.rs`) は Windows 専用モジュールで、他のプラットフォームでは no-op スタブになります。

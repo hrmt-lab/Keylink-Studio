@@ -18,24 +18,28 @@ interface KeymapCanvasProps {
 export function KeymapCanvas({ keys, keyContent, keyStyle, keyTitle }: KeymapCanvasProps) {
   const metrics = useMemo(() => layoutMetrics(keys), [keys]);
 
+  // ZMK physical layouts pack keys edge-to-edge; inset each cap so
+  // neighbouring keys read as separate keys on the plate.
+  const keyGap = 5;
+
   return (
-    <div className="max-w-full overflow-x-auto overflow-y-hidden rounded-xl bg-background p-4 ring-1 ring-border">
+    <div className="max-w-full overflow-x-auto overflow-y-hidden rounded-card bg-plate shadow-neu-down p-4">
       <div
         className="relative flex-shrink-0"
         style={{ width: metrics.width, height: metrics.height }}
       >
         {keys.map((key) => {
-          const x = (key.x - metrics.minX) * metrics.scale + metrics.padding;
-          const y = (key.y - metrics.minY) * metrics.scale + metrics.padding;
-          const width = Math.max(16, Math.abs(key.width) * metrics.scale);
-          const height = Math.max(16, Math.abs(key.height) * metrics.scale);
+          const x = (key.x - metrics.minX) * metrics.scale + metrics.padding + keyGap / 2;
+          const y = (key.y - metrics.minY) * metrics.scale + metrics.padding + keyGap / 2;
+          const width = Math.max(16, Math.abs(key.width) * metrics.scale - keyGap);
+          const height = Math.max(16, Math.abs(key.height) * metrics.scale - keyGap);
           const originX = (key.rx - key.x) * metrics.scale;
           const originY = (key.ry - key.y) * metrics.scale;
           return (
             <div
               key={`${key.position}-${key.x}-${key.y}`}
               title={keyTitle?.(key)}
-              className="absolute flex flex-col items-center justify-center rounded-lg border border-border bg-white px-1.5 text-center shadow-sm ring-1 ring-white/70"
+              className="absolute flex flex-col items-center justify-center rounded-lg bg-surface px-1.5 text-center"
               style={{
                 left: x,
                 top: y,

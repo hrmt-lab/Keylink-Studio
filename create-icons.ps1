@@ -15,6 +15,8 @@ function New-RRPath([float]$x,[float]$y,[float]$w,[float]$h,[float]$r) {
 }
 
 # ── Main icon drawing (renders at $size x $size) ───────────────────────────────
+# Matches the in-app sidebar logo: white "power button" circle with the
+# accent-orange keyboard glyph (lucide "keyboard", 24x24 grid, stroke 2).
 function Draw-Icon {
     param([int]$size)
 
@@ -27,169 +29,63 @@ function Draw-Icon {
     $g.Clear([System.Drawing.Color]::Transparent)
 
     [float]$sc = $size / 512.0
+    $orange = [System.Drawing.Color]::FromArgb(255, 239, 91, 37)   # #EF5B25
 
-    # ── Background: deep navy gradient ────────────────────────────────────────
-    $bgp = New-RRPath 0 0 ([float]$size) ([float]$size) ([float](80*$sc))
-    $bgb = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-        (New-Object System.Drawing.PointF([float]0,     [float]0)),
-        (New-Object System.Drawing.PointF([float]$size, [float]$size)),
-        [System.Drawing.Color]::FromArgb(255, 11, 17, 32),
-        [System.Drawing.Color]::FromArgb(255,  5,  9, 19)
-    )
-    $g.FillPath($bgb, $bgp)
-    $bgb.Dispose(); $bgp.Dispose()
+    # ── White circle body ─────────────────────────────────────────────────────
+    [float]$margin = 8 * $sc
+    [float]$d = $size - $margin * 2
 
-    # Subtle corner accent (top-left lightness)
-    $accentBrush = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-        (New-Object System.Drawing.PointF([float]0, [float]0)),
-        (New-Object System.Drawing.PointF([float]($size*0.6), [float]($size*0.6))),
-        [System.Drawing.Color]::FromArgb(18, 100, 140, 220),
-        [System.Drawing.Color]::FromArgb(0,  100, 140, 220)
-    )
-    $accentPath = New-RRPath 0 0 ([float]$size) ([float]$size) ([float](80*$sc))
-    $g.FillPath($accentBrush, $accentPath)
-    $accentBrush.Dispose(); $accentPath.Dispose()
-
-    # ── Keyboard body ─────────────────────────────────────────────────────────
-    [float]$kx = 50  * $sc
-    [float]$ky = 144 * $sc
-    [float]$kw = 412 * $sc
-    [float]$kh = 224 * $sc
-    [float]$kr = 22  * $sc
-
-    # Glow layers behind active row (soft radial bloom)
-    [float]$glowCx = $kx + $kw * 0.5
-    [float]$glowCy = $ky + $kh * 0.48
-    for ($i = 8; $i -ge 1; $i--) {
-        [float]$gw = $kw * 0.75 + $i * 16 * $sc
-        [float]$gh = 44  * $sc  + $i * 11 * $sc
-        [float]$gx = $glowCx - $gw * 0.5
-        [float]$gy = $glowCy - $gh * 0.5
-        $gb = New-Object System.Drawing.SolidBrush(
-            [System.Drawing.Color]::FromArgb([int](4.5*$i), 72, 114, 200)
+    # Soft drop shadow so the white disc reads on light backgrounds
+    for ($i = 4; $i -ge 1; $i--) {
+        $shadow = New-Object System.Drawing.SolidBrush(
+            [System.Drawing.Color]::FromArgb([int](7*$i), 96, 110, 130)
         )
-        $g.FillEllipse($gb, $gx, $gy, $gw, $gh)
-        $gb.Dispose()
+        [float]$grow = $i * 2 * $sc
+        $g.FillEllipse($shadow, $margin - $grow, $margin - $grow + 3*$sc,
+                       $d + $grow*2, $d + $grow*2)
+        $shadow.Dispose()
     }
 
-    # Keyboard body fill
-    $kbp = New-RRPath $kx $ky $kw $kh $kr
-    $kbb = New-Object System.Drawing.Drawing2D.LinearGradientBrush(
-        (New-Object System.Drawing.PointF([float]$kx, [float]$ky)),
-        (New-Object System.Drawing.PointF([float]$kx, [float]($ky+$kh))),
-        [System.Drawing.Color]::FromArgb(255, 31, 46, 76),
-        [System.Drawing.Color]::FromArgb(255, 17, 27, 50)
-    )
-    $g.FillPath($kbb, $kbp)
-    $kbb.Dispose()
+    $discBrush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::White)
+    $g.FillEllipse($discBrush, $margin, $margin, $d, $d)
+    $discBrush.Dispose()
 
-    # Keyboard body border
-    $kbpen = New-Object System.Drawing.Pen(
-        [System.Drawing.Color]::FromArgb(68, 110, 150, 215),
-        [float](1.5 * $sc)
-    )
-    $g.DrawPath($kbpen, $kbp)
-    $kbpen.Dispose(); $kbp.Dispose()
+    $ringPen = New-Object System.Drawing.Pen(
+        [System.Drawing.Color]::FromArgb(255, 227, 231, 236), [float](3 * $sc))
+    $g.DrawEllipse($ringPen, $margin, $margin, $d, $d)
+    $ringPen.Dispose()
 
-    # Inner top-edge highlight (subtle bevel on keyboard body)
-    $bevelPath = New-RRPath ([float]($kx+1*$sc)) ([float]($ky+1*$sc)) `
-                            ([float]($kw-2*$sc))  ([float]($kr*1.5))  ([float]($kr*0.9))
-    $bevelBrush = New-Object System.Drawing.SolidBrush(
-        [System.Drawing.Color]::FromArgb(22, 180, 210, 255)
-    )
-    $g.FillPath($bevelBrush, $bevelPath)
-    $bevelBrush.Dispose(); $bevelPath.Dispose()
+    # ── Keyboard glyph (lucide 24x24 units, centered at 12,12) ────────────────
+    [float]$u  = 13.4 * $sc          # px per lucide unit (glyph ~52% of canvas)
+    [float]$cx = $size / 2.0
+    [float]$cy = $size / 2.0
+    [float]$sw = 2.0 * $u            # stroke width (lucide stroke = 2)
 
-    # ── Key rows ──────────────────────────────────────────────────────────────
-    # Rows: [baseY@512, keyCount, keyW@512, keyH@512, isActiveLayer]
-    $rowDefs = @(
-        @{ Y=163; N=13; W=24; H=19; Active=$false },   # top / fn row
-        @{ Y=193; N=12; W=27; H=21; Active=$false },   # number row
-        @{ Y=225; N=11; W=29; H=22; Active=$true  },   # HOME ROW (active layer)
-        @{ Y=258; N= 9; W=33; H=23; Active=$false },   # lower row
-        @{ Y=292; N= 6; W=30; H=21; Active=$false }    # bottom row (abbreviated)
-    )
-    [float]$gap  = 5.2 * $sc
-    [float]$keyR = 3.5 * $sc
+    function MapX([float]$v) { return [float]($cx + ($v - 12.0) * $u) }
+    function MapY([float]$v) { return [float]($cy + ($v - 12.0) * $u) }
 
-    foreach ($row in $rowDefs) {
-        [float]$ry   = $row.Y * $sc
-        [int]   $cnt  = $row.N
-        [float]$rw   = $row.W * $sc
-        [float]$rh   = $row.H * $sc
-        [bool]  $act  = $row.Active
+    # Outer body: rect x2 y4 w20 h16 rx2
+    $body = New-RRPath (MapX 2) (MapY 4) ([float](20*$u)) ([float](16*$u)) ([float](2*$u))
+    $pen = New-Object System.Drawing.Pen($orange, $sw)
+    $pen.LineJoin = [System.Drawing.Drawing2D.LineJoin]::Round
+    $g.DrawPath($pen, $body)
+    $body.Dispose()
 
-        [float]$tw = $cnt * $rw + ($cnt - 1) * $gap
-        [float]$sx = $kx + ($kw - $tw) * 0.5
-
-        for ($k = 0; $k -lt $cnt; $k++) {
-            [float]$rx = $sx + $k * ($rw + $gap)
-            $kp = New-RRPath $rx $ry $rw $rh $keyR
-
-            if ($act) {
-                # Active-layer key: primary blue, glowing
-                $fb = New-Object System.Drawing.SolidBrush(
-                    [System.Drawing.Color]::FromArgb(218, 82, 124, 184)
-                )
-                $g.FillPath($fb, $kp); $fb.Dispose()
-
-                # Bevel highlight on top half of key
-                $hlp = New-RRPath $rx $ry $rw ([float]($rh * 0.48)) $keyR
-                $hlb = New-Object System.Drawing.SolidBrush(
-                    [System.Drawing.Color]::FromArgb(52, 200, 230, 255)
-                )
-                $g.FillPath($hlb, $hlp); $hlb.Dispose(); $hlp.Dispose()
-
-                # Key border
-                $kpen = New-Object System.Drawing.Pen(
-                    [System.Drawing.Color]::FromArgb(180, 148, 192, 245),
-                    [float](1.0 * $sc)
-                )
-                $g.DrawPath($kpen, $kp); $kpen.Dispose()
-            } else {
-                # Inactive key: subtle translucent white
-                $fb = New-Object System.Drawing.SolidBrush(
-                    [System.Drawing.Color]::FromArgb(34, 215, 230, 255)
-                )
-                $g.FillPath($fb, $kp); $fb.Dispose()
-
-                $kpen = New-Object System.Drawing.Pen(
-                    [System.Drawing.Color]::FromArgb(46, 195, 215, 255),
-                    [float](0.75 * $sc)
-                )
-                $g.DrawPath($kpen, $kp); $kpen.Dispose()
-            }
-            $kp.Dispose()
-        }
+    # Key dots (round-cap "h.01" strokes -> filled circles, radius = sw/2)
+    $dotBrush = New-Object System.Drawing.SolidBrush($orange)
+    $dots = @(@(6,8), @(10,8), @(14,8), @(18,8), @(8,12), @(12,12), @(16,12))
+    foreach ($pt in $dots) {
+        [float]$px = MapX $pt[0]
+        [float]$py = MapY $pt[1]
+        $g.FillEllipse($dotBrush, $px - $sw/2, $py - $sw/2, $sw, $sw)
     }
-
-    # ── Layer indicator dot (small circle, bottom-right of keyboard) ───────────
-    [float]$dotR  = 16 * $sc
-    [float]$dotX  = $kx + $kw - $dotR * 2 - 18 * $sc
-    [float]$dotY  = $ky - $dotR * 1.8
-    # Outer glow
-    for ($i = 3; $i -ge 1; $i--) {
-        [float]$gr2 = $dotR + $i * 4 * $sc
-        $dotGlow = New-Object System.Drawing.SolidBrush(
-            [System.Drawing.Color]::FromArgb([int](20*$i), 100, 155, 240)
-        )
-        $g.FillEllipse($dotGlow, $dotX - $i*4*$sc, $dotY - $i*4*$sc,
-                       $dotR*2 + $i*8*$sc, $dotR*2 + $i*8*$sc)
-        $dotGlow.Dispose()
-    }
-    # Dot fill
-    $dotBrush = New-Object System.Drawing.SolidBrush(
-        [System.Drawing.Color]::FromArgb(255, 91, 140, 210)
-    )
-    $g.FillEllipse($dotBrush, $dotX, $dotY, $dotR*2, $dotR*2)
     $dotBrush.Dispose()
-    # Dot highlight
-    $dotHL = New-Object System.Drawing.SolidBrush(
-        [System.Drawing.Color]::FromArgb(90, 200, 230, 255)
-    )
-    $g.FillEllipse($dotHL, $dotX + $dotR*0.2, $dotY + $dotR*0.15,
-                   $dotR * 0.85, $dotR * 0.6)
-    $dotHL.Dispose()
+
+    # Space bar: line 7,16 -> 17,16 with round caps
+    $pen.StartCap = [System.Drawing.Drawing2D.LineCap]::Round
+    $pen.EndCap   = [System.Drawing.Drawing2D.LineCap]::Round
+    $g.DrawLine($pen, (MapX 7), (MapY 16), (MapX 17), (MapY 16))
+    $pen.Dispose()
 
     $g.Dispose()
     return $bmp
@@ -269,6 +165,9 @@ Save-Png $bmp32  (Join-Path $iconsDir "32x32.png")
 Save-Png $bmp128 (Join-Path $iconsDir "128x128.png")
 Save-Png $bmp256 (Join-Path $iconsDir "128x128@2x.png")
 Create-Ico (Join-Path $iconsDir "icon.ico") @($bmp16, $bmp32, $bmp48, $bmp256)
+
+# In-app icon asset (kept in sync with the app icon design)
+Save-Png $bmp256 (Join-Path $PSScriptRoot "ui\src\assets\app-icon.png")
 
 # ICNS placeholder (macOS)
 $icnsPath = Join-Path $iconsDir "icon.icns"

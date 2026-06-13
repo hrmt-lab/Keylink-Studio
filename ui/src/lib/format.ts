@@ -27,23 +27,20 @@ export function formatUsedBp(bp: number): string {
   return `${(bp / 100).toFixed(2)}%`;
 }
 
-/** Tailwind background class for a usage bar, based on used basis points. */
-export function usageBarColor(
-  bp: number,
-  valid: boolean,
-  accent: "primary" | "amber" = "primary"
-): string {
-  if (!valid) return "bg-gray-300";
+/** Tailwind background class for a usage bar, based on used basis points.
+ *  Neutral gauge gray; high usage is emphasized with the accent, then red. */
+export function usageBarColor(bp: number, valid: boolean): string {
+  if (!valid) return "bg-disabled";
   if (bp >= 9000) return "bg-red-500";
-  if (bp >= 8000) return "bg-orange-400";
-  return accent === "amber" ? "bg-amber-600" : "bg-primary";
+  if (bp >= 8000) return "bg-accent";
+  return "bg-gauge";
 }
 
-/** Inline color (hex) for usage text, based on used basis points. */
-export function usageTextColor(bp: number, accent: "primary" | "amber" = "primary"): string {
+/** Inline CSS color for usage text, based on used basis points. */
+export function usageTextColor(bp: number): string {
   if (bp >= 9000) return "#ef4444";
-  if (bp >= 8000) return "#d97706";
-  return accent === "amber" ? "#d97706" : "#5B7092";
+  if (bp >= 8000) return "rgb(var(--accent-rgb))";
+  return "#21242A";
 }
 
 /** Format a Unix-seconds timestamp as a short weekday + time string. */

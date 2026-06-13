@@ -19,6 +19,7 @@ import {
   SettingRow,
 } from "../components/Ui";
 import { useConfigSection } from "../hooks/useConfigSection";
+import { RollingNumber } from "../components/RollingNumber";
 import { aiStatusKey, formatUnixShort, formatUsedBp, usageBarColor, usageTextColor } from "../lib/format";
 import { useLang, type TranslationKey } from "../i18n";
 import type { AiUsageProviderStatus, AiUsageStatusKind, AppConfig, MonitorStatus } from "../types";
@@ -150,8 +151,8 @@ function BasicSettings({
 }) {
   const { t } = useLang();
   return (
-    <div className="overflow-hidden rounded-xl bg-white shadow-card ring-1 ring-border">
-      <div className="divide-y divide-border/60">
+    <div className="overflow-hidden rounded-card bg-surface">
+      <div className="divide-y divide-background">
         <SettingRow label={t("ai_usage.enabled")} description={t("ai_usage.enabled.desc")}>
           <Toggle
             checked={draft.ai_usage.enabled}
@@ -197,27 +198,18 @@ function ProviderCard({
   const [advancedOpen, setAdvancedOpen] = useState(false);
   const isCodex = provider === "codex";
   const name = isCodex ? "Codex" : "Claude Code";
-  const accent = isCodex ? "primary" : "amber";
   const providerConfig = isCodex ? draft.ai_usage.codex : draft.ai_usage.claude_code;
 
   return (
-    <div
-      className={`overflow-hidden rounded-xl bg-white shadow-card ring-1 ${
-        isCodex ? "ring-primary/20" : "ring-amber-500/20"
-      }`}
-    >
-      <div
-        className={`flex items-center justify-between px-5 py-3.5 ${
-          isCodex ? "border-b border-primary/10 bg-primary/5" : "border-b border-amber-500/10 bg-amber-500/5"
-        }`}
-      >
+    <div className="overflow-hidden rounded-card bg-surface">
+      <div className="flex items-center justify-between border-b border-background px-5 py-3.5">
         <div className="flex items-center gap-2.5">
           <ProviderIcon provider={provider} />
-          <span className="text-sm font-semibold text-gray-800">{name}</span>
+          <span className="text-sm font-medium text-ink">{name}</span>
           <StatusBadge status={status?.status ?? "no_data"} />
         </div>
         <div className="flex items-center gap-2.5">
-          <span className="text-xs text-gray-400">
+          <span className="text-xs text-faint">
             {t("ai_usage.updated.short", { time: formatUnixShort(status?.updated_unix ?? null) })}
           </span>
           <Toggle
@@ -241,7 +233,7 @@ function ProviderCard({
       </div>
 
       <div className="px-5 pb-1 pt-3">
-        <p className="text-[11px] text-gray-400">
+        <p className="text-[11px] text-faint">
           {isCodex ? t("ai_usage.codex.note.short") : t("ai_usage.claude.note.short")}
         </p>
       </div>
@@ -251,13 +243,11 @@ function ProviderCard({
           label={t("ai_usage.window.5h.used")}
           status={status}
           window="five_hour"
-          accent={accent}
         />
         <UsageMetric
           label={t("ai_usage.window.7d.used")}
           status={status}
           window="seven_day"
-          accent={accent}
         />
         {status?.error_present && (
           <div className="flex items-start gap-2 rounded-lg bg-amber-50 px-3 py-2.5 text-[11px] text-amber-800 ring-1 ring-amber-200">
@@ -276,9 +266,9 @@ function ProviderCard({
         )}
       </div>
 
-      <div className="border-t border-panel">
+      <div className="border-t border-background">
         <button
-          className="flex w-full items-center gap-2 px-5 py-3 text-xs font-medium text-gray-500 hover:bg-gray-50"
+          className="flex w-full items-center gap-2 px-5 py-3 text-xs font-medium text-muted hover:bg-background hover:text-ink"
           onClick={() => setAdvancedOpen((open) => !open)}
         >
           <ChevronRight
@@ -288,7 +278,7 @@ function ProviderCard({
           {t("ai_usage.advanced")}
         </button>
         {advancedOpen && (
-          <div className="divide-y divide-border/60 border-t border-panel">
+          <div className="divide-y divide-background border-t border-background">
             {isCodex ? (
               <CodexAdvanced draft={draft} updateAiUsage={updateAiUsage} />
             ) : (
@@ -549,7 +539,7 @@ function TextAreaRow({
   return (
     <SettingRow compact align="start" label={label} description={description}>
       <textarea
-        className="h-20 w-56 resize-none rounded-lg border border-border bg-background px-2.5 py-1.5 font-mono text-xs text-gray-700 placeholder:text-gray-300"
+        className="h-20 w-56 resize-none rounded-lg border border-border bg-background px-2.5 py-1.5 font-mono text-xs text-ink placeholder:text-disabled"
         value={value}
         placeholder={placeholder}
         onChange={(e) => onChange(e.target.value)}
@@ -561,12 +551,10 @@ function UsageMetric({
   label,
   status,
   window,
-  accent,
 }: {
   label: string;
   status: AiUsageProviderStatus | null;
   window: "five_hour" | "seven_day";
-  accent: "primary" | "amber";
 }) {
   const { t } = useLang();
   const valid = window === "five_hour" ? status?.five_hour_valid : status?.seven_day_valid;
@@ -574,27 +562,27 @@ function UsageMetric({
   const reset = window === "five_hour" ? status?.five_hour_reset_unix : status?.seven_day_reset_unix;
   const hasData = Boolean(valid && bp !== null && bp !== undefined);
   const pct = hasData ? Math.min(bp! / 100, 100) : 0;
-  const barColor = usageBarColor(bp ?? 0, Boolean(valid), accent);
+  const barColor = usageBarColor(bp ?? 0, Boolean(valid));
   return (
     <div>
       <div className="mb-1.5 flex items-center justify-between">
-        <span className="text-xs font-medium text-gray-600">{label}</span>
+        <span className="text-xs font-medium text-muted">{label}</span>
         {hasData ? (
           <div className="flex items-center gap-2">
-            <span className="text-xs font-semibold" style={{ color: usageTextColor(bp!, accent) }}>
-              {formatUsedBp(bp!)}
+            <span className="font-mono text-xs font-medium" style={{ color: usageTextColor(bp!) }}>
+              <RollingNumber value={bp!} format={formatUsedBp} />
             </span>
           </div>
         ) : (
-          <span className="text-xs text-gray-400">-- {t("ai_usage.no_data")}</span>
+          <span className="text-xs text-faint">-- {t("ai_usage.no_data")}</span>
         )}
       </div>
-      <div className="h-2 overflow-hidden rounded-full bg-panel">
-        <div className={`h-full rounded-full transition-all duration-500 ${barColor}`} style={{ width: `${pct}%` }} />
+      <div className="h-2 overflow-hidden rounded-full bg-plate shadow-neu-groove">
+        <div className={`gauge-fill h-full rounded-full ${barColor}`} style={{ width: `${pct}%` }} />
       </div>
       <div className="mt-1 flex justify-between gap-3">
-        <span className="text-[11px] text-gray-400">{t("ai_usage.source.label")}: {status ? sourceLabel(status, t) : t("ai_usage.source.none")}</span>
-        <span className="text-[11px] text-gray-400">
+        <span className="text-[11px] text-faint">{t("ai_usage.source.label")}: {status ? sourceLabel(status, t) : t("ai_usage.source.none")}</span>
+        <span className="text-[11px] text-faint">
           {t("ai_usage.reset.label")}:{" "}
           <span className="font-mono">
             {status?.quota_source ? formatUnixShort(reset ?? null) : "-"}
@@ -647,9 +635,9 @@ function NumberRow({
           min={min}
           value={value}
           onChange={(e) => onChange(Math.max(min, Number(e.target.value)))}
-          className={`${compact ? "w-20 px-2.5 py-1.5 text-xs" : "w-20 px-3 py-1.5 text-sm"} rounded-lg border border-border bg-background text-right font-mono text-gray-800`}
+          className={`${compact ? "w-20 px-2.5 py-1.5 text-xs" : "w-20 px-3 py-1.5 text-sm"} rounded-lg border border-border bg-background text-right font-mono text-ink`}
         />
-        <span className="text-xs text-gray-400">{unit}</span>
+        <span className="text-xs text-faint">{unit}</span>
       </div>
     </SettingRow>
   );
@@ -675,7 +663,7 @@ function PathRow({
     <SettingRow compact align="start" label={label} description={`${description} / ${t("ai_usage.example", { path: example })}`}>
       <div className="flex flex-shrink-0 items-center gap-2">
         <input
-          className="w-40 rounded-lg border border-border bg-background px-2.5 py-1.5 text-right font-mono text-xs text-gray-700 placeholder:text-gray-300"
+          className="w-40 rounded-lg border border-border bg-background px-2.5 py-1.5 text-right font-mono text-xs text-ink placeholder:text-disabled"
           value={value ?? ""}
           placeholder={t("ai_usage.default")}
           onChange={(e) => onChange(e.target.value.trim() === "" ? null : e.target.value)}
@@ -683,7 +671,7 @@ function PathRow({
         <button
           type="button"
           onClick={onReset}
-          className="rounded-lg p-1.5 text-gray-400 hover:bg-panel hover:text-primary"
+          className="rounded-lg p-1.5 text-faint hover:bg-plate hover:text-ink"
           title={t("ai_usage.reset_default")}
         >
           <RotateCcw size={12} />
@@ -697,12 +685,12 @@ function StatusBadge({ status }: { status: AiUsageStatusKind }) {
   const { t } = useLang();
   const color =
     status === "ok"
-      ? "bg-emerald-100 text-emerald-700"
+      ? "bg-accent-soft text-accent-deep"
       : status === "stale"
         ? "bg-amber-100 text-amber-700"
-        : "bg-gray-100 text-gray-600";
+        : "bg-plate text-muted";
   const dot =
-    status === "ok" ? "bg-emerald-400" : status === "stale" ? "bg-amber-400" : "bg-gray-400";
+    status === "ok" ? "bg-accent" : status === "stale" ? "bg-amber-400" : "bg-disabled";
   return (
     <span className={`inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium ${color}`}>
       <span className={`h-1.5 w-1.5 rounded-full ${dot}`} />

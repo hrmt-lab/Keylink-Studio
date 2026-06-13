@@ -1,10 +1,18 @@
 import { useEffect, useState } from "react";
-import { Save, RefreshCcw } from "lucide-react";
+import { Save, RefreshCcw, Check, X, Plus } from "lucide-react";
 import { reloadConfig, getLaunchAtLogin, setLaunchAtLogin } from "../api";
 import { Toggle } from "../components/Toggle";
 import { ErrorNotice, PageHeader, PrimaryButton, SecondaryButton, SectionCard, SettingRow } from "../components/Ui";
 import { useConfigSection } from "../hooks/useConfigSection";
 import { useLang } from "../i18n";
+import {
+  PRESET_ACCENTS,
+  getAccent,
+  setAccent,
+  getCustomAccents,
+  addCustomAccent,
+  removeCustomAccent,
+} from "../lib/theme";
 import type { AppConfig } from "../types";
 
 interface Props {
@@ -89,6 +97,11 @@ export default function Settings({ config, setConfig }: Props) {
 
       {error && <ErrorNotice message={error} />}
 
+      {/* Appearance */}
+      <SectionCard title={t("settings.appearance.section")}>
+        <AccentPicker />
+      </SectionCard>
+
       {/* App startup */}
       <SectionCard title={t("settings.app.section")}>
         <SettingRow
@@ -138,9 +151,9 @@ export default function Settings({ config, setConfig }: Props) {
                   },
                 })
               }
-              className="input !w-28 text-right"
+              className="input !w-28 text-right font-mono"
             />
-            <span className="text-sm text-gray-500 w-8">ms</span>
+            <span className="text-sm text-muted w-8">ms</span>
           </div>
         </SettingRow>
       </SectionCard>
@@ -152,7 +165,7 @@ export default function Settings({ config, setConfig }: Props) {
           description={t("settings.hid.usage_page.desc")}
         >
           <div className="flex items-center gap-2">
-            <span className="text-sm text-gray-400 font-mono">0x</span>
+            <span className="text-sm text-faint font-mono">0x</span>
             <input
               className="input !w-24 font-mono"
               value={draft.hid.usage_page.toString(16).toUpperCase()}
@@ -167,7 +180,7 @@ export default function Settings({ config, setConfig }: Props) {
           description={t("settings.hid.usage.desc")}
         >
           <div className="flex items-center gap-2">
-            <span className="text-sm text-gray-400 font-mono">0x</span>
+            <span className="text-sm text-faint font-mono">0x</span>
             <input
               className="input !w-24 font-mono"
               value={draft.hid.usage.toString(16).toUpperCase()}
@@ -196,9 +209,9 @@ export default function Settings({ config, setConfig }: Props) {
                   },
                 })
               }
-              className="input !w-28 text-right"
+              className="input !w-28 text-right font-mono"
             />
-            <span className="text-sm text-gray-500 w-8">ms</span>
+            <span className="text-sm text-muted w-8">ms</span>
           </div>
         </SettingRow>
 
@@ -221,14 +234,14 @@ export default function Settings({ config, setConfig }: Props) {
                   },
                 })
               }
-              className="input !w-28 text-right"
+              className="input !w-28 text-right font-mono"
             />
-            <span className="text-sm text-gray-500 w-8">sec</span>
+            <span className="text-sm text-muted w-8">sec</span>
           </div>
         </SettingRow>
       </SectionCard>
 
-      <div className="rounded-lg bg-background px-4 py-3 text-xs text-gray-400 ring-1 ring-border space-y-1">
+      <div className="rounded-card bg-plate px-4 py-3 text-xs text-muted space-y-1">
         <div>
           {t("settings.note1", { file: "rawhid-host.toml" })}
         </div>
@@ -237,5 +250,105 @@ export default function Settings({ config, setConfig }: Props) {
         </div>
       </div>
     </div>
+  );
+}
+
+/** Accent-color picker: preset swatches + user-added custom colors. */
+function AccentPicker() {
+  const { t } = useLang();
+  const [accent, setAccentState] = useState(getAccent());
+  const [custom, setCustom] = useState<string[]>(getCustomAccents());
+
+  const choose = (color: string) => {
+    setAccent(color);
+    setAccentState(getAccent());
+  };
+
+  const addAndChoose = (color: string) => {
+    setCustom(addCustomAccent(color));
+    choose(color);
+  };
+
+  const remove = (color: string) => {
+    setCustom(removeCustomAccent(color));
+  };
+
+  return (
+    <div className="space-y-3 px-5 py-4">
+      <div>
+        <div className="text-sm font-medium text-ink">{t("settings.appearance.accent")}</div>
+        <div className="mt-0.5 text-xs text-muted">{t("settings.appearance.accent.desc")}</div>
+      </div>
+      <div className="flex flex-wrap items-center gap-3">
+        {PRESET_ACCENTS.map((color) => (
+          <AccentSwatch
+            key={color}
+            color={color}
+            selected={accent === color}
+            onSelect={() => choose(color)}
+          />
+        ))}
+        {custom.length > 0 && <span className="h-6 w-px bg-border" aria-hidden="true" />}
+        {custom.map((color) => (
+          <AccentSwatch
+            key={color}
+            color={color}
+            selected={accent === color}
+            onSelect={() => choose(color)}
+            onRemove={accent === color ? undefined : () => remove(color)}
+            removeLabel={t("settings.appearance.accent.remove")}
+          />
+        ))}
+        <label
+          className="relative flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border border-dashed border-disabled text-muted transition-colors hover:border-ink hover:text-ink"
+          title={t("settings.appearance.accent.pick")}
+        >
+          <Plus size={14} />
+          <input
+            type="color"
+            value={accent}
+            onChange={(e) => addAndChoose(e.target.value)}
+            className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
+            aria-label={t("settings.appearance.accent.pick")}
+          />
+        </label>
+      </div>
+    </div>
+  );
+}
+
+function AccentSwatch({ color, selected, onSelect, onRemove, removeLabel }: {
+  color: string;
+  selected: boolean;
+  onSelect: () => void;
+  onRemove?: () => void;
+  removeLabel?: string;
+}) {
+  return (
+    <span className="group relative inline-flex">
+      <button
+        onClick={onSelect}
+        title={color}
+        aria-label={color}
+        aria-pressed={selected}
+        className="flex h-8 w-8 items-center justify-center rounded-full transition-transform hover:scale-110"
+        style={{
+          backgroundColor: color,
+          boxShadow: selected ? `0 0 0 2px #FFFFFF, 0 0 0 4px ${color}` : "inset 0 0 0 1px rgba(0,0,0,0.08)",
+        }}
+      >
+        {selected && <Check size={14} className="text-white" />}
+      </button>
+      {onRemove && (
+        <button
+          onClick={onRemove}
+          title={removeLabel}
+          aria-label={removeLabel}
+          className="absolute -right-1 -top-1 hidden h-4 w-4 items-center justify-center rounded-full bg-ink text-white group-hover:flex"
+        >
+          <X size={9} />
+        </button>
+      )}
+    </span>
   );
 }

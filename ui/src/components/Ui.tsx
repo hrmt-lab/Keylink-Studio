@@ -13,8 +13,8 @@ export function PageHeader({
   return (
     <div className="flex items-center justify-between">
       <div>
-        <h1 className="text-xl font-semibold text-gray-800">{title}</h1>
-        <p className="mt-0.5 text-sm text-gray-500">{description}</p>
+        <h1 className="text-xl font-medium text-ink">{title}</h1>
+        <p className="mt-0.5 text-sm text-muted">{description}</p>
       </div>
       {actions && <div className="flex items-center gap-2">{actions}</div>}
     </div>
@@ -25,7 +25,7 @@ export function SpinnerIcon({ inverse = false }: { inverse?: boolean }) {
   return (
     <div
       className={`h-4 w-4 animate-spin rounded-full border-2 ${
-        inverse ? "border-white/30 border-t-white" : "border-gray-300 border-t-primary"
+        inverse ? "border-white/30 border-t-white" : "border-border border-t-accent"
       }`}
     />
   );
@@ -48,9 +48,9 @@ export function PrimaryButton({
     <button
       onClick={onClick}
       disabled={disabled || loading}
-      className="flex items-center gap-2 rounded-lg bg-primary px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-primary-dark disabled:opacity-50"
+      className="btn-neu flex items-center gap-2 rounded-full px-5 py-2.5 text-sm font-medium text-ink disabled:opacity-50"
     >
-      {loading ? <SpinnerIcon inverse /> : icon}
+      {loading ? <SpinnerIcon /> : icon}
       {children}
     </button>
   );
@@ -73,7 +73,7 @@ export function SecondaryButton({
     <button
       onClick={onClick}
       disabled={disabled || loading}
-      className="flex items-center gap-2 rounded-lg border border-border bg-white px-4 py-2.5 text-sm font-medium text-gray-600 transition-colors hover:bg-panel disabled:cursor-not-allowed disabled:opacity-45"
+      className="row-lift flex items-center gap-2 rounded-full border border-border bg-surface px-4 py-2.5 text-sm font-medium text-muted hover:text-ink disabled:cursor-not-allowed disabled:opacity-45"
     >
       {loading ? <SpinnerIcon /> : icon}
       {children}
@@ -111,7 +111,7 @@ export function Notice({
       ? "bg-red-50 text-red-700 ring-red-200"
       : tone === "warn"
         ? "bg-amber-50 text-amber-800 ring-amber-200"
-        : "bg-blue-50 text-blue-700 ring-blue-200";
+        : "bg-plate text-ink ring-border";
   return (
     <div className={`flex items-start gap-2.5 rounded-lg px-4 py-3 text-sm ring-1 ${color}`}>
       <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
@@ -120,12 +120,15 @@ export function Notice({
   );
 }
 
-/** Transient "saved" pill used for auto-saving flows. */
+/** Transient saved feedback: check mark only, fades in and out on its own. */
 export function SavedIndicator({ label }: { label: string }) {
   return (
-    <span className="flex items-center gap-1 text-xs font-medium text-emerald-600">
-      <Check size={13} className="flex-shrink-0" />
-      {label}
+    <span
+      role="status"
+      aria-label={label}
+      className="animate-saved-pop flex items-center text-accent-deep"
+    >
+      <Check size={15} className="flex-shrink-0" />
     </span>
   );
 }
@@ -138,13 +141,13 @@ export function SectionCard({
   children: ReactNode;
 }) {
   return (
-    <div className="overflow-hidden rounded-xl bg-white shadow-card ring-1 ring-border">
+    <div className="overflow-hidden rounded-card bg-surface">
       {title && (
-        <div className="border-b border-border/60 px-5 py-3">
-          <h2 className="text-sm font-semibold text-gray-700">{title}</h2>
+        <div className="border-b border-background px-5 py-3">
+          <h2 className="text-sm font-medium text-ink">{title}</h2>
         </div>
       )}
-      <div className="divide-y divide-border/60">{children}</div>
+      <div className="divide-y divide-background">{children}</div>
     </div>
   );
 }
@@ -169,10 +172,10 @@ export function SettingRow({
       } ${align === "start" ? "items-start" : "items-center"}`}
     >
       <div className="min-w-0">
-        <div className={`${compact ? "text-xs" : "text-sm"} font-medium text-gray-800`}>
+        <div className={`${compact ? "text-xs" : "text-sm"} font-medium text-ink`}>
           {label}
         </div>
-        <div className="mt-0.5 text-xs text-gray-500">{description}</div>
+        <div className="mt-0.5 text-xs text-muted">{description}</div>
       </div>
       <div className="flex-shrink-0">{children}</div>
     </div>

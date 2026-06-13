@@ -126,8 +126,8 @@ function AppInner() {
     return (
       <div className="flex h-full items-center justify-center bg-background">
         <div className="flex flex-col items-center gap-3">
-          <div className="h-8 w-8 animate-spin rounded-full border-2 border-border border-t-primary" />
-          <span className="text-sm text-gray-500">{t("app.loading")}</span>
+          <div className="h-8 w-8 animate-spin rounded-full border-2 border-border border-t-accent" />
+          <span className="text-sm text-muted">{t("app.loading")}</span>
         </div>
       </div>
     );

@@ -1,23 +1,114 @@
-<svg xmlns='http://www.w3.org/2000/svg' width='1200' height='720' viewBox='0 0 1200 720'>
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="580" viewBox="0 0 900 580" font-family="'Hiragino Sans','Meiryo','Segoe UI',sans-serif">
 <defs>
-<style>
-  .bg{fill:#f3f4f6}.side{fill:#5f789c}.card{fill:#fff;stroke:#d7d7d7;stroke-width:1.5}.muted{fill:#8b95a6}.text{fill:#1f2937;font-family:'Segoe UI','Yu Gothic UI',sans-serif}.title{font-size:24px;font-weight:700}.sub{font-size:14px;fill:#667085}.nav{font-size:15px;fill:#e9eef7;font-weight:600}.label{font-size:13px}.small{font-size:11px}.btn{fill:#5f789c}.btn2{fill:#fff;stroke:#d1d5db}.pill{fill:#e5e7eb}.ok{fill:#bff7d7}.warn{fill:#fff3cd;stroke:#f1c36d}.err{fill:#fff7ed;stroke:#f59e0b}.barbg{fill:#ddd9d2}.barok{fill:#5f789c}.barwarn{fill:#f59e0b}.barerr{fill:#ef4444}.key{fill:#fff;stroke:#d1d5db}.panel{fill:#eeeeee;stroke:#d1d5db}.bluebox{fill:#eff6ff;stroke:#bfdbfe}.selected{fill:#eef3fa;stroke:#b7c3d7}.ghost{fill:#f1f1f1;stroke:#d0d0d0}.mono{font-family:'Segoe UI Mono','Consolas',monospace}
-</style>
+  <filter id="s" x="-6%" y="-8%" width="112%" height="120%">
+    <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#BCC7D4" flood-opacity="0.45"/>
+  </filter>
 </defs>
-<rect class="bg" x="0" y="0" width="1200" height="720"/>
-<rect class="side" x="0" y="0" width="210" height="720"/>
-<rect x="20" y="28" width="48" height="48" rx="12" fill="#6f86a8" stroke="#8da0bd"/>
-<text class="text nav" x="82" y="59">RawHID Host</text>
-<text class="text nav" x="24" y="132">▦  ダッシュボード</text>
-<text class="text nav" x="24" y="174">☰  レイヤールール</text>
-<text class="text nav" x="24" y="216">◷  時刻同期</text>
-<text class="text nav" x="24" y="258">⌁  AI 使用量</text>
-<text class="text nav" x="24" y="300">⌨  キーマップ表示</text>
-<text class="text nav" x="24" y="342">🔧  デバイス</text>
-<text class="text nav" x="24" y="384">⚙  設定</text>
-<circle cx="24" cy="682" r="5" fill="#b7c3d7"/><text class="text nav" x="40" y="688">停止中</text>
-<text class="text title" x="260" y="64">AI 使用量</text><text class="text sub" x="260" y="88">Codex / Claude Code の使用率を取得して送信します</text><rect class="btn2" x="954" y="42" width="82" height="44" rx="8"/><text class="text" x="984" y="70" font-size="15" font-weight="700">更新</text><rect class="btn" x="1050" y="42" width="88" height="44" rx="8"/><text x="1080" y="70" fill="#fff" font-size="15" font-weight="700">保存</text>
-<rect class="card" x="260" y="126" width="860" height="92" rx="12"/><text class="text" x="292" y="166" font-size="18" font-weight="700">基本設定</text><text class="text sub" x="292" y="194">Polling: 300s / Stale: 900s</text><rect x="1020" y="150" width="48" height="24" rx="12" fill="#5f789c"/><circle cx="1054" cy="162" r="10" fill="#fff"/>
-<rect class="card" x="260" y="244" width="420" height="338" rx="12"/><rect x="260" y="244" width="420" height="58" rx="12" fill="#fffaf2"/><text class="text" x="306" y="281" font-size="19" font-weight="700">Codex</text><rect class="ok" x="396" y="262" width="62" height="24" rx="12"/><text class="text small" x="411" y="278" fill="#047857">ok</text><text class="text sub" x="292" y="330">Codex rate_limits</text><text class="text label" x="292" y="378">5h 使用済み</text><text class="text label" x="628" y="378" text-anchor="end">44.00%</text><rect class="barbg" x="292" y="392" width="336" height="10" rx="5"/><rect class="barok" x="292" y="392" width="148" height="10" rx="5"/><text class="text sub" x="292" y="424">Reset: 23:10</text><text class="text label" x="292" y="474">7d 使用済み</text><text class="text label" x="628" y="474" text-anchor="end">82.50%</text><rect class="barbg" x="292" y="488" width="336" height="10" rx="5"/><rect class="barwarn" x="292" y="488" width="277" height="10" rx="5"/><text class="text sub" x="292" y="520">Reset: 金 13:00</text>
-<rect class="card" x="700" y="244" width="420" height="338" rx="12"/><rect x="700" y="244" width="420" height="58" rx="12" fill="#fffaf2"/><text class="text" x="746" y="281" font-size="19" font-weight="700">Claude Code</text><rect class="pill" x="878" y="262" width="134" height="24" rx="12"/><text class="text small" x="894" y="278">expired credentials</text><text class="text sub" x="732" y="330">OAuth usage API / experimental</text><text class="text label" x="732" y="378">5h 使用済み</text><text class="text sub" x="1068" y="378" text-anchor="end">-- no data</text><rect class="barbg" x="732" y="392" width="336" height="10" rx="5"/><text class="text label" x="732" y="474">7d 使用済み</text><text class="text sub" x="1068" y="474" text-anchor="end">-- no data</text><rect class="barbg" x="732" y="488" width="336" height="10" rx="5"/><rect class="err" x="732" y="526" width="336" height="44" rx="8"/><text class="text" x="760" y="554" font-size="13" fill="#b45309">expired credentials。次回ポーリングで再試行します。</text>
+
+<rect width="900" height="580" fill="#F1F3F6"/>
+
+<!-- ── Sidebar ── -->
+<rect width="200" height="580" fill="#FFFFFF"/>
+<line x1="200" y1="0" x2="200" y2="580" stroke="#E8ECF1"/>
+<text x="20" y="37" font-size="14" font-weight="bold" fill="#1A1A2E">RawHID Host</text>
+
+<text x="30" y="72" font-size="13" fill="#4B5563">Dashboard</text>
+<text x="30" y="110" font-size="13" fill="#4B5563">レイヤールール</text>
+<text x="30" y="148" font-size="13" fill="#4B5563">アクション</text>
+<text x="30" y="186" font-size="13" fill="#4B5563">時刻同期</text>
+<!-- AI 使用量 ← selected -->
+<rect x="8" y="202" width="184" height="34" rx="8" fill="#FEF0EB"/>
+<rect x="20" y="212" width="3" height="14" rx="2" fill="#EF5B25"/>
+<text x="30" y="224" font-size="13" font-weight="bold" fill="#EF5B25">AI 使用量</text>
+
+<text x="30" y="262" font-size="13" fill="#4B5563">キーマップ表示</text>
+<text x="30" y="300" font-size="13" fill="#4B5563">デバイス</text>
+<text x="30" y="338" font-size="13" fill="#4B5563">設定</text>
+
+<rect x="14" y="540" width="76" height="28" rx="14" fill="#F0F4F8"/>
+<rect x="16" y="542" width="36" height="24" rx="12" fill="#EF5B25"/>
+<text x="34" y="559" font-size="11" font-weight="bold" fill="white" text-anchor="middle">JP</text>
+<text x="76" y="559" font-size="11" fill="#9CA3AF" text-anchor="middle">EN</text>
+
+<!-- ── Content ── -->
+<text x="220" y="37" font-size="18" font-weight="bold" fill="#1A1A2E">AI 使用量</text>
+
+<!-- 更新 button -->
+<rect x="756" y="17" width="124" height="34" rx="17" fill="#FFFFFF" stroke="#E5E7EB" stroke-width="1.5" filter="url(#s)"/>
+<text x="818" y="39" font-size="13" font-weight="bold" fill="#374151" text-anchor="middle">更新</text>
+
+<!-- Toggles row -->
+<rect x="216" y="56" width="664" height="54" rx="12" fill="#FFFFFF" filter="url(#s)"/>
+<text x="228" y="88" font-size="12" fill="#374151">AI Usage</text>
+<rect x="294" y="72" width="40" height="22" rx="11" fill="#EF5B25"/>
+<circle cx="324" cy="83" r="9" fill="white"/>
+<text x="352" y="88" font-size="12" fill="#374151">Codex</text>
+<rect x="396" y="72" width="40" height="22" rx="11" fill="#EF5B25"/>
+<circle cx="426" cy="83" r="9" fill="white"/>
+<text x="454" y="88" font-size="12" fill="#374151">Claude Code</text>
+<rect x="542" y="72" width="40" height="22" rx="11" fill="#EF5B25"/>
+<circle cx="572" cy="83" r="9" fill="white"/>
+
+<!-- Codex card -->
+<rect x="216" y="122" width="322" height="210" rx="12" fill="#FFFFFF" filter="url(#s)"/>
+<text x="232" y="150" font-size="14" font-weight="bold" fill="#1A1A2E">Codex</text>
+<!-- ok badge -->
+<rect x="288" y="136" width="38" height="22" rx="11" fill="#FEF0EB"/>
+<text x="307" y="151" font-size="11" font-weight="bold" fill="#EF5B25" text-anchor="middle">ok</text>
+<text x="232" y="170" font-size="10" fill="#9CA3AF">Codex rate_limits</text>
+
+<!-- 5h bar -->
+<text x="232" y="198" font-size="11" fill="#374151">5h 使用済み</text>
+<text x="510" y="198" font-size="11" fill="#374151" text-anchor="end">37%</text>
+<rect x="232" y="204" width="274" height="9" rx="4" fill="#F3F4F6"/>
+<rect x="232" y="204" width="101" height="9" rx="4" fill="#EF5B25"/>
+<text x="232" y="224" font-size="10" fill="#9CA3AF">Reset: 23:10</text>
+
+<!-- 7d bar -->
+<text x="232" y="250" font-size="11" fill="#374151">7d 使用済み</text>
+<text x="510" y="250" font-size="11" fill="#F97316" text-anchor="end">82%</text>
+<rect x="232" y="256" width="274" height="9" rx="4" fill="#F3F4F6"/>
+<rect x="232" y="256" width="225" height="9" rx="4" fill="#F97316"/>
+<text x="232" y="276" font-size="10" fill="#9CA3AF">Reset: 金 13:00</text>
+<text x="232" y="316" font-size="10" fill="#9CA3AF">Source: Codex rate_limits</text>
+
+<!-- Claude Code card -->
+<rect x="558" y="122" width="322" height="210" rx="12" fill="#FFFFFF" filter="url(#s)"/>
+<text x="574" y="150" font-size="14" font-weight="bold" fill="#1A1A2E">Claude Code</text>
+<!-- ok badge -->
+<rect x="682" y="136" width="38" height="22" rx="11" fill="#FEF0EB"/>
+<text x="701" y="151" font-size="11" font-weight="bold" fill="#EF5B25" text-anchor="middle">ok</text>
+<text x="574" y="170" font-size="10" fill="#9CA3AF">Claude OAuth API</text>
+
+<!-- 5h bar -->
+<text x="574" y="198" font-size="11" fill="#374151">5h 使用済み</text>
+<text x="852" y="198" font-size="11" fill="#F97316" text-anchor="end">79%</text>
+<rect x="574" y="204" width="274" height="9" rx="4" fill="#F3F4F6"/>
+<rect x="574" y="204" width="217" height="9" rx="4" fill="#F97316"/>
+<text x="574" y="224" font-size="10" fill="#9CA3AF">Reset: 23:00</text>
+
+<!-- 7d bar -->
+<text x="574" y="250" font-size="11" fill="#374151">7d 使用済み</text>
+<text x="852" y="250" font-size="11" fill="#374151" text-anchor="end">47%</text>
+<rect x="574" y="256" width="274" height="9" rx="4" fill="#F3F4F6"/>
+<rect x="574" y="256" width="129" height="9" rx="4" fill="#EF5B25"/>
+<text x="574" y="276" font-size="10" fill="#9CA3AF">Reset: 火 09:00</text>
+<text x="574" y="316" font-size="10" fill="#9CA3AF">Source: Claude OAuth API</text>
+
+<!-- Advanced section (collapsed accordion) -->
+<rect x="216" y="344" width="664" height="42" rx="12" fill="#FFFFFF" filter="url(#s)"/>
+<text x="228" y="370" font-size="12" fill="#9CA3AF">▶ Advanced</text>
+<text x="858" y="370" font-size="11" fill="#9CA3AF" text-anchor="end">sessions 自動検出 / WSL sessions / stale 判定秒数</text>
+
+<!-- 取得間隔・stale section -->
+<rect x="216" y="398" width="664" height="70" rx="12" fill="#FFFFFF" filter="url(#s)"/>
+<text x="228" y="422" font-size="12" fill="#374151">取得間隔</text>
+<rect x="328" y="408" width="64" height="26" rx="8" fill="#F8F9FA" stroke="#E5E7EB" stroke-width="1"/>
+<text x="360" y="426" font-size="12" fill="#374151" text-anchor="middle" font-family="'Courier New',Consolas,monospace">300</text>
+<text x="400" y="422" font-size="12" fill="#6B7280">秒</text>
+
+<text x="228" y="452" font-size="12" fill="#374151">stale 判定</text>
+<rect x="328" y="438" width="64" height="26" rx="8" fill="#F8F9FA" stroke="#E5E7EB" stroke-width="1"/>
+<text x="360" y="456" font-size="12" fill="#374151" text-anchor="middle" font-family="'Courier New',Consolas,monospace">900</text>
+<text x="400" y="452" font-size="12" fill="#6B7280">秒</text>
 </svg>

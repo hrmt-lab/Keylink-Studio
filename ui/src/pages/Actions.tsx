@@ -142,14 +142,14 @@ export default function Actions({ config, setConfig, status }: Props) {
     <div className="flex h-full flex-col overflow-hidden">
 
       {/* ── Header ── */}
-      <div className="flex items-center justify-between border-b border-border/60 bg-white px-6 py-4 flex-shrink-0">
+      <div className="flex items-center justify-between border-b border-border bg-surface px-6 py-4 flex-shrink-0">
         <div>
-          <h1 className="text-xl font-semibold text-gray-800">{t("actions.title")}</h1>
-          <p className="mt-0.5 text-sm text-gray-500">{t("actions.subtitle")}</p>
+          <h1 className="text-xl font-medium text-ink">{t("actions.title")}</h1>
+          <p className="mt-0.5 text-sm text-muted">{t("actions.subtitle")}</p>
         </div>
         <div className="flex items-center gap-3">
           {deviceTargets.length === 0 ? (
-            <span className="text-sm text-gray-400">{t("actions.no_devices")}</span>
+            <span className="text-sm text-faint">{t("actions.no_devices")}</span>
           ) : (
             <>
               <select
@@ -171,14 +171,14 @@ export default function Actions({ config, setConfig, status }: Props) {
                   disabled={saving}
                   title={t("actions.delete_device_config")}
                   aria-label={t("actions.delete_device_config")}
-                  className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-border bg-white text-gray-400 hover:border-red-300 hover:text-red-500 disabled:opacity-50"
+                  className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-border bg-surface text-faint hover:border-red-300 hover:text-red-500 disabled:opacity-50"
                 >
                   <Trash2 size={13} />
                 </button>
               )}
             </>
           )}
-          <span className="text-sm text-gray-600">{t("actions.toggle_label")}</span>
+          <span className="text-sm text-muted">{t("actions.toggle_label")}</span>
           <Toggle
             checked={config.actions.enabled}
             onChange={toggleEnabled}
@@ -198,10 +198,10 @@ export default function Actions({ config, setConfig, status }: Props) {
           )}
 
           {/* Binding builder */}
-          <div className="rounded-xl bg-white p-5 shadow-card ring-1 ring-border">
+          <div className="rounded-card border border-border p-5">
             <div className="flex flex-wrap items-end gap-4">
               <div>
-                <label className="mb-1 block text-xs font-medium text-gray-500">
+                <label className="mb-1 block text-xs font-medium text-muted">
                   {t("actions.action_id")}
                 </label>
                 <input
@@ -210,17 +210,17 @@ export default function Actions({ config, setConfig, status }: Props) {
                   max={255}
                   value={actionId}
                   onChange={(e) => setActionId(Math.max(0, Math.min(255, Number(e.target.value))))}
-                  className="input !w-24"
+                  className="input !w-24 !bg-surface font-mono"
                 />
               </div>
               <div>
-                <label className="mb-1 block text-xs font-medium text-gray-500">
+                <label className="mb-1 block text-xs font-medium text-muted">
                   {t("actions.action")}
                 </label>
                 <select
                   value={kind}
                   onChange={(e) => setKind(e.target.value as HostActionKind)}
-                  className="input !w-auto min-w-44 cursor-pointer"
+                  className="input !w-auto min-w-44 cursor-pointer !bg-surface"
                 >
                   {ACTION_KINDS.map((item) => (
                     <option key={item} value={item}>{actionKindLabel(item, t)}</option>
@@ -229,7 +229,7 @@ export default function Actions({ config, setConfig, status }: Props) {
               </div>
               {kind === "launch" && (
                 <div className="min-w-0 flex-1">
-                  <label className="mb-1 block text-xs font-medium text-gray-500">
+                  <label className="mb-1 block text-xs font-medium text-muted">
                     {t("actions.path")}
                   </label>
                   <input
@@ -237,17 +237,17 @@ export default function Actions({ config, setConfig, status }: Props) {
                     value={path}
                     onChange={(e) => setPath(e.target.value)}
                     placeholder={t("actions.path_placeholder")}
-                    className="input w-full font-mono text-sm"
+                    className="input w-full font-mono text-sm !bg-surface"
                   />
                 </div>
               )}
               <button
                 onClick={addBinding}
                 disabled={saving || !targetKey}
-                className="flex flex-shrink-0 items-center gap-2 rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-white transition-colors hover:bg-primary-dark disabled:opacity-60"
+                className="btn-neu flex flex-shrink-0 items-center gap-2 rounded-full px-5 py-2 text-sm font-medium text-ink disabled:opacity-60"
               >
                 {saving
-                  ? <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                  ? <div className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-accent" />
                   : <Plus size={15} />
                 }
                 {t("actions.add")}
@@ -259,29 +259,29 @@ export default function Actions({ config, setConfig, status }: Props) {
           {/* Binding list */}
           {bindings.length === 0 ? (
             <div className="flex flex-col items-center justify-center gap-2 py-16 text-center">
-              <Zap size={32} className="text-gray-200" />
-              <p className="text-sm text-gray-400">{t("actions.empty.title")}</p>
-              <p className="text-xs text-gray-300">{t("actions.empty.hint")}</p>
+              <Zap size={32} className="text-disabled" />
+              <p className="text-sm text-faint">{t("actions.empty.title")}</p>
+              <p className="text-xs text-disabled">{t("actions.empty.hint")}</p>
             </div>
           ) : (
             <div className="space-y-2">
-              <p className="text-xs font-medium uppercase tracking-wide text-gray-400">
+              <p className="text-xs font-medium uppercase tracking-wide text-faint">
                 {t("actions.count", { n: bindings.length })}
               </p>
               {bindings.map((binding, idx) => (
                 <div
                   key={idx}
-                  className="flex items-center gap-3 rounded-xl bg-white px-4 py-3 shadow-card ring-1 ring-border"
+                  className="row-lift flex items-center gap-3 rounded-card bg-surface px-4 py-3"
                 >
-                  <span className="inline-flex h-7 w-12 flex-shrink-0 items-center justify-center rounded-lg bg-primary/10 font-mono text-xs font-semibold text-primary">
+                  <span className="inline-flex h-7 w-12 flex-shrink-0 items-center justify-center rounded-lg bg-plate font-mono text-xs font-medium text-ink">
                     {binding.action_id}
                   </span>
                   <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium text-gray-800">
+                    <div className="text-sm font-medium text-ink">
                       {actionKindLabel(binding.action, t)}
                     </div>
                     {binding.path && (
-                      <div className="truncate font-mono text-[11px] text-gray-400">
+                      <div className="truncate font-mono text-[11px] text-faint">
                         {binding.path}
                       </div>
                     )}
@@ -291,7 +291,7 @@ export default function Actions({ config, setConfig, status }: Props) {
                     disabled={saving}
                     title={t("common.delete")}
                     aria-label={t("common.delete")}
-                    className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-gray-300 hover:bg-red-50 hover:text-red-500 disabled:opacity-50"
+                    className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-disabled hover:bg-red-50 hover:text-red-500 disabled:opacity-50"
                   >
                     <Trash2 size={14} />
                   </button>
@@ -300,7 +300,7 @@ export default function Actions({ config, setConfig, status }: Props) {
             </div>
           )}
 
-          <p className="text-xs text-gray-400">{t("actions.firmware_hint")}</p>
+          <p className="text-xs text-faint">{t("actions.firmware_hint")}</p>
         </div>
       </div>
     </div>

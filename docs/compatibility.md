@@ -10,6 +10,7 @@ RawHID Host のアプリバージョンと Host Link プロトコルバージョ
 
 | ホストアプリバージョン | Host Link プロトコル | 必要 firmware 側対応 | 主な機能 |
 | --- | --- | --- | --- |
+| `0.7.0` | `v1` | 0.6.0 と同じ (firmware 側変更なし) | 0.6.0 の機能 + UI デザイン全面刷新 (Studio Gadget)、アクセント色カスタマイズ、マニュアル画像更新 |
 | `0.6.0` | `v1` | 従来対応 + 任意で uplink capability (`BATTERY` / `HOST_ACTION` / `KEY_STATS` / `LAYER_STATE`) | 0.5.0 の機能 + バッテリー表示、キーボードからの PC 操作、タイピング統計ヒートマップ、レイヤー逆同期 |
 | `0.5.0` | `v1` | `HOST_HELLO` / `DEVICE_HELLO`, capability 情報, `APP_LAYER`, `TIME_SYNC`, `AI_USAGE` | デバイス単位のレイヤールール (Global fallback 廃止)、時刻同期、AI 使用量送信、Keymap Viewer、自動起動 |
 | `0.4.0` | `v1` | `HOST_HELLO` / `DEVICE_HELLO`, capability 情報, `APP_LAYER`, `TIME_SYNC`, `AI_USAGE` | アプリ別レイヤー切り替え (即時検知)、時刻同期、AI 使用量送信、Keymap Viewer、自動起動 |

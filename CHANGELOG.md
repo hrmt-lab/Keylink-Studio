@@ -2,7 +2,7 @@
 
 All notable changes to RawHID Host are documented in this file.
 
-## [Unreleased]
+## [0.7.0] - 2026-06-13
 
 ### Changed
 

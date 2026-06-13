@@ -188,13 +188,13 @@ Thumbs.db
 
 `rawhid-host.toml` は個人設定になりやすいため、公開する場合は `examples/` にサンプルを置く運用を推奨します。
 
-## Current implementation notes
+## 実装上の注記
 
-- `[app] start_monitoring_on_launch = true` starts monitoring automatically when the app launches. Combined with the Settings "launch at login" toggle (HKCU Run registry key), monitoring can start automatically after Windows login.
-- The app is single-instance. A second launch focuses the existing window instead of starting another process.
-- Add `hid.rescan_interval_sec` to configure Host Link HID rescan while monitoring is running. The default is 5 seconds.
-- AI Usage collection runs independently from monitoring. Raw HID sending still requires monitoring.
-- Codex sessions auto-detect (`sessions_auto_detect`, default on) reads the Windows default, every WSL distro's `~/.codex/sessions` (`include_wsl_sessions`), and `extra_sessions_paths`, merging them so Codex usage from WSL is reflected too. rate_limits use the most recent across all directories; the history fallback sums tokens across all directories.
-- Claude Code credentials auto-detect supports Windows default, WSL default, and extra credentials paths. Refresh token updates are not implemented in v1.
-- ZMK Studio Keymap Viewer requires ZMK Studio USB serial RPC transport. BLE transport is out of scope for v1.
-- For device-specific App Layer rules, firmware should return `APP_LAYER` capability and a stable non-zero `device_uid_hash` in `DEVICE_HELLO`.
+- `[app] start_monitoring_on_launch = true` はアプリ起動時に監視を自動開始します。設定の「ログイン時に起動」トグル (HKCU Run レジストリキー) と組み合わせると、Windows ログイン後に自動で監視を開始できます。
+- アプリはシングルインスタンスです。2 つ目の起動では既存ウィンドウが前面化されます。
+- `hid.rescan_interval_sec` を設定すると、監視中の Host Link HID 再スキャン間隔を変更できます。既定は 5 秒です。
+- AI Usage の収集は監視とは独立して動きます。Raw HID 送信には監視が必要です。
+- Codex sessions 自動検出 (`sessions_auto_detect`、既定オン) は Windows デフォルト・各 WSL ディストロの `~/.codex/sessions` (`include_wsl_sessions`)・`extra_sessions_paths` を読み込み、WSL 上の Codex 使用分もまとめて反映します。`rate_limits` は全ディレクトリ中の最新値を使用し、history fallback はトークンを全ディレクトリ合算します。
+- Claude Code credentials 自動検出は Windows デフォルト・WSL デフォルト・追加 credentials パスに対応しています。refresh token 更新は v1 では行いません。
+- ZMK Studio Keymap Viewer は ZMK Studio USB serial RPC transport を必要とします。BLE transport は v1 の対象外です。
+- デバイス単位の App Layer ルールを使う場合は、firmware が `DEVICE_HELLO` で `APP_LAYER` capability と安定した非ゼロの `device_uid_hash` を返す必要があります。

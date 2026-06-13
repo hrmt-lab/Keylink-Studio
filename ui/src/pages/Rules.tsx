@@ -167,14 +167,14 @@ export default function Rules({ config, setConfig, status }: Props) {
     <div className="flex h-full flex-col overflow-hidden">
 
       {/* ── Header ── */}
-      <div className="flex items-center justify-between border-b border-border/60 bg-white px-6 py-4 flex-shrink-0">
+      <div className="flex items-center justify-between border-b border-border bg-surface px-6 py-4 flex-shrink-0">
         <div>
-          <h1 className="text-xl font-semibold text-gray-800">{t("rules.title")}</h1>
-          <p className="mt-0.5 text-sm text-gray-500">{t("rules.subtitle")}</p>
+          <h1 className="text-xl font-medium text-ink">{t("rules.title")}</h1>
+          <p className="mt-0.5 text-sm text-muted">{t("rules.subtitle")}</p>
         </div>
         <div className="flex items-center gap-3">
           {deviceTargets.length === 0 ? (
-            <span className="text-sm text-gray-400">{t("rules.no_devices")}</span>
+            <span className="text-sm text-faint">{t("rules.no_devices")}</span>
           ) : (
             <>
               <select
@@ -196,14 +196,14 @@ export default function Rules({ config, setConfig, status }: Props) {
                   disabled={saving}
                   title={t("rules.delete_device_config")}
                   aria-label={t("rules.delete_device_config")}
-                  className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-border bg-white text-gray-400 hover:border-red-300 hover:text-red-500 disabled:opacity-50"
+                  className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-border bg-surface text-faint hover:border-red-300 hover:text-red-500 disabled:opacity-50"
                 >
                   <Trash2 size={13} />
                 </button>
               )}
             </>
           )}
-          <span className="text-sm text-gray-600">{t("rules.toggle_label")}</span>
+          <span className="text-sm text-muted">{t("rules.toggle_label")}</span>
           <Toggle checked={config.layer_switch.enabled} onChange={toggleEnabled} disabled={saving} label={t("rules.toggle_label")} />
         </div>
       </div>
@@ -211,14 +211,14 @@ export default function Rules({ config, setConfig, status }: Props) {
       <div className="flex flex-1 overflow-hidden">
 
         {/* ══ Left: App Picker ══ */}
-        <div className="flex w-64 flex-shrink-0 flex-col border-r border-border/60 bg-background">
+        <div className="flex w-64 flex-shrink-0 flex-col border-r border-border bg-background">
 
           {/* Search + Refresh */}
-          <div className="flex items-center gap-2 border-b border-border/60 px-3 py-2.5">
+          <div className="flex items-center gap-2 border-b border-border px-3 py-2.5">
             <div className="relative flex-1">
-              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-gray-400" />
+              <Search size={13} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-faint" />
               <input
-                className="w-full rounded-lg border border-border bg-white py-1.5 pl-7 pr-2 text-sm placeholder-gray-400 focus:border-primary focus:outline-none"
+                className="w-full rounded-lg border border-border bg-surface py-1.5 pl-7 pr-2 text-sm text-ink placeholder-faint focus:border-accent focus:outline-none"
                 placeholder={t("rules.search_placeholder")}
                 value={query}
                 onChange={(e) => setQuery(e.target.value)}
@@ -229,7 +229,7 @@ export default function Rules({ config, setConfig, status }: Props) {
               disabled={loadingApps}
               title={t("common.refresh")}
               aria-label={t("common.refresh")}
-              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-border bg-white text-gray-500 hover:border-primary hover:text-primary disabled:opacity-50"
+              className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-border bg-surface text-muted hover:text-ink disabled:opacity-50"
             >
               <RefreshCw size={13} className={loadingApps ? "animate-spin" : ""} />
             </button>
@@ -239,10 +239,10 @@ export default function Rules({ config, setConfig, status }: Props) {
           <div className="flex-1 overflow-y-auto p-2">
             {loadingApps && apps.length === 0 ? (
               <div className="flex h-32 items-center justify-center">
-                <div className="h-5 w-5 animate-spin rounded-full border-2 border-border border-t-primary" />
+                <div className="h-5 w-5 animate-spin rounded-full border-2 border-border border-t-accent" />
               </div>
             ) : filtered.length === 0 ? (
-              <p className="mt-8 text-center text-xs text-gray-400">{t("rules.not_found")}</p>
+              <p className="mt-8 text-center text-xs text-faint">{t("rules.not_found")}</p>
             ) : (
               <ul className="space-y-0.5">
                 {filtered.map((app) => {
@@ -252,23 +252,23 @@ export default function Rules({ config, setConfig, status }: Props) {
                     <li key={app.exe}>
                       <button
                         onClick={() => { setSelected(isSelected ? null : app); setError(null); }}
-                        className={`group flex w-full items-center gap-2.5 rounded-lg px-3 py-2 text-left transition-all ${
+                        className={`group flex w-full items-center gap-2.5 rounded-pill px-3 py-2 text-left ${
                           isSelected
-                            ? "bg-primary text-white"
-                            : "hover:bg-white hover:shadow-sm text-gray-700"
+                            ? "bg-surface shadow-neu-sel"
+                            : "row-lift bg-transparent hover:bg-surface text-ink"
                         }`}
                       >
                         <AppAvatar name={app.display_name} icon={iconByExe[app.exe]} selected={isSelected} />
                         <div className="min-w-0 flex-1">
                           <div className="flex items-center gap-1">
-                            <span className={`truncate text-sm font-medium ${isSelected ? "text-white" : "text-gray-800"}`}>
+                            <span className={`truncate text-sm font-medium ${isSelected ? "text-accent-deep" : "text-ink"}`}>
                               {app.display_name}
                             </span>
                             {justAdded === app.exe && (
-                              <Check size={11} className="flex-shrink-0 text-emerald-400" />
+                              <Check size={11} className="flex-shrink-0 text-accent-deep" />
                             )}
                           </div>
-                          <span className={`block truncate font-mono text-[11px] ${isSelected ? "text-white/60" : "text-gray-400"}`}>
+                          <span className={`block truncate font-mono text-[11px] ${isSelected ? "text-accent-deep/60" : "text-faint"}`}>
                             {app.exe}
                           </span>
                         </div>
@@ -288,17 +288,17 @@ export default function Rules({ config, setConfig, status }: Props) {
         <div className="flex flex-1 flex-col overflow-hidden min-w-0">
 
           {/* Rule Builder */}
-          <div className="flex-shrink-0 border-b border-border/60 bg-white px-5 py-4 min-h-[80px]">
+          <div className="flex-shrink-0 border-b border-border px-5 py-4 min-h-[80px]">
             {selected ? (
               <div className="flex items-center gap-4 flex-wrap">
                 {/* App */}
                 <div className="flex items-center gap-3 min-w-0 flex-shrink-0">
                   <AppAvatar name={selected.display_name} icon={iconByExe[selected.exe]} size="lg" />
                   <div className="min-w-0">
-                    <div className="font-semibold text-gray-800 truncate max-w-[160px]">
+                    <div className="font-medium text-ink truncate max-w-[160px]">
                       {selected.display_name}
                     </div>
-                    <div className="font-mono text-[11px] text-gray-400 truncate max-w-[160px]">
+                    <div className="font-mono text-[11px] text-faint truncate max-w-[160px]">
                       {selected.exe}
                     </div>
                   </div>
@@ -308,11 +308,11 @@ export default function Rules({ config, setConfig, status }: Props) {
 
                 {/* Layer dropdown */}
                 <div className="flex items-center gap-2 flex-shrink-0">
-                  <span className="text-sm text-gray-600 whitespace-nowrap">{t("rules.layer")}</span>
+                  <span className="text-sm text-muted whitespace-nowrap">{t("rules.layer")}</span>
                   <select
                     value={layer}
                     onChange={(e) => setLayer(Number(e.target.value))}
-                    className="input !w-20 cursor-pointer"
+                    className="input !w-20 cursor-pointer !bg-surface font-mono"
                   >
                     {Array.from({ length: maxLayer + 1 }, (_, i) => (
                       <option key={i} value={i}>L{i}</option>
@@ -324,10 +324,10 @@ export default function Rules({ config, setConfig, status }: Props) {
                 <button
                   onClick={addRule}
                   disabled={saving || !targetKey}
-                  className="flex flex-shrink-0 items-center gap-2 rounded-lg bg-primary px-5 py-2 text-sm font-semibold text-white hover:bg-primary-dark disabled:opacity-60 transition-colors"
+                  className="btn-neu flex flex-shrink-0 items-center gap-2 rounded-full px-5 py-2 text-sm font-medium text-ink disabled:opacity-60"
                 >
                   {saving
-                    ? <div className="h-4 w-4 animate-spin rounded-full border-2 border-white/30 border-t-white" />
+                    ? <div className="h-4 w-4 animate-spin rounded-full border-2 border-border border-t-accent" />
                     : <Plus size={15} />
                   }
                   {t("rules.add")}
@@ -338,7 +338,7 @@ export default function Rules({ config, setConfig, status }: Props) {
                 )}
               </div>
             ) : (
-              <p className="flex h-full items-center text-sm text-gray-400">
+              <p className="flex h-full items-center text-sm text-faint">
                 {t("rules.select_hint")}
               </p>
             )}
@@ -349,12 +349,12 @@ export default function Rules({ config, setConfig, status }: Props) {
             {rules.length === 0 ? (
               <div className="flex h-full flex-col items-center justify-center gap-2 text-center">
                 <span className="text-5xl opacity-10">⌨</span>
-                <p className="text-sm text-gray-400">{t("rules.empty.title")}</p>
-                <p className="text-xs text-gray-300">{t("rules.empty.hint")}</p>
+                <p className="text-sm text-faint">{t("rules.empty.title")}</p>
+                <p className="text-xs text-disabled">{t("rules.empty.hint")}</p>
               </div>
             ) : (
               <div className="space-y-2">
-                <p className="mb-3 text-xs font-medium uppercase tracking-wide text-gray-400">
+                <p className="mb-3 text-xs font-medium uppercase tracking-wide text-faint">
                   {t("rules.count", { n: rules.length })}
                 </p>
                 {rules.map((rule, idx) => (
@@ -395,16 +395,6 @@ function buildDeviceTargets(config: AppConfig, appLayerDevices: DeviceInfo[]) {
   }
   return Array.from(targets.values()).sort((a, b) => a.label.localeCompare(b.label));
 }
-const AVATAR_COLORS = [
-  "bg-blue-500","bg-violet-500","bg-emerald-500","bg-amber-500","bg-rose-500",
-  "bg-cyan-500","bg-orange-500","bg-pink-500","bg-teal-500","bg-indigo-500",
-];
-
-function avatarColor(name: string) {
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = ((h * 31) + name.charCodeAt(i)) | 0;
-  return AVATAR_COLORS[Math.abs(h) % AVATAR_COLORS.length];
-}
 
 function AppAvatar({ name, icon, selected = false, size = "sm" }: {
   name: string; icon?: string; selected?: boolean; size?: "sm" | "lg";
@@ -418,9 +408,9 @@ function AppAvatar({ name, icon, selected = false, size = "sm" }: {
     );
   }
   return (
-    <div className={`flex flex-shrink-0 items-center justify-center rounded-lg font-bold text-white ${
+    <div className={`flex flex-shrink-0 items-center justify-center rounded-lg font-medium ${
       size === "lg" ? "text-base" : "text-sm"
-    } ${sizeClass} ${selected ? "opacity-90" : ""} ${avatarColor(name)}`}>
+    } ${sizeClass} ${selected ? "bg-accent-soft text-accent-deep" : "bg-plate text-muted"}`}>
       {(name[0] ?? "?").toUpperCase()}
     </div>
   );
@@ -436,24 +426,24 @@ function RuleCard({ rule, icon, onDelete, disabled }: {
   const matchKind = rule.exe ? "exe" : rule.title ? "title" : "path";
 
   return (
-    <div className="group flex items-center gap-4 rounded-xl bg-white px-4 py-3 shadow-card ring-1 ring-border hover:shadow-card-hover transition-all">
+    <div className="group row-lift flex items-center gap-4 rounded-card bg-surface px-4 py-3">
       <LayerBadge layer={rule.layer} />
       {icon && (
         <img src={icon} alt="" aria-hidden="true" className="h-7 w-7 flex-shrink-0 object-contain" draggable={false} />
       )}
       <div className="min-w-0 flex-1">
-        <div className="font-medium text-gray-800">{rule.name}</div>
+        <div className="font-medium text-ink">{rule.name}</div>
         <div className="mt-0.5 flex items-center gap-1.5">
-          <span className="rounded bg-background px-1.5 py-0.5 font-mono text-[10px] text-gray-400 ring-1 ring-border">
+          <span className="rounded bg-plate px-1.5 py-0.5 font-mono text-[10px] text-muted">
             {matchKind}
           </span>
-          <span className="truncate font-mono text-[11px] text-gray-500">{matchDesc}</span>
+          <span className="truncate font-mono text-[11px] text-muted">{matchDesc}</span>
         </div>
       </div>
       <button
         onClick={onDelete}
         disabled={disabled}
-        className="flex-shrink-0 rounded-lg p-1.5 text-gray-300 opacity-0 transition-all group-hover:opacity-100 hover:bg-red-50 hover:text-red-400 disabled:opacity-30"
+        className="flex-shrink-0 rounded-lg p-1.5 text-disabled opacity-0 transition-all group-hover:opacity-100 hover:bg-red-50 hover:text-red-400 disabled:opacity-30"
         title={t("common.delete")}
         aria-label={t("common.delete")}
       >

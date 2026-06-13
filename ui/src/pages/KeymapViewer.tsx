@@ -138,14 +138,14 @@ export default function KeymapViewer({
     <div className="p-6 w-full space-y-5">
       <div className="flex items-center justify-between">
         <div>
-          <h1 className="text-xl font-semibold text-gray-800">{t("keymap.title")}</h1>
-          <p className="mt-0.5 text-sm text-gray-500">{t("keymap.subtitle")}</p>
+          <h1 className="text-xl font-medium text-ink">{t("keymap.title")}</h1>
+          <p className="mt-0.5 text-sm text-muted">{t("keymap.subtitle")}</p>
         </div>
         <div className="flex items-center gap-2">
           <button
             onClick={refresh}
             disabled={busy}
-            className="flex items-center gap-2 rounded-lg border border-border bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-panel disabled:opacity-60 transition-colors"
+            className="btn-neu flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium text-ink disabled:opacity-60"
           >
             <RefreshCw size={15} className={busy ? "animate-spin" : ""} />
             {t("keymap.refresh")}
@@ -156,39 +156,41 @@ export default function KeymapViewer({
       {(error || studioError) && <Notice>{error ?? studioError}</Notice>}
 
       <div className="space-y-5">
-        <section className="rounded-xl bg-white shadow-card ring-1 ring-border p-4 space-y-3">
+        <section className="rounded-card bg-surface p-4 space-y-3">
           <div className="flex items-center justify-between">
-            <h2 className="text-sm font-semibold text-gray-800">{t("keymap.devices")}</h2>
-            <span className="text-xs text-gray-400">{devices.length}</span>
+            <h2 className="text-sm font-medium text-ink">{t("keymap.devices")}</h2>
+            <span className="text-xs text-faint font-mono">{devices.length}</span>
           </div>
 
           {devices.length === 0 ? (
-            <div className="rounded-lg bg-background px-4 py-8 text-center text-sm text-gray-400">
+            <div className="rounded-lg bg-background px-4 py-8 text-center text-sm text-faint">
               {studioScanning ? t("keymap.scanning") : t("keymap.no_devices")}
             </div>
           ) : (
-            <div className="flex max-h-36 gap-2 overflow-x-auto overflow-y-auto pb-1">
+            <div className="flex max-h-36 gap-2 overflow-x-auto overflow-y-auto p-1">
               {devices.map((device) => (
                 <button
                   key={device.id}
                   onClick={() => setSelectedId(device.id)}
-                  className={`min-w-64 max-w-72 rounded-lg px-3 py-3 text-left ring-1 transition-colors ${
-                    selectedId === device.id ? "bg-primary/5 ring-primary/30" : "bg-background ring-border hover:bg-panel"
+                  className={`min-w-64 max-w-72 rounded-pill px-3 py-3 text-left transition-colors ${
+                    selectedId === device.id
+                      ? "bg-plate shadow-neu-sel-in"
+                      : "bg-surface ring-1 ring-border hover:ring-disabled"
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className="truncate text-sm font-medium text-gray-800">{device.display_name}</span>
+                    <span className={`truncate text-sm font-medium ${selectedId === device.id ? "text-accent-deep" : "text-ink"}`}>{device.display_name}</span>
                     <StudioStatusBadge device={device} />
                   </div>
-                  <div className="mt-1 truncate font-mono text-[11px] text-gray-400">{device.port_name}</div>
-                  <div className="mt-1 text-[11px] text-gray-400">{t("keymap.connection_usb_serial")}</div>
+                  <div className="mt-1 truncate font-mono text-[11px] text-muted">{device.port_name}</div>
+                  <div className="mt-1 text-[11px] text-faint">{t("keymap.connection_usb_serial")}</div>
                 </button>
               ))}
             </div>
           )}
         </section>
 
-        <section className="w-full overflow-hidden rounded-xl bg-white shadow-card ring-1 ring-border p-5 space-y-4">
+        <section className="w-full overflow-hidden rounded-card bg-surface p-5 space-y-4">
           {!selected ? (
             <EmptyState icon={<Keyboard size={32} />} title={t("keymap.select_device")} />
           ) : selectedLocked ? (
@@ -199,7 +201,7 @@ export default function KeymapViewer({
             <EmptyState icon={<Keyboard size={32} />} title={reading ? t("keymap.reading") : t("keymap.ready_title")} body={reading ? undefined : t("keymap.ready_body")} />
           ) : (
             <>
-              <div className="flex items-center gap-1 border-b border-border/60 pb-3">
+              <div className="flex items-center gap-1 border-b border-background pb-3">
                 <ViewTab
                   active={viewMode === "keymap"}
                   onClick={() => setViewMode("keymap")}
@@ -241,8 +243,8 @@ function ViewTab({ active, onClick, icon, label }: {
   return (
     <button
       onClick={onClick}
-      className={`flex items-center gap-1.5 rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${
-        active ? "bg-primary/10 text-primary" : "text-gray-500 hover:bg-background"
+      className={`flex items-center gap-1.5 rounded-pill px-3 py-1.5 text-sm font-medium transition-colors ${
+        active ? "bg-plate text-accent-deep shadow-neu-sel-in" : "text-muted hover:bg-background hover:text-ink"
       }`}
     >
       {icon}
@@ -269,7 +271,7 @@ function KeymapContent({ snapshot, activeLayer, setActiveLayer, layer, reportedL
   return (
     <div className="min-w-0 space-y-4">
       <div>
-        <div className="text-sm font-semibold text-gray-800">{snapshot.device_name}</div>
+        <div className="text-sm font-medium text-ink">{snapshot.device_name}</div>
       </div>
       <div className="flex flex-wrap gap-2">
         {snapshot.layers.map((item, index) => {
@@ -279,13 +281,13 @@ function KeymapContent({ snapshot, activeLayer, setActiveLayer, layer, reportedL
               key={item.id}
               onClick={() => setActiveLayer(index)}
               title={live ? t("keymap.active_layer") : undefined}
-              className={`relative rounded-lg px-3 py-1.5 text-sm font-medium ring-1 transition-colors ${
-                activeLayer === index ? "bg-primary text-white ring-primary" : "bg-background text-gray-600 ring-border hover:bg-panel"
-              } ${live ? "ring-2 ring-emerald-400" : ""}`}
+              className={`relative rounded-pill px-3 py-1.5 text-sm font-medium ring-1 transition-colors ${
+                activeLayer === index ? "bg-plate text-accent ring-transparent shadow-neu-sel-in" : "bg-background text-muted ring-border hover:bg-plate hover:text-ink"
+              }`}
             >
               {item.name}
               {live && (
-                <span className="absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-emerald-400 ring-2 ring-white" />
+                <span className="animate-layer-pulse absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-accent ring-2 ring-white" />
               )}
             </button>
           );
@@ -301,11 +303,11 @@ function KeymapContent({ snapshot, activeLayer, setActiveLayer, layer, reportedL
             const binding = bindingsByPosition.get(key.position);
             return (
               <>
-                <div className="w-full truncate text-[11px] font-semibold leading-tight text-gray-800">
+                <div className="w-full truncate text-[11px] font-medium leading-tight text-ink">
                   {binding?.primary_label ?? "--"}
                 </div>
                 {binding?.primary_label && (
-                  <div className="absolute bottom-1 right-1 text-[9px] leading-none text-gray-500">
+                  <div className="absolute bottom-1 right-1 font-mono text-[9px] leading-none text-faint">
                     {`#${key.position}`}
                   </div>
                 )}
@@ -431,27 +433,27 @@ function HeatmapContent({ snapshot, statsUid }: {
             <button
               key={item.value}
               onClick={() => setPeriod(item.value)}
-              className={`rounded-lg px-3 py-1.5 text-sm font-medium ring-1 transition-colors ${
+              className={`rounded-pill px-3 py-1.5 text-sm font-medium ring-1 transition-colors ${
                 period === item.value
-                  ? "bg-primary text-white ring-primary"
-                  : "bg-background text-gray-600 ring-border hover:bg-panel"
+                  ? "bg-plate text-accent-deep ring-transparent shadow-neu-sel-in"
+                  : "bg-background text-muted ring-border hover:bg-plate hover:text-ink"
               }`}
             >
               {t(item.key)}
             </button>
           ))}
         </div>
-        <div className="flex flex-wrap items-center gap-4 text-sm text-gray-600">
+        <div className="flex flex-wrap items-center gap-4 text-sm text-muted">
           <span>
             {t("stats.total")}:{" "}
-            <span className="font-semibold text-gray-800">
+            <span className="font-mono font-medium text-ink">
               {(summary?.total ?? 0).toLocaleString()}
             </span>
           </span>
           {balance && (
             <span>
               {t("stats.balance")}:{" "}
-              <span className="font-semibold text-gray-800">
+              <span className="font-mono font-medium text-ink">
                 {balance.left}% / {balance.right}%
               </span>
             </span>
@@ -462,7 +464,7 @@ function HeatmapContent({ snapshot, statsUid }: {
       {statsError && <Notice>{statsError}</Notice>}
 
       {summary && summary.total === 0 && (
-        <p className="text-sm text-gray-400">{t("stats.no_data")}</p>
+        <p className="text-sm text-faint">{t("stats.no_data")}</p>
       )}
 
       {snapshot.selected_layout_keys.length === 0 ? (
@@ -483,10 +485,10 @@ function HeatmapContent({ snapshot, statsUid }: {
             const count = counts.get(key.position) ?? 0;
             return (
               <>
-                <div className="w-full truncate text-[10px] font-medium leading-tight text-gray-700">
+                <div className="w-full truncate text-[10px] font-medium leading-tight text-muted">
                   {labelByPosition.get(key.position) ?? ""}
                 </div>
-                <div className="w-full truncate text-[10px] font-semibold leading-tight text-gray-900">
+                <div className="w-full truncate font-mono text-[10px] font-medium leading-tight text-ink">
                   {count > 0 ? count.toLocaleString() : ""}
                 </div>
               </>
@@ -496,19 +498,19 @@ function HeatmapContent({ snapshot, statsUid }: {
       )}
 
       {topKeys.length > 0 && (
-        <div className="flex flex-wrap items-center gap-2 text-xs text-gray-500">
-          <span className="font-medium uppercase tracking-wide text-gray-400">
+        <div className="flex flex-wrap items-center gap-2 text-xs text-muted">
+          <span className="font-medium uppercase tracking-wide text-faint">
             {t("stats.top")}
           </span>
           {topKeys.map((entry) => (
             <span
               key={entry.position}
-              className="inline-flex items-center gap-1 rounded-md bg-background px-2 py-0.5 ring-1 ring-border"
+              className="inline-flex items-center gap-1 rounded-md bg-plate px-2 py-0.5"
             >
-              <span className="font-semibold text-gray-700">
+              <span className="font-medium text-ink">
                 {labelByPosition.get(entry.position) ?? `#${entry.position}`}
               </span>
-              <span className="font-mono text-gray-500">{entry.count.toLocaleString()}</span>
+              <span className="font-mono text-muted">{entry.count.toLocaleString()}</span>
             </span>
           ))}
         </div>
@@ -517,16 +519,16 @@ function HeatmapContent({ snapshot, statsUid }: {
   );
 }
 
-/** White → primary blue → orange → red, used for per-key heat coloring. */
+/** White → gauge gray → accent → red, used for per-key heat coloring. */
 function heatColor(ratio: number): string {
   const clamped = Math.max(0, Math.min(1, ratio));
   if (clamped < 0.5) {
     const a = clamped / 0.5;
-    return `rgba(91, 112, 146, ${(0.15 + 0.45 * a).toFixed(3)})`;
+    return `rgba(140, 149, 163, ${(0.15 + 0.45 * a).toFixed(3)})`;
   }
   if (clamped < 0.8) {
     const a = (clamped - 0.5) / 0.3;
-    return `rgba(217, 119, 6, ${(0.4 + 0.35 * a).toFixed(3)})`;
+    return `rgb(var(--accent-rgb) / ${(0.4 + 0.35 * a).toFixed(3)})`;
   }
   const a = (clamped - 0.8) / 0.2;
   return `rgba(239, 68, 68, ${(0.55 + 0.35 * a).toFixed(3)})`;
@@ -537,19 +539,19 @@ function StudioStatusBadge({ device }: { device: StudioDeviceStatus }) {
   const ok = device.keymap_viewer_status === "available";
   const locked = device.keymap_viewer_status === "locked";
   const className = ok
-    ? "bg-emerald-100 text-emerald-700"
+    ? "bg-accent-soft text-accent-deep"
     : locked
       ? "bg-amber-100 text-amber-700"
-      : "bg-gray-100 text-gray-500";
+      : "bg-plate text-muted";
   return <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${className}`}>{t(`keymap.viewer.${device.keymap_viewer_status}` as TranslationKey)}</span>;
 }
 
 function EmptyState({ icon, title, body }: { icon: ReactNode; title: string; body?: string }) {
   return (
     <div className="flex min-h-[360px] flex-col items-center justify-center text-center">
-      <div className="mb-3 text-gray-300">{icon}</div>
-      <div className="text-sm font-semibold text-gray-700">{title}</div>
-      {body && <div className="mt-1 max-w-md text-sm text-gray-400">{body}</div>}
+      <div className="mb-3 text-disabled">{icon}</div>
+      <div className="text-sm font-medium text-ink">{title}</div>
+      {body && <div className="mt-1 max-w-md text-sm text-faint">{body}</div>}
     </div>
   );
 }

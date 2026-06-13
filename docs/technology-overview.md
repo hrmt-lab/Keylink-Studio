@@ -265,16 +265,16 @@ RawHID Host is a resident Windows app. React and TypeScript build the UI, Tauri 
 
 The ZMK firmware side is not included in this repository. It must implement the compatible Raw HID receiver described in [Packet Specification](packet-spec.md).
 
-## Current implementation notes
+## 実装上の注記
 
-- Foreground app changes are detected instantly via `SetWinEventHook` (`foreground.rs`). Interval polling remains as a fallback.
-- App icons shown in Layer Rules are extracted from exe files via the Windows Shell API (`icon.rs`) and delivered to the UI as PNG data URLs.
-- Launch at Windows login is managed through the HKCU Run registry key (`startup.rs`).
-- The app enforces a single instance via `tauri-plugin-single-instance`; a second launch focuses the existing window.
-- `ui/src/components/Ui.tsx` contains shared UI primitives such as page headers, primary/secondary buttons, setting rows, section cards, notices, and a saved indicator.
-- `ui/src/lib/format.ts` and `ui/src/hooks/useConfigSection.ts` hold shared formatting helpers and the common settings draft/save hook.
-- Settings pages show errors only on save failure. Save success does not show a success message.
-- Dashboard quick toggles save immediately and roll back UI state if saving fails.
-- AI Usage has an app-level worker owned outside the monitoring loop, so the UI can refresh usage even when monitoring is stopped.
-- ZMK Studio support lives in `crates/rawhid-host-core/src/studio.rs`. It is separate from Host Link HID packet handling.
-- Keymap Viewer caches keymap snapshots by Studio device id and renders the selected physical layout when available, with grid fallback otherwise.
+- 前面アプリの切り替えは `SetWinEventHook` (`foreground.rs`) で即時検知します。間隔ポーリングはフォールバックとして残ります。
+- Layer Rules に表示されるアプリアイコンは Windows Shell API (`icon.rs`) で exe ファイルから抽出し、PNG data URL として UI に渡します。
+- Windows ログイン時起動は HKCU Run レジストリキー (`startup.rs`) で管理します。
+- アプリは `tauri-plugin-single-instance` でシングルインスタンスを強制します。2 つ目の起動では既存ウィンドウが前面化されます。
+- `ui/src/components/Ui.tsx` にページヘッダー、プライマリ/セカンダリボタン、設定行、セクションカード、通知、保存インジケーターなどの共通 UI 部品があります。
+- `ui/src/lib/format.ts` と `ui/src/hooks/useConfigSection.ts` に共通フォーマットヘルパーと設定ページの draft / 保存 hook があります。
+- 設定ページは保存失敗時のみエラーを表示します。保存成功時に成功メッセージは表示しません。
+- ダッシュボードのクイックトグルは即時保存し、保存失敗時は UI 状態をロールバックします。
+- AI Usage はモニタリングループの外にアプリレベルの worker を持つため、監視停止中でも UI から使用量を更新できます。
+- ZMK Studio サポートは `crates/rawhid-host-core/src/studio.rs` にあります。Host Link HID packet 処理とは独立しています。
+- Keymap Viewer は Studio device id 単位でキーマップスナップショットをキャッシュし、利用可能な場合は選択した physical layout を表示します。利用できない場合はグリッド表示にフォールバックします。

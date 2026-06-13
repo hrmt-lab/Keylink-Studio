@@ -55,12 +55,12 @@ export default function TimeSync({ config, setConfig }: Props) {
 
       {error && <ErrorNotice message={error} />}
 
-      <div className="rounded-xl bg-white shadow-card ring-1 ring-border divide-y divide-border/60">
+      <div className="rounded-card bg-surface divide-y divide-background">
         {/* Enable */}
         <div className="flex items-center justify-between px-5 py-4">
           <div>
-            <div className="text-sm font-medium text-gray-800">{t("timesync.enable")}</div>
-            <div className="text-xs text-gray-500 mt-0.5">{t("timesync.enable.desc")}</div>
+            <div className="text-sm font-medium text-ink">{t("timesync.enable")}</div>
+            <div className="text-xs text-muted mt-0.5">{t("timesync.enable.desc")}</div>
           </div>
           <Toggle
             checked={draft.enabled}
@@ -71,7 +71,7 @@ export default function TimeSync({ config, setConfig }: Props) {
 
         {/* Format */}
         <div className="px-5 py-4">
-          <div className="text-sm font-medium text-gray-800 mb-3">{t("timesync.format")}</div>
+          <div className="text-sm font-medium text-ink mb-3">{t("timesync.format")}</div>
           <div className="grid grid-cols-2 gap-2">
             {FORMAT_OPTIONS.map((opt) => (
               <button
@@ -79,12 +79,12 @@ export default function TimeSync({ config, setConfig }: Props) {
                 onClick={() => setDraft({ ...draft, format_hint: opt.value })}
                 className={`flex items-center justify-between rounded-lg border px-3 py-2.5 text-sm text-left transition-all ${
                   draft.format_hint === opt.value
-                    ? "border-primary bg-primary/5 text-primary ring-1 ring-primary/30"
-                    : "border-border text-gray-600 hover:border-secondary hover:bg-background"
+                    ? "border-accent bg-accent-soft text-ink"
+                    : "border-border text-muted hover:bg-background hover:text-ink"
                 }`}
               >
                 <span>{t(opt.labelKey as Parameters<typeof t>[0])}</span>
-                <span className="font-mono text-xs text-gray-400">{opt.example}</span>
+                <span className="font-mono text-xs text-faint">{opt.example}</span>
               </button>
             ))}
           </div>
@@ -93,8 +93,8 @@ export default function TimeSync({ config, setConfig }: Props) {
         {/* Clock mode */}
         <div className="flex items-center justify-between px-5 py-4">
           <div>
-            <div className="text-sm font-medium text-gray-800">{t("timesync.clock_mode")}</div>
-            <div className="text-xs text-gray-500 mt-0.5">{t("timesync.clock_mode.desc")}</div>
+            <div className="text-sm font-medium text-ink">{t("timesync.clock_mode")}</div>
+            <div className="text-xs text-muted mt-0.5">{t("timesync.clock_mode.desc")}</div>
           </div>
           <Toggle
             checked={draft.clock_mode === "12h"}
@@ -108,8 +108,8 @@ export default function TimeSync({ config, setConfig }: Props) {
         {/* Sync interval */}
         <div className="flex items-center justify-between px-5 py-4">
           <div>
-            <div className="text-sm font-medium text-gray-800">{t("timesync.sync_interval")}</div>
-            <div className="text-xs text-gray-500 mt-0.5">{t("timesync.sync_interval.desc")}</div>
+            <div className="text-sm font-medium text-ink">{t("timesync.sync_interval")}</div>
+            <div className="text-xs text-muted mt-0.5">{t("timesync.sync_interval.desc")}</div>
           </div>
           <div className="flex items-center gap-2">
             <input
@@ -123,17 +123,17 @@ export default function TimeSync({ config, setConfig }: Props) {
                   periodic_sync_sec: Math.max(0, Number(e.target.value)),
                 })
               }
-              className="input !w-24 text-right"
+              className="input !w-24 text-right font-mono"
             />
-            <span className="text-sm text-gray-500">{t("timesync.sync_interval.unit")}</span>
+            <span className="text-sm text-muted">{t("timesync.sync_interval.unit")}</span>
           </div>
         </div>
 
         {/* Timezone */}
         <div className="flex items-center justify-between px-5 py-4">
           <div>
-            <div className="text-sm font-medium text-gray-800">{t("timesync.timezone")}</div>
-            <div className="text-xs text-gray-500 mt-0.5">{t("timesync.timezone.desc")}</div>
+            <div className="text-sm font-medium text-ink">{t("timesync.timezone")}</div>
+            <div className="text-xs text-muted mt-0.5">{t("timesync.timezone.desc")}</div>
           </div>
           <select
             value={draft.tz_offset_min == null ? "" : String(draft.tz_offset_min)}
@@ -144,7 +144,7 @@ export default function TimeSync({ config, setConfig }: Props) {
               })
             }
             aria-label={t("timesync.timezone")}
-            className="input !w-32"
+            className="input !w-32 font-mono"
           >
             <option value="">{t("timesync.timezone.auto")}</option>
             {(draft.tz_offset_min == null || TZ_PRESETS_MIN.includes(draft.tz_offset_min)

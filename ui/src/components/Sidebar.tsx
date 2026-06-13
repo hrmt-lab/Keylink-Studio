@@ -10,7 +10,6 @@ import {
   Settings,
   type LucideIcon,
 } from "lucide-react";
-import appIcon from "../assets/app-icon.png";
 import type { MonitorStatus, Page } from "../types";
 import { useLang, type TranslationKey } from "../i18n";
 
@@ -48,23 +47,18 @@ export function Sidebar({ currentPage, onNavigate, status }: Props) {
     prevLayer.current = status.current_layer;
     if (status.current_layer === null) return;
     setPulse(true);
-    const timer = setTimeout(() => setPulse(false), 900);
+    const timer = setTimeout(() => setPulse(false), 700);
     return () => clearTimeout(timer);
   }, [status.current_layer]);
 
   return (
-    <aside className="flex w-60 flex-col bg-primary text-white select-none flex-shrink-0">
-      {/* Logo */}
-      <div className="flex items-center gap-3 px-5 py-5 border-b border-white/10">
-        <div className="flex h-12 w-12 items-center justify-center overflow-hidden rounded-xl bg-white/15 shadow-sm ring-1 ring-white/10">
-          <img
-            src={appIcon}
-            alt=""
-            aria-hidden="true"
-            className="h-12 w-12 object-cover"
-          />
+    <aside className="flex w-60 flex-col bg-surface text-ink select-none flex-shrink-0 border-r border-border">
+      {/* Logo: white "power button" circle with the accent keyboard glyph */}
+      <div className="flex items-center gap-3 px-5 py-5 border-b border-background">
+        <div className="flex h-11 w-11 items-center justify-center rounded-full bg-surface shadow-neu-sel">
+          <Keyboard size={22} className="text-accent" aria-hidden="true" />
         </div>
-        <span className="text-sm font-semibold">RawHID Host</span>
+        <span className="text-sm font-medium">RawHID Host</span>
       </div>
 
       {/* Navigation */}
@@ -76,15 +70,15 @@ export function Sidebar({ currentPage, onNavigate, status }: Props) {
             <button
               key={item.id}
               onClick={() => onNavigate(item.id)}
-              className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-all ${
+              className={`flex w-full items-center gap-3 rounded-pill px-3 py-2.5 text-sm font-medium ${
                 active
-                  ? "bg-white/20 text-white"
-                  : "text-white/60 hover:bg-white/10 hover:text-white/90"
+                  ? "bg-plate text-accent-deep shadow-neu-sel-in"
+                  : "nav-item text-muted hover:bg-plate hover:text-ink"
               }`}
             >
               <Icon
                 size={16}
-                className={active ? "text-white" : "text-white/60"}
+                className={active ? "text-accent" : "nav-icon text-faint"}
               />
               {t(item.labelKey)}
             </button>
@@ -93,22 +87,20 @@ export function Sidebar({ currentPage, onNavigate, status }: Props) {
       </nav>
 
       {/* Footer */}
-      <div className="border-t border-white/10 px-4 py-4 space-y-3">
+      <div className="border-t border-background px-4 py-4 space-y-3">
         {/* Status */}
         <div className="flex items-center gap-2.5">
           <span
             className={`h-2 w-2 rounded-full flex-shrink-0 ${
-              status.running
-                ? "bg-emerald-400 shadow-[0_0_6px_rgba(52,211,153,0.6)]"
-                : "bg-white/30"
+              status.running ? "bg-accent" : "bg-disabled"
             } ${pulse ? "animate-layer-pulse" : ""}`}
           />
           <div className="min-w-0">
-            <div className="text-xs font-medium text-white/80 truncate">
+            <div className="text-xs font-medium text-ink truncate">
               {status.running ? t("sidebar.running") : t("sidebar.stopped")}
             </div>
             {status.running && (
-              <div className="text-[10px] text-white/40 truncate">
+              <div className="text-[10px] text-faint truncate">
                 {t("sidebar.devices_connected", {
                   n: status.connected_devices,
                 })}
@@ -116,7 +108,7 @@ export function Sidebar({ currentPage, onNavigate, status }: Props) {
             )}
             {status.last_error && !status.running && (
               <div
-                className="text-[10px] text-red-300 truncate"
+                className="text-[10px] text-red-500 truncate"
                 title={status.last_error}
               >
                 {t("sidebar.error")}
@@ -131,19 +123,19 @@ export function Sidebar({ currentPage, onNavigate, status }: Props) {
             onClick={() => setLang("ja")}
             className={`rounded px-2 py-0.5 text-xs font-medium transition-colors ${
               lang === "ja"
-                ? "bg-white/20 text-white"
-                : "text-white/40 hover:text-white/70"
+                ? "bg-plate text-accent-deep shadow-neu-sel-in"
+                : "text-faint hover:text-ink"
             }`}
           >
             JP
           </button>
-          <span className="text-white/20 text-xs">/</span>
+          <span className="text-disabled text-xs">/</span>
           <button
             onClick={() => setLang("en")}
             className={`rounded px-2 py-0.5 text-xs font-medium transition-colors ${
               lang === "en"
-                ? "bg-white/20 text-white"
-                : "text-white/40 hover:text-white/70"
+                ? "bg-plate text-accent-deep shadow-neu-sel-in"
+                : "text-faint hover:text-ink"
             }`}
           >
             EN
@@ -153,4 +145,3 @@ export function Sidebar({ currentPage, onNavigate, status }: Props) {
     </aside>
   );
 }
-

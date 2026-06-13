@@ -2,6 +2,16 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Accent palette as RGB triplets so Tailwind can apply alpha modifiers.
+   Overridden at runtime from the user's accent-color setting (lib/theme.ts). */
+:root {
+  --accent-rgb: 239 91 37;
+  --accent-deep-rgb: 213 78 30;
+  --accent-soft-rgb: 250 236 231;
+  --accent-shade-rgb: 167 64 26;
+  --accent-tint-rgb: 244 143 107;
+}
+
 * {
   box-sizing: border-box;
   margin: 0;
@@ -14,9 +24,9 @@ html, body, #root {
 }
 
 body {
-  font-family: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  background-color: #EEEDEC;
-  color: #2D3748;
+  font-family: "Zen Kaku Gothic New", "Yu Gothic UI", "Segoe UI", sans-serif;
+  background-color: #F1F3F6;
+  color: #21242A;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
@@ -30,11 +40,11 @@ body {
   background: transparent;
 }
 ::-webkit-scrollbar-thumb {
-  background: #CCCAC8;
+  background: #C2C8D1;
   border-radius: 3px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #AEBBD0;
+  background: #A5AAB2;
 }
 
 /* Transition */
@@ -46,23 +56,100 @@ body {
 
 /* Focus ring */
 :focus-visible {
-  outline: 2px solid #5B7092;
+  outline: 2px solid rgb(var(--accent-rgb));
   outline-offset: 2px;
 }
 
-/* Layer-change pulse (sidebar status dot) */
+/* Raised (pressable) element: convex at rest, sinks while pressed.
+   Only works on the #F1F3F6 page background, not inside white cards. */
+.btn-neu {
+  background-color: #FFFFFF;
+  box-shadow: 4px 4px 9px #CDD4DD, -4px -4px 9px #FFFFFF;
+  transition: box-shadow 0.12s ease, transform 0.12s ease;
+}
+.btn-neu:active:not(:disabled) {
+  box-shadow: inset 4px 4px 9px #CDD4DD, inset -4px -4px 9px #FFFFFF;
+  transform: scale(0.97);
+}
+
+/* Editable list rows float on hover (read-only rows stay flat). */
+.row-lift {
+  transition: box-shadow 0.15s ease, transform 0.15s ease;
+}
+.row-lift:hover {
+  box-shadow: 4px 4px 9px #CDD4DD, -4px -4px 9px #FFFFFF;
+  transform: translateY(-1px);
+}
+
+/* Sidebar nav hover: row slides right, icon wiggles once and lights up.
+   Applied to non-selected items only (selected stays put, icon stays orange). */
+@keyframes nav-wiggle {
+  0%   { transform: rotate(0); }
+  25%  { transform: rotate(-11deg); }
+  55%  { transform: rotate(9deg); }
+  80%  { transform: rotate(-4deg); }
+  100% { transform: rotate(0); }
+}
+.nav-item {
+  transition: background-color 0.15s ease, color 0.15s ease, transform 0.15s ease;
+}
+.nav-item:hover {
+  transform: translateX(3px);
+}
+.nav-item:hover .nav-icon {
+  animation: nav-wiggle 0.45s ease;
+  color: rgb(var(--accent-rgb));
+}
+
+/* Toggle knob: bouncy slide, squishes sideways while pressed. */
+.toggle-knob {
+  transition:
+    left 0.18s cubic-bezier(0.4, 1.5, 0.6, 1),
+    width 0.12s ease,
+    background-color 0.18s ease;
+}
+
+/* Gauge fill */
+.gauge-fill {
+  transition: width 0.5s cubic-bezier(0.2, 0.8, 0.3, 1), background-color 0.3s ease;
+}
+
+/* Layer-change pulse (status dots): orange pulse + spreading ring. */
 @keyframes layer-pulse {
-  0%   { transform: scale(1);   box-shadow: 0 0 0 0 rgba(52, 211, 153, 0.55); }
-  50%  { transform: scale(1.5); box-shadow: 0 0 0 5px rgba(52, 211, 153, 0); }
-  100% { transform: scale(1);   box-shadow: 0 0 0 0 rgba(52, 211, 153, 0); }
+  0%   { transform: scale(1);   box-shadow: 0 0 0 0 rgb(var(--accent-rgb) / 0.55); }
+  50%  { transform: scale(1.4); box-shadow: 0 0 0 5px rgb(var(--accent-rgb) / 0); }
+  100% { transform: scale(1);   box-shadow: 0 0 0 0 rgb(var(--accent-rgb) / 0); }
 }
 .animate-layer-pulse {
-  animation: layer-pulse 0.9s ease-out;
+  animation: layer-pulse 0.7s ease-out;
+}
+
+/* Saved feedback: check mark fades in rising 3px, holds, fades out. */
+@keyframes saved-pop {
+  0%   { opacity: 0; transform: translateY(3px); }
+  15%  { opacity: 1; transform: translateY(0); }
+  78%  { opacity: 1; transform: translateY(0); }
+  100% { opacity: 0; transform: translateY(0); }
+}
+.animate-saved-pop {
+  animation: saved-pop 1.6s ease forwards;
+}
+
+/* Layer badge swap: fade out, swap text, fade in (140ms each way). */
+.badge-swap {
+  transition: opacity 0.14s ease;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
 }
 
 /* Input component */
 .input {
-  @apply block w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-gray-800 placeholder-gray-400 transition-colors;
-  @apply focus:border-primary focus:outline-none focus:ring-1 focus:ring-primary/30;
+  @apply block w-full rounded-lg border border-border bg-background px-3 py-2 text-sm text-ink placeholder-faint transition-colors;
+  @apply focus:border-accent focus:outline-none focus:ring-1 focus:ring-accent/30;
   @apply disabled:opacity-50 disabled:cursor-not-allowed;
 }

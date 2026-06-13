@@ -1,64 +1,259 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="720" viewBox="0 0 1200 720">
+<svg xmlns="http://www.w3.org/2000/svg" width="900" height="580" viewBox="0 0 900 580" font-family="'Hiragino Sans','Meiryo','Segoe UI',sans-serif">
 <defs>
-<style>
-  .bg{fill:#f3f4f6}.side{fill:#5f789c}.card{fill:#fff;stroke:#d7d7d7;stroke-width:1.5}.muted{fill:#8b95a6}.text{fill:#1f2937;font-family:'Segoe UI','Yu Gothic UI',sans-serif}.title{font-size:24px;font-weight:700}.sub{font-size:14px;fill:#667085}.nav{font-size:15px;fill:#e9eef7;font-weight:600}.label{font-size:13px}.small{font-size:11px}.btn{fill:#5f789c}.btn2{fill:#fff;stroke:#d1d5db}.pill{fill:#e5e7eb}.ok{fill:#bff7d7}.key{fill:#fff;stroke:#d1d5db}.panel{fill:#eeeeee;stroke:#d1d5db}.selected{fill:#eef3fa;stroke:#b7c3d7}.ghost{fill:#f1f1f1;stroke:#d0d0d0}.option{fill:#fff;stroke:#d1d5db}.optionSel{fill:#f3f7ff;stroke:#5f789c;stroke-width:1.5}.mono{font-family:'Segoe UI Mono','Consolas',monospace}
-</style>
+  <filter id="s" x="-6%" y="-8%" width="112%" height="120%">
+    <feDropShadow dx="0" dy="2" stdDeviation="4" flood-color="#BCC7D4" flood-opacity="0.45"/>
+  </filter>
+  <!-- inset shadow for keyboard plate (凹) -->
+  <filter id="inset">
+    <feOffset dx="0" dy="1"/>
+    <feGaussianBlur stdDeviation="2"/>
+    <feComposite in2="SourceGraphic" operator="arithmetic" k2="-1" k3="1"/>
+    <feColorMatrix type="saturate" values="0"/>
+  </filter>
 </defs>
-<rect class="bg" x="0" y="0" width="1200" height="720"/>
-<rect class="side" x="0" y="0" width="210" height="720"/>
-<rect x="20" y="28" width="48" height="48" rx="12" fill="#6f86a8" stroke="#8da0bd"/>
-<text class="text nav" x="82" y="59">RawHID Host</text>
-<text class="text nav" x="24" y="132">▦  ダッシュボード</text>
-<text class="text nav" x="24" y="174">☰  レイヤールール</text>
-<text class="text nav" x="24" y="216">◷  時刻同期</text>
-<text class="text nav" x="24" y="258">⌁  AI 使用量</text>
-<text class="text nav" x="24" y="300">⌨  キーマップ表示</text>
-<text class="text nav" x="24" y="342">🔧  デバイス</text>
-<text class="text nav" x="24" y="384">⚙  設定</text>
-<circle cx="24" cy="682" r="5" fill="#b7c3d7"/><text class="text nav" x="40" y="688">停止中</text>
-<text class="text title" x="260" y="64">キーマップ表示</text>
-<text class="text sub" x="260" y="88">ZMK Studio対応キーボードのキーマップを表示します。</text>
-<rect class="btn2" x="1030" y="42" width="88" height="44" rx="8"/><text class="text" x="1060" y="70" font-size="15" font-weight="700">更新</text>
 
-<rect class="card" x="260" y="126" width="850" height="132" rx="12"/>
-<text class="text" x="286" y="160" font-size="17" font-weight="700">Studioデバイス</text><text class="text sub" x="1080" y="160" text-anchor="end">2</text>
-<rect class="selected" x="286" y="180" width="260" height="58" rx="8"/><text class="text" x="306" y="205" font-size="15" font-weight="700">KeyboardA</text><text class="text sub" x="306" y="226">USB Serial</text><rect class="ok" x="460" y="194" width="68" height="24" rx="12"/><text class="text small" x="476" y="210" fill="#047857">Available</text>
-<rect class="ghost" x="558" y="180" width="260" height="58" rx="8"/><text class="text" x="578" y="205" font-size="15" font-weight="700">KeyboardB</text><text class="text sub" x="578" y="226">USB Serial</text><rect class="ok" x="732" y="194" width="68" height="24" rx="12"/><text class="text small" x="748" y="210" fill="#047857">Available</text>
+<rect width="900" height="580" fill="#F1F3F6"/>
 
-<rect class="card" x="260" y="286" width="850" height="360" rx="12"/>
-<text class="text" x="286" y="322" font-size="18" font-weight="700">KeyboardA</text>
-<rect class="btn" x="286" y="348" width="58" height="36" rx="8"/><text x="306" y="371" fill="#fff" font-size="14" font-weight="700">Base</text><rect class="btn2" x="354" y="348" width="70" height="36" rx="8"/><text class="text" x="372" y="371" font-size="14">Layer1</text><rect class="btn2" x="434" y="348" width="70" height="36" rx="8"/><text class="text" x="452" y="371" font-size="14">Layer2</text>
-<rect class="panel" x="286" y="404" width="790" height="210" rx="12"/>
-<g transform="translate(330 430) scale(1.2)">
-<rect class="key" x="0" y="0" width="42" height="34" rx="6"/><text class="text small" x="21" y="20" text-anchor="middle" font-weight="700">ESC</text><text class="text small" x="36" y="30" text-anchor="end" fill="#667085">#0</text>
-<rect class="key" x="48" y="0" width="42" height="34" rx="6"/><text class="text small" x="69" y="20" text-anchor="middle" font-weight="700">1</text><text class="text small" x="84" y="30" text-anchor="end" fill="#667085">#1</text>
-<rect class="key" x="96" y="0" width="42" height="34" rx="6"/><text class="text small" x="117" y="20" text-anchor="middle" font-weight="700">2</text><text class="text small" x="132" y="30" text-anchor="end" fill="#667085">#2</text>
-<rect class="key" x="144" y="0" width="42" height="34" rx="6"/><text class="text small" x="165" y="20" text-anchor="middle" font-weight="700">3</text><text class="text small" x="180" y="30" text-anchor="end" fill="#667085">#3</text>
-<rect class="key" x="192" y="0" width="42" height="34" rx="6"/><text class="text small" x="213" y="20" text-anchor="middle" font-weight="700">4</text><text class="text small" x="228" y="30" text-anchor="end" fill="#667085">#4</text>
-<rect class="key" x="240" y="0" width="42" height="34" rx="6"/><text class="text small" x="261" y="20" text-anchor="middle" font-weight="700">5</text><text class="text small" x="276" y="30" text-anchor="end" fill="#667085">#5</text>
-<rect class="key" x="288" y="0" width="42" height="34" rx="6"/><text class="text small" x="309" y="20" text-anchor="middle" font-weight="700">6</text><text class="text small" x="324" y="30" text-anchor="end" fill="#667085">#6</text>
-<rect class="key" x="336" y="0" width="42" height="34" rx="6"/><text class="text small" x="357" y="20" text-anchor="middle" font-weight="700">7</text><text class="text small" x="372" y="30" text-anchor="end" fill="#667085">#7</text>
-<rect class="key" x="384" y="0" width="42" height="34" rx="6"/><text class="text small" x="405" y="20" text-anchor="middle" font-weight="700">8</text><text class="text small" x="420" y="30" text-anchor="end" fill="#667085">#8</text>
-<rect class="key" x="432" y="0" width="66" height="34" rx="6"/><text class="text small" x="465" y="20" text-anchor="middle" font-weight="700">BSPC</text><text class="text small" x="492" y="30" text-anchor="end" fill="#667085">#9</text>
-<rect class="key" x="0" y="40" width="62" height="34" rx="6"/><text class="text small" x="31" y="60" text-anchor="middle" font-weight="700">TAB</text><text class="text small" x="56" y="70" text-anchor="end" fill="#667085">#10</text>
-<rect class="key" x="68" y="40" width="42" height="34" rx="6"/><text class="text small" x="89" y="60" text-anchor="middle" font-weight="700">Q</text><text class="text small" x="104" y="70" text-anchor="end" fill="#667085">#11</text>
-<rect class="key" x="116" y="40" width="42" height="34" rx="6"/><text class="text small" x="137" y="60" text-anchor="middle" font-weight="700">W</text><text class="text small" x="152" y="70" text-anchor="end" fill="#667085">#12</text>
-<rect class="key" x="164" y="40" width="42" height="34" rx="6"/><text class="text small" x="185" y="60" text-anchor="middle" font-weight="700">E</text><text class="text small" x="200" y="70" text-anchor="end" fill="#667085">#13</text>
-<rect class="key" x="212" y="40" width="42" height="34" rx="6"/><text class="text small" x="233" y="60" text-anchor="middle" font-weight="700">R</text><text class="text small" x="248" y="70" text-anchor="end" fill="#667085">#14</text>
-<rect class="key" x="260" y="40" width="42" height="34" rx="6"/><text class="text small" x="281" y="60" text-anchor="middle" font-weight="700">T</text><text class="text small" x="296" y="70" text-anchor="end" fill="#667085">#15</text>
-<rect class="key" x="308" y="40" width="42" height="34" rx="6"/><text class="text small" x="329" y="60" text-anchor="middle" font-weight="700">Y</text><text class="text small" x="344" y="70" text-anchor="end" fill="#667085">#16</text>
-<rect class="key" x="356" y="40" width="42" height="34" rx="6"/><text class="text small" x="377" y="60" text-anchor="middle" font-weight="700">U</text><text class="text small" x="392" y="70" text-anchor="end" fill="#667085">#17</text>
-<rect class="key" x="404" y="40" width="42" height="34" rx="6"/><text class="text small" x="425" y="60" text-anchor="middle" font-weight="700">I</text><text class="text small" x="440" y="70" text-anchor="end" fill="#667085">#18</text>
-<rect class="key" x="452" y="40" width="42" height="34" rx="6"/><text class="text small" x="473" y="60" text-anchor="middle" font-weight="700">O</text><text class="text small" x="488" y="70" text-anchor="end" fill="#667085">#19</text>
-<rect class="key" x="0" y="80" width="70" height="34" rx="6"/><text class="text small" x="35" y="100" text-anchor="middle" font-weight="700">LCTRL</text><text class="text small" x="64" y="110" text-anchor="end" fill="#667085">#20</text>
-<rect class="key" x="76" y="80" width="42" height="34" rx="6"/><text class="text small" x="97" y="100" text-anchor="middle" font-weight="700">A</text><text class="text small" x="112" y="110" text-anchor="end" fill="#667085">#21</text>
-<rect class="key" x="124" y="80" width="42" height="34" rx="6"/><text class="text small" x="145" y="100" text-anchor="middle" font-weight="700">S</text><text class="text small" x="160" y="110" text-anchor="end" fill="#667085">#22</text>
-<rect class="key" x="172" y="80" width="42" height="34" rx="6"/><text class="text small" x="193" y="100" text-anchor="middle" font-weight="700">D</text><text class="text small" x="208" y="110" text-anchor="end" fill="#667085">#23</text>
-<rect class="key" x="220" y="80" width="42" height="34" rx="6"/><text class="text small" x="241" y="100" text-anchor="middle" font-weight="700">F</text><text class="text small" x="256" y="110" text-anchor="end" fill="#667085">#24</text>
-<rect class="key" x="268" y="80" width="42" height="34" rx="6"/><text class="text small" x="289" y="100" text-anchor="middle" font-weight="700">G</text><text class="text small" x="304" y="110" text-anchor="end" fill="#667085">#25</text>
-<rect class="key" x="316" y="80" width="42" height="34" rx="6"/><text class="text small" x="337" y="100" text-anchor="middle" font-weight="700">H</text><text class="text small" x="352" y="110" text-anchor="end" fill="#667085">#26</text>
-<rect class="key" x="364" y="80" width="42" height="34" rx="6"/><text class="text small" x="385" y="100" text-anchor="middle" font-weight="700">J</text><text class="text small" x="400" y="110" text-anchor="end" fill="#667085">#27</text>
-<rect class="key" x="412" y="80" width="42" height="34" rx="6"/><text class="text small" x="433" y="100" text-anchor="middle" font-weight="700">K</text><text class="text small" x="448" y="110" text-anchor="end" fill="#667085">#28</text>
-<rect class="key" x="460" y="80" width="54" height="34" rx="6"/><text class="text small" x="487" y="100" text-anchor="middle" font-weight="700">ENTER</text><text class="text small" x="508" y="110" text-anchor="end" fill="#667085">#29</text>
+<!-- ── Sidebar ── -->
+<rect width="200" height="580" fill="#FFFFFF"/>
+<line x1="200" y1="0" x2="200" y2="580" stroke="#E8ECF1"/>
+<text x="20" y="37" font-size="14" font-weight="bold" fill="#1A1A2E">RawHID Host</text>
+
+<text x="30" y="72" font-size="13" fill="#4B5563">Dashboard</text>
+<text x="30" y="110" font-size="13" fill="#4B5563">レイヤールール</text>
+<text x="30" y="148" font-size="13" fill="#4B5563">アクション</text>
+<text x="30" y="186" font-size="13" fill="#4B5563">時刻同期</text>
+<text x="30" y="224" font-size="13" fill="#4B5563">AI 使用量</text>
+<!-- キーマップ表示 ← selected -->
+<rect x="8" y="240" width="184" height="34" rx="8" fill="#FEF0EB"/>
+<rect x="20" y="250" width="3" height="14" rx="2" fill="#EF5B25"/>
+<text x="30" y="262" font-size="13" font-weight="bold" fill="#EF5B25">キーマップ表示</text>
+
+<text x="30" y="300" font-size="13" fill="#4B5563">デバイス</text>
+<text x="30" y="338" font-size="13" fill="#4B5563">設定</text>
+
+<rect x="14" y="540" width="76" height="28" rx="14" fill="#F0F4F8"/>
+<rect x="16" y="542" width="36" height="24" rx="12" fill="#EF5B25"/>
+<text x="34" y="559" font-size="11" font-weight="bold" fill="white" text-anchor="middle">JP</text>
+<text x="76" y="559" font-size="11" fill="#9CA3AF" text-anchor="middle">EN</text>
+
+<!-- ── Content ── -->
+<text x="220" y="37" font-size="18" font-weight="bold" fill="#1A1A2E">キーマップ表示</text>
+
+<!-- Device list -->
+<rect x="216" y="56" width="192" height="500" rx="12" fill="#FFFFFF" filter="url(#s)"/>
+<text x="228" y="78" font-size="11" fill="#9CA3AF">Studio 対応デバイス</text>
+
+<!-- hitsuki46 selected (凹) -->
+<rect x="222" y="86" width="180" height="48" rx="8" fill="#E8ECF1"/>
+<text x="234" y="108" font-size="13" font-weight="bold" fill="#EF5B25">hitsuki46</text>
+<text x="234" y="122" font-size="10" fill="#9CA3AF">USB · unlocked</text>
+
+<!-- another device (unselected) -->
+<rect x="234" y="144" width="32" height="32" rx="6" fill="#E8ECF1"/>
+<text x="250" y="165" font-size="12" fill="#6B7280" text-anchor="middle">K</text>
+<text x="276" y="156" font-size="12" fill="#374151">kb60</text>
+<text x="276" y="170" font-size="10" fill="#9CA3AF">USB · unlocked</text>
+
+<!-- Main viewer area -->
+<rect x="420" y="56" width="460" height="500" rx="12" fill="#FFFFFF" filter="url(#s)"/>
+
+<!-- Tab bar: キーマップ | ヒートマップ -->
+<rect x="432" y="68" width="100" height="30" rx="15" fill="#E8ECF1"/>
+<text x="482" y="88" font-size="12" font-weight="bold" fill="#EF5B25" text-anchor="middle">キーマップ</text>
+<rect x="538" y="68" width="100" height="30" rx="15" fill="none"/>
+<text x="588" y="88" font-size="12" fill="#9CA3AF" text-anchor="middle">ヒートマップ</text>
+
+<!-- Layer chips row -->
+<text x="432" y="118" font-size="10" fill="#9CA3AF">レイヤー</text>
+
+<!-- Layer 0 (normal) -->
+<rect x="432" y="124" width="40" height="26" rx="13" fill="#F3F4F6"/>
+<text x="452" y="142" font-size="12" fill="#6B7280" text-anchor="middle">0</text>
+
+<!-- Layer 1 (normal) -->
+<rect x="478" y="124" width="40" height="26" rx="13" fill="#F3F4F6"/>
+<text x="498" y="142" font-size="12" fill="#6B7280" text-anchor="middle">1</text>
+
+<!-- Layer 2 (selected 凹 + LAYER_STATE ●) -->
+<rect x="524" y="124" width="40" height="26" rx="13" fill="#E8ECF1"/>
+<text x="544" y="142" font-size="12" font-weight="bold" fill="#EF5B25" text-anchor="middle">2</text>
+<!-- orange ● LAYER_STATE indicator -->
+<circle cx="562" cy="126" r="5" fill="#EF5B25"/>
+
+<!-- Layer 3 -->
+<rect x="572" y="124" width="40" height="26" rx="13" fill="#F3F4F6"/>
+<text x="592" y="142" font-size="12" fill="#6B7280" text-anchor="middle">3</text>
+
+<!-- Layer 4 -->
+<rect x="618" y="124" width="40" height="26" rx="13" fill="#F3F4F6"/>
+<text x="638" y="142" font-size="12" fill="#6B7280" text-anchor="middle">4</text>
+
+<!-- Layer 5 -->
+<rect x="664" y="124" width="40" height="26" rx="13" fill="#F3F4F6"/>
+<text x="684" y="142" font-size="12" fill="#6B7280" text-anchor="middle">5</text>
+
+<!-- Keyboard plate (凹 inset) -->
+<rect x="432" y="162" width="434" height="244" rx="14" fill="#EAEEF3"/>
+
+<!-- Row 1: number row -->
+<!-- Keys are ~36x30 with 5px gap -->
+<g font-size="9" fill="#1A1A2E" font-family="'Courier New',Consolas,monospace">
+  <!-- key helper: x,y=top-left of key, w=width -->
+  <!-- ESC -->
+  <rect x="440" y="170" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="458" y="188" text-anchor="middle" font-weight="bold">ESC</text>
+  <text x="472" y="196" text-anchor="end" fill="#C0C8D4" font-size="8">#0</text>
+  <!-- 1 -->
+  <rect x="481" y="170" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="499" y="188" text-anchor="middle" font-weight="bold">1</text>
+  <text x="513" y="196" text-anchor="end" fill="#C0C8D4" font-size="8">#1</text>
+  <!-- 2 -->
+  <rect x="522" y="170" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="540" y="188" text-anchor="middle" font-weight="bold">2</text>
+  <!-- 3 -->
+  <rect x="563" y="170" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="581" y="188" text-anchor="middle" font-weight="bold">3</text>
+  <!-- 4 -->
+  <rect x="604" y="170" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="622" y="188" text-anchor="middle" font-weight="bold">4</text>
+  <!-- 5 -->
+  <rect x="645" y="170" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="663" y="188" text-anchor="middle" font-weight="bold">5</text>
+  <!-- 6 -->
+  <rect x="686" y="170" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="704" y="188" text-anchor="middle" font-weight="bold">6</text>
+  <!-- 7 -->
+  <rect x="727" y="170" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="745" y="188" text-anchor="middle" font-weight="bold">7</text>
+  <!-- 8 -->
+  <rect x="768" y="170" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="786" y="188" text-anchor="middle" font-weight="bold">8</text>
+  <!-- BSPC (wider) -->
+  <rect x="809" y="170" width="52" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="835" y="188" text-anchor="middle" font-weight="bold">BSPC</text>
+
+  <!-- Row 2: QWERTY -->
+  <!-- TAB (wider) -->
+  <rect x="440" y="205" width="52" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="466" y="223" text-anchor="middle" font-weight="bold">TAB</text>
+  <!-- Q -->
+  <rect x="497" y="205" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="515" y="223" text-anchor="middle" font-weight="bold">Q</text>
+  <!-- W -->
+  <rect x="538" y="205" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="556" y="223" text-anchor="middle" font-weight="bold">W</text>
+  <!-- E -->
+  <rect x="579" y="205" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="597" y="223" text-anchor="middle" font-weight="bold">E</text>
+  <!-- R -->
+  <rect x="620" y="205" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="638" y="223" text-anchor="middle" font-weight="bold">R</text>
+  <!-- T -->
+  <rect x="661" y="205" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="679" y="223" text-anchor="middle" font-weight="bold">T</text>
+  <!-- Y -->
+  <rect x="702" y="205" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="720" y="223" text-anchor="middle" font-weight="bold">Y</text>
+  <!-- U -->
+  <rect x="743" y="205" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="761" y="223" text-anchor="middle" font-weight="bold">U</text>
+  <!-- I -->
+  <rect x="784" y="205" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="802" y="223" text-anchor="middle" font-weight="bold">I</text>
+  <!-- O -->
+  <rect x="825" y="205" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="843" y="223" text-anchor="middle" font-weight="bold">O</text>
+
+  <!-- Row 3: Home row -->
+  <!-- LCTRL -->
+  <rect x="440" y="240" width="54" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="467" y="258" text-anchor="middle">LCTRL</text>
+  <!-- A -->
+  <rect x="499" y="240" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="517" y="258" text-anchor="middle" font-weight="bold">A</text>
+  <!-- S -->
+  <rect x="540" y="240" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="558" y="258" text-anchor="middle" font-weight="bold">S</text>
+  <!-- D -->
+  <rect x="581" y="240" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="599" y="258" text-anchor="middle" font-weight="bold">D</text>
+  <!-- F -->
+  <rect x="622" y="240" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="640" y="258" text-anchor="middle" font-weight="bold">F</text>
+  <!-- G -->
+  <rect x="663" y="240" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="681" y="258" text-anchor="middle" font-weight="bold">G</text>
+  <!-- H -->
+  <rect x="704" y="240" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="722" y="258" text-anchor="middle" font-weight="bold">H</text>
+  <!-- J -->
+  <rect x="745" y="240" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="763" y="258" text-anchor="middle" font-weight="bold">J</text>
+  <!-- K -->
+  <rect x="786" y="240" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="804" y="258" text-anchor="middle" font-weight="bold">K</text>
+  <!-- ENTER (wider) -->
+  <rect x="827" y="240" width="34" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="844" y="258" text-anchor="middle">ENT</text>
+
+  <!-- Row 4: bottom row -->
+  <!-- LSFT -->
+  <rect x="440" y="275" width="60" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="470" y="293" text-anchor="middle">LSFT</text>
+  <!-- Z -->
+  <rect x="505" y="275" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="523" y="293" text-anchor="middle" font-weight="bold">Z</text>
+  <!-- X -->
+  <rect x="546" y="275" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="564" y="293" text-anchor="middle" font-weight="bold">X</text>
+  <!-- C -->
+  <rect x="587" y="275" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="605" y="293" text-anchor="middle" font-weight="bold">C</text>
+  <!-- V -->
+  <rect x="628" y="275" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="646" y="293" text-anchor="middle" font-weight="bold">V</text>
+  <!-- B -->
+  <rect x="669" y="275" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="687" y="293" text-anchor="middle" font-weight="bold">B</text>
+  <!-- N -->
+  <rect x="710" y="275" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="728" y="293" text-anchor="middle" font-weight="bold">N</text>
+  <!-- M -->
+  <rect x="751" y="275" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="769" y="293" text-anchor="middle" font-weight="bold">M</text>
+  <!-- , -->
+  <rect x="792" y="275" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="810" y="293" text-anchor="middle" font-weight="bold">,</text>
+  <!-- . -->
+  <rect x="833" y="275" width="28" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="847" y="293" text-anchor="middle" font-weight="bold">.</text>
+
+  <!-- Row 5: thumb row -->
+  <rect x="440" y="310" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="458" y="328" text-anchor="middle">LGUI</text>
+  <rect x="481" y="310" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="499" y="328" text-anchor="middle">LALT</text>
+  <rect x="522" y="310" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="540" y="328" text-anchor="middle">MO1</text>
+  <!-- SPC (wide) -->
+  <rect x="563" y="310" width="155" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="640" y="328" text-anchor="middle" font-weight="bold">SPC</text>
+  <!-- MO2 -->
+  <rect x="723" y="310" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="741" y="328" text-anchor="middle">MO2</text>
+  <!-- LEFT -->
+  <rect x="764" y="310" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="782" y="328" text-anchor="middle">◄</text>
+  <!-- DOWN -->
+  <rect x="805" y="310" width="36" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="823" y="328" text-anchor="middle">▼</text>
+  <!-- RIGHT -->
+  <rect x="846" y="310" width="15" height="30" rx="6" fill="#FFFFFF"/>
+  <text x="853" y="328" text-anchor="middle">►</text>
 </g>
+
+<!-- LAYER_STATE legend -->
+<text x="432" y="428" font-size="10" fill="#9CA3AF">●  = LAYER_STATE（キーボードのアクティブレイヤー）</text>
+<circle cx="426" cy="424" r="5" fill="#EF5B25"/>
 </svg>

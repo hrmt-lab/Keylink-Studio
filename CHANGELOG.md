@@ -2,6 +2,19 @@
 
 All notable changes to RawHID Host are documented in this file.
 
+## [0.8.1] - 2026-06-14
+
+### Added
+
+- アクション画面に **「起動中アプリから選ぶ」ピッカー** を追加 (`launch`)。レイヤールールと同じ起動中アプリ一覧 (アイコン付き) から選ぶと実行ファイルパスが自動入力され、前面化判定が確実になる
+- パス入力に **参照ボタン** を追加。`launch` はファイル選択ダイアログ (exe / `.lnk`)、`open_folder` はフォルダ選択ダイアログ (`tauri-plugin-dialog`)
+- `launch` の **`.lnk` ショートカット / 関連付け起動** に対応 (`ShellExecuteW`)。`.lnk` は前面化判定時にリンク先 exe を解決して照合する
+- `launch` バインディングに **「前面化する exe 名」の任意上書き** (折りたたみの詳細設定) を追加。ランチャー型アプリ (例: Autodesk Fusion は起動が `FusionLauncher.exe`、ウィンドウ本体が `Fusion360.exe`) で前面化を確実にするための上書き。空のときは自動判定
+
+### Changed
+
+- HOST_ACTION の **`launch` (アプリを起動)** を、起動済みなら**前面化**・未起動なら起動する挙動に変更。実行ファイル**名 (basename) が一致**する可視ウィンドウを探して前面化 (最小化からの復帰を含み、最大化状態は保持) し、見つからなければ起動する。判定はレイヤールールの `exe` 一致と同じ方式で、versioned / hashed フォルダにインストールされるアプリ (例: Autodesk Fusion の webdeploy) にも対応する (ベストエフォート)
+
 ## [0.8.0] - 2026-06-14
 
 ### Added

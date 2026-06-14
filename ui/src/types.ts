@@ -105,6 +105,8 @@ export interface ActionBinding {
   path: string | null;
   /** "open_folder" only: prefer reusing an existing Explorer window's tab (best-effort). */
   prefer_tab: boolean;
+  /** "launch" only: override the exe file name used to detect an already-running instance. */
+  match_exe: string | null;
 }
 
 export interface DeviceActionsConfig {

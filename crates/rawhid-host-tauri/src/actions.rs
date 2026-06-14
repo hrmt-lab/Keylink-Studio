@@ -74,9 +74,7 @@ pub fn execute(
                 .path
                 .as_deref()
                 .ok_or_else(|| "launch path not configured".to_string())?;
-            std::process::Command::new(path)
-                .spawn()
-                .map_err(|e| e.to_string())?;
+            crate::app_launch::focus_or_launch(path, binding.match_exe.as_deref())?;
             Ok(ActionOutcome::Continue)
         }
         HostActionKind::OpenFolder => {

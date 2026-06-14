@@ -40,7 +40,7 @@ mod windows_impl {
     };
     use windows::Win32::UI::Shell::{IShellWindows, IWebBrowser2, ShellExecuteW, ShellWindows};
     use windows::Win32::UI::WindowsAndMessaging::{
-        SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOWNORMAL,
+        IsIconic, SetForegroundWindow, ShowWindow, SW_RESTORE, SW_SHOWNORMAL,
     };
 
     // 'T' and 'L' have no named VK_* constants in the Windows SDK.
@@ -122,7 +122,11 @@ mod windows_impl {
     }
 
     unsafe fn bring_to_front(hwnd: HWND) {
-        let _ = ShowWindow(hwnd, SW_RESTORE);
+        // Only un-minimize when iconic; SW_RESTORE on a maximized window would
+        // un-maximize it.
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        }
         let _ = SetForegroundWindow(hwnd);
     }
 

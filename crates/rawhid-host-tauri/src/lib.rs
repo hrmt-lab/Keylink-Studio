@@ -1,4 +1,5 @@
 mod actions;
+mod app_launch;
 mod commands;
 mod explorer;
 mod foreground;
@@ -27,6 +28,7 @@ pub fn run() {
                 let _ = win.set_focus();
             }
         }))
+        .plugin(tauri_plugin_dialog::init())
         .manage(app_state)
         .invoke_handler(tauri::generate_handler![
             commands::get_config,

@@ -1,6 +1,6 @@
 [package]
 name = "rawhid-host-tauri"
-version = "0.8.0"
+version = "0.8.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -15,6 +15,7 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-single-instance = "2"
+tauri-plugin-dialog = "2"
 rawhid-host-core = { path = "../rawhid-host-core" }
 chrono = { workspace = true }
 serde = { workspace = true }

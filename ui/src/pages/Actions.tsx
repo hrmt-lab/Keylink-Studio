@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
-import { Check, Pencil, Plus, Trash2, X, Zap } from "lucide-react";
-import { saveConfig } from "../api";
+import { Check, ChevronDown, ChevronRight, FolderOpen, Pencil, Plus, Search, Trash2, X, Zap } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { saveConfig, getRunningApps, getAppIcons, type RunningApp } from "../api";
 import { Toggle } from "../components/Toggle";
 import { useLang, type TranslationKey } from "../i18n";
 import type {
@@ -57,6 +58,12 @@ export default function Actions({ config, setConfig, status }: Props) {
   const [kind, setKind] = useState<HostActionKind>("show_window");
   const [path, setPath] = useState("");
   const [preferTab, setPreferTab] = useState(false);
+  const [matchExe, setMatchExe] = useState("");
+  const [showAdvanced, setShowAdvanced] = useState(false);
+  const [showPicker, setShowPicker] = useState(false);
+  const [apps, setApps] = useState<RunningApp[]>([]);
+  const [iconByExe, setIconByExe] = useState<Record<string, string>>({});
+  const [loadingApps, setLoadingApps] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   // null = add mode; otherwise the action_id of the binding being edited.
@@ -72,6 +79,9 @@ export default function Actions({ config, setConfig, status }: Props) {
   useEffect(() => {
     setPath("");
     setPreferTab(false);
+    setMatchExe("");
+    setShowAdvanced(false);
+    setShowPicker(false);
     setEditingActionId(null);
     setActionId(firstUnusedId(bindings));
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -130,8 +140,66 @@ export default function Actions({ config, setConfig, status }: Props) {
   const resetForm = (nextId?: number) => {
     setPath("");
     setPreferTab(false);
+    setMatchExe("");
+    setShowAdvanced(false);
+    setShowPicker(false);
     setEditingActionId(null);
     if (nextId !== undefined) setActionId(nextId);
+  };
+
+  const loadApps = async () => {
+    setLoadingApps(true);
+    try {
+      const list = await getRunningApps();
+      setApps(list);
+      try {
+        const paths = list.map((a) => a.path).filter((p): p is string => Boolean(p));
+        const iconsByPath = await getAppIcons(paths);
+        const byExe: Record<string, string> = {};
+        for (const a of list) {
+          if (a.path && iconsByPath[a.path]) byExe[a.exe] = iconsByPath[a.path];
+        }
+        setIconByExe(byExe);
+      } catch {
+        // Icons are best-effort; fall back to initials.
+      }
+    } finally {
+      setLoadingApps(false);
+    }
+  };
+
+  const togglePicker = async () => {
+    const next = !showPicker;
+    setShowPicker(next);
+    if (next && apps.length === 0) await loadApps();
+  };
+
+  // Picking captures the running window's actual executable path, so the
+  // (auto-derived) focus match is reliable; no match_exe override needed.
+  const pickApp = (app: RunningApp) => {
+    if (app.path) setPath(app.path);
+    setShowPicker(false);
+    setError(null);
+  };
+
+  const browseFile = async () => {
+    const sel = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "Application", extensions: ["exe", "lnk"] }],
+    });
+    if (typeof sel === "string") {
+      setPath(sel);
+      setError(null);
+    }
+  };
+
+  const browseFolder = async () => {
+    const sel = await open({ multiple: false, directory: true });
+    if (typeof sel === "string") {
+      setPath(sel);
+      setError(null);
+    }
   };
 
   // Bindings are stored sorted by action_id so the list renders in ID order and
@@ -160,6 +228,7 @@ export default function Actions({ config, setConfig, status }: Props) {
       action: kind,
       path: needsPath(kind) ? trimmedPath : null,
       prefer_tab: kind === "open_folder" ? preferTab : false,
+      match_exe: kind === "launch" && matchExe.trim() ? matchExe.trim() : null,
     };
     const nextBindings =
       editingActionId === null
@@ -174,6 +243,9 @@ export default function Actions({ config, setConfig, status }: Props) {
     setKind(binding.action);
     setPath(binding.path ?? "");
     setPreferTab(binding.prefer_tab);
+    setMatchExe(binding.match_exe ?? "");
+    setShowAdvanced(Boolean(binding.match_exe));
+    setShowPicker(false);
     setEditingActionId(binding.action_id);
     setError(null);
   };
@@ -297,16 +369,28 @@ export default function Actions({ config, setConfig, status }: Props) {
                   <label className="mb-1 block text-xs font-medium text-muted">
                     {t(kind === "open_folder" ? "actions.folder" : "actions.path")}
                   </label>
-                  <input
-                    type="text"
-                    value={path}
-                    onChange={(e) => {
-                      setPath(e.target.value);
-                      setError(null);
-                    }}
-                    placeholder={t(kind === "open_folder" ? "actions.folder_placeholder" : "actions.path_placeholder")}
-                    className="input w-full font-mono text-sm !bg-surface"
-                  />
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="text"
+                      value={path}
+                      onChange={(e) => {
+                        setPath(e.target.value);
+                        setError(null);
+                      }}
+                      placeholder={t(kind === "open_folder" ? "actions.folder_placeholder" : "actions.path_placeholder")}
+                      className="input w-full font-mono text-sm !bg-surface"
+                    />
+                    <button
+                      onClick={kind === "open_folder" ? browseFolder : browseFile}
+                      disabled={saving}
+                      title={t("actions.browse")}
+                      aria-label={t("actions.browse")}
+                      className="flex h-9 flex-shrink-0 items-center gap-1.5 rounded-lg border border-border bg-surface px-3 text-sm text-muted hover:text-ink disabled:opacity-50"
+                    >
+                      <FolderOpen size={15} />
+                      {t("actions.browse")}
+                    </button>
+                  </div>
                 </div>
               )}
               <button
@@ -331,6 +415,75 @@ export default function Actions({ config, setConfig, status }: Props) {
                   <X size={15} />
                   {t("actions.cancel_edit")}
                 </button>
+              </div>
+            )}
+            {kind === "launch" && (
+              <div className="mt-3 space-y-3">
+                <div>
+                  <button
+                    onClick={togglePicker}
+                    disabled={saving}
+                    className="flex items-center gap-1.5 text-sm text-muted hover:text-ink disabled:opacity-50"
+                  >
+                    <Search size={14} />
+                    {t("actions.pick_running")}
+                  </button>
+                  {showPicker && (
+                    <div className="mt-2 max-h-56 overflow-y-auto rounded-lg border border-border">
+                      {loadingApps ? (
+                        <div className="px-3 py-2 text-xs text-faint">{t("actions.pick_running.loading")}</div>
+                      ) : apps.length === 0 ? (
+                        <div className="px-3 py-2 text-xs text-faint">{t("actions.pick_running.empty")}</div>
+                      ) : (
+                        apps.map((app) => (
+                          <button
+                            key={app.exe}
+                            onClick={() => pickApp(app)}
+                            className="flex w-full items-center gap-3 px-3 py-2 text-left hover:bg-plate"
+                          >
+                            {iconByExe[app.exe] ? (
+                              <img src={iconByExe[app.exe]} alt="" className="h-6 w-6 flex-shrink-0 rounded" />
+                            ) : (
+                              <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center rounded bg-plate text-[11px] font-medium text-muted">
+                                {app.display_name.charAt(0).toUpperCase()}
+                              </span>
+                            )}
+                            <span className="min-w-0 flex-1">
+                              <span className="block truncate text-sm text-ink">{app.display_name}</span>
+                              <span className="block truncate font-mono text-[11px] text-faint">{app.exe}</span>
+                            </span>
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  )}
+                </div>
+                <div>
+                  <button
+                    onClick={() => setShowAdvanced((v) => !v)}
+                    className="flex items-center gap-1 text-xs text-faint hover:text-muted"
+                  >
+                    {showAdvanced ? <ChevronDown size={13} /> : <ChevronRight size={13} />}
+                    {t("actions.advanced")}
+                  </button>
+                  {showAdvanced && (
+                    <div className="mt-2">
+                      <label className="mb-1 block text-xs font-medium text-muted">
+                        {t("actions.match_exe")}
+                      </label>
+                      <input
+                        type="text"
+                        value={matchExe}
+                        onChange={(e) => {
+                          setMatchExe(e.target.value);
+                          setError(null);
+                        }}
+                        placeholder={t("actions.match_exe.placeholder")}
+                        className="input w-full max-w-xs font-mono text-sm !bg-surface"
+                      />
+                    </div>
+                  )}
+                </div>
               </div>
             )}
             {kind === "open_folder" && (

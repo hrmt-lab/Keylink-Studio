@@ -96,6 +96,12 @@ pub struct ActionBinding {
     /// `open_folder` only: when true, try to open the folder in a new tab of an
     /// existing Explorer window instead of a new window. Best-effort.
     pub prefer_tab: bool,
+    /// `launch` only: override the executable file name used to detect an
+    /// already-running instance for focus. When `None`/empty it is derived from
+    /// `path` (the basename, or a `.lnk`'s resolved target). Needed for
+    /// launcher-style apps whose window-owning exe differs from the launch path
+    /// (e.g. Autodesk Fusion: launcher `FusionLauncher.exe` vs `Fusion360.exe`).
+    pub match_exe: Option<String>,
 }
 
 impl Default for ActionBinding {
@@ -105,6 +111,7 @@ impl Default for ActionBinding {
             action: HostActionKind::ShowWindow,
             path: None,
             prefer_tab: false,
+            match_exe: None,
         }
     }
 }

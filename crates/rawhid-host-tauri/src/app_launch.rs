@@ -41,7 +41,7 @@ mod windows_impl {
     use std::os::windows::ffi::OsStringExt;
 
     use windows::core::{w, Interface, PCWSTR};
-    use windows::Win32::Foundation::{BOOL, CloseHandle, HWND, LPARAM};
+    use windows::Win32::Foundation::{CloseHandle, BOOL, HWND, LPARAM};
     use windows::Win32::System::Com::{
         CoCreateInstance, CoInitializeEx, CoUninitialize, IPersistFile, CLSCTX_INPROC_SERVER,
         COINIT_APARTMENTTHREADED, STGM_READ,
@@ -177,8 +177,7 @@ mod windows_impl {
     }
 
     fn process_path(pid: u32) -> Option<String> {
-        let handle =
-            unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
         let mut buffer = vec![0u16; 32768];
         let mut len = buffer.len() as u32;
         let result = unsafe {

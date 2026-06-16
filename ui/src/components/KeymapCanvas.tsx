@@ -1,4 +1,4 @@
-import { useMemo, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { StudioPhysicalKey } from "../types";
 
 interface KeymapCanvasProps {
@@ -9,23 +9,45 @@ interface KeymapCanvasProps {
   keyStyle?: (key: StudioPhysicalKey) => CSSProperties | undefined;
   /** Tooltip per key. */
   keyTitle?: (key: StudioPhysicalKey) => string | undefined;
+  /** Optional click handler used by keymap editing. */
+  onKeyClick?: (key: StudioPhysicalKey, element: HTMLDivElement) => void;
 }
 
 /**
  * Renders ZMK Studio physical-layout keys at their x/y positions.
  * Shared between the keymap view and the typing-stats heatmap.
  */
-export function KeymapCanvas({ keys, keyContent, keyStyle, keyTitle }: KeymapCanvasProps) {
-  const metrics = useMemo(() => layoutMetrics(keys), [keys]);
+export function KeymapCanvas({ keys, keyContent, keyStyle, keyTitle, onKeyClick }: KeymapCanvasProps) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [containerWidth, setContainerWidth] = useState(0);
+  const metrics = useMemo(() => layoutMetrics(keys, containerWidth), [keys, containerWidth]);
+
+  useEffect(() => {
+    const element = containerRef.current;
+    if (!element) return;
+
+    const updateWidth = () => {
+      const style = window.getComputedStyle(element);
+      const paddingX =
+        Number.parseFloat(style.paddingLeft || "0") +
+        Number.parseFloat(style.paddingRight || "0");
+      setContainerWidth(Math.max(0, element.clientWidth - paddingX));
+    };
+    updateWidth();
+
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
 
   // ZMK physical layouts pack keys edge-to-edge; inset each cap so
   // neighbouring keys read as separate keys on the plate.
   const keyGap = 5;
 
   return (
-    <div className="max-w-full overflow-x-auto overflow-y-hidden rounded-card bg-plate shadow-neu-down p-4">
+    <div ref={containerRef} className="max-w-full overflow-hidden rounded-card bg-plate shadow-neu-down p-4">
       <div
-        className="relative flex-shrink-0"
+        className="relative mx-auto flex-shrink-0"
         style={{ width: metrics.width, height: metrics.height }}
       >
         {keys.map((key) => {
@@ -39,7 +61,8 @@ export function KeymapCanvas({ keys, keyContent, keyStyle, keyTitle }: KeymapCan
             <div
               key={`${key.position}-${key.x}-${key.y}`}
               title={keyTitle?.(key)}
-              className="absolute flex flex-col items-center justify-center rounded-lg bg-surface px-1.5 text-center"
+              onClick={(event) => onKeyClick?.(key, event.currentTarget)}
+              className={`absolute flex flex-col items-center justify-center rounded-lg bg-surface px-1.5 text-center ${onKeyClick ? "cursor-pointer hover:ring-2 hover:ring-accent" : ""}`}
               style={{
                 left: x,
                 top: y,
@@ -60,7 +83,7 @@ export function KeymapCanvas({ keys, keyContent, keyStyle, keyTitle }: KeymapCan
   );
 }
 
-export function layoutMetrics(keys: StudioPhysicalKey[]) {
+export function layoutMetrics(keys: StudioPhysicalKey[], availableWidth = 0) {
   const padding = 24;
   const rawMinX = Math.min(...keys.map((key) => key.x));
   const rawMinY = Math.min(...keys.map((key) => key.y));
@@ -68,8 +91,8 @@ export function layoutMetrics(keys: StudioPhysicalKey[]) {
   const rawMaxY = Math.max(...keys.map((key) => key.y + Math.abs(key.height)));
   const rawWidth = Math.max(1, rawMaxX - rawMinX);
   const rawHeight = Math.max(1, rawMaxY - rawMinY);
-  const maxWidth = 820;
-  const scale = Math.min(1.2, maxWidth / rawWidth);
+  const maxWidth = availableWidth > 0 ? Math.max(220, availableWidth) : 820;
+  const scale = Math.min(1.2, Math.max(0.2, (maxWidth - padding * 2) / rawWidth));
   return {
     minX: rawMinX,
     minY: rawMinY,

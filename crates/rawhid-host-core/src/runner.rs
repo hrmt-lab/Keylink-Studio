@@ -176,6 +176,18 @@ where
         std::mem::take(&mut self.pending_uplink_events)
     }
 
+    /// Drain HID packets and ingest them into pending_uplink_events.
+    /// Does not run flush_if_due or prune_uplink_state; those run in tick().
+    pub fn drain_uplink_only(&mut self) {
+        let drained = self.hid.drain_uplink();
+        if !drained.is_empty() {
+            let snapshot = self.clock.now().ok();
+            for (device, packet) in drained {
+                self.ingest_uplink(device, packet, &snapshot);
+            }
+        }
+    }
+
     pub fn battery_statuses(&self) -> Vec<DeviceBatteryStatus> {
         let mut statuses: Vec<DeviceBatteryStatus> = self.battery.values().cloned().collect();
         statuses.sort_by(|a, b| a.device_key.cmp(&b.device_key));
@@ -189,14 +201,7 @@ where
     }
 
     fn process_uplink(&mut self) {
-        let drained = self.hid.drain_uplink();
-        if !drained.is_empty() {
-            let snapshot = self.clock.now().ok();
-            for (device, packet) in drained {
-                self.ingest_uplink(device, packet, &snapshot);
-            }
-        }
-
+        self.drain_uplink_only();
         if let Some(store) = &self.key_stats {
             if let Ok(mut store) = store.lock() {
                 store.flush_if_due(Instant::now());
@@ -273,6 +278,9 @@ where
                         }
                         self.last_host_action_seq.insert(device_key, action.seq);
                     }
+                    UplinkPacket::KeyPress(_) => {
+                        // Real-time event; no state to maintain on the host side.
+                    }
                     UplinkPacket::KeyStats(stats) => {
                         if let Some(previous) = self.last_key_stats_seq.get(&device_key) {
                             let expected = previous.wrapping_add(1);
@@ -283,7 +291,8 @@ where
                                 );
                             }
                         }
-                        self.last_key_stats_seq.insert(device_key.clone(), stats.seq);
+                        self.last_key_stats_seq
+                            .insert(device_key.clone(), stats.seq);
                         if self.config.stats.enabled {
                             if let (Some(store), Some(snapshot)) = (&self.key_stats, &snapshot) {
                                 if let Ok(mut store) = store.lock() {
@@ -297,7 +306,8 @@ where
                         }
                     }
                 }
-                self.pending_uplink_events.push(UplinkEvent { device, packet });
+                self.pending_uplink_events
+                    .push(UplinkEvent { device, packet });
             }
         }
     }
@@ -350,7 +360,8 @@ where
     }
 
     pub fn run_forever(&mut self) -> ! {
-        let interval = Duration::from_millis(self.config.polling.interval_ms);
+        let interval = Duration::from_millis(self.config.polling.interval_ms.max(1));
+        let uplink_interval = Duration::from_millis(self.config.polling.uplink_interval_ms.max(5));
         loop {
             if let Err(error) = self.tick() {
                 warn!("run tick failed: {}", error);
@@ -359,7 +370,16 @@ where
             for event in self.take_uplink_events() {
                 info!("uplink from {}: {:?}", event.device.path, event.packet);
             }
-            thread::sleep(interval);
+            // Drain uplink in uplink_interval slices while waiting for next tick.
+            let deadline = Instant::now() + interval;
+            while Instant::now() < deadline {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                thread::sleep(uplink_interval.min(remaining));
+                self.drain_uplink_only();
+                for event in self.take_uplink_events() {
+                    info!("uplink from {}: {:?}", event.device.path, event.packet);
+                }
+            }
         }
     }
 
@@ -925,9 +945,7 @@ mod tests {
     }
 
     fn push_uplink(
-        uplink: &Rc<
-            RefCell<HashMap<String, std::collections::VecDeque<[u8; crate::PACKET_SIZE]>>>,
-        >,
+        uplink: &Rc<RefCell<HashMap<String, std::collections::VecDeque<[u8; crate::PACKET_SIZE]>>>>,
         path: &str,
         packet: &crate::packet::UplinkPacket,
     ) {
@@ -941,8 +959,8 @@ mod tests {
     #[test]
     fn uplink_updates_battery_and_layer_views() {
         use crate::packet::{
-            BatteryEntry, BatteryStatusPacket, LayerStatePacket, UplinkPacket,
-            CAPABILITY_BATTERY, CAPABILITY_LAYER_STATE,
+            BatteryEntry, BatteryStatusPacket, LayerStatePacket, UplinkPacket, CAPABILITY_BATTERY,
+            CAPABILITY_LAYER_STATE,
         };
 
         let transport = MultiMockTransport {
@@ -1138,10 +1156,8 @@ mod tests {
         use crate::stats::{KeyStatsStore, StatsPeriod};
         use std::sync::{Arc, Mutex};
 
-        let dir = std::env::temp_dir().join(format!(
-            "rawhid-host-runner-stats-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("rawhid-host-runner-stats-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let store = Arc::new(Mutex::new(KeyStatsStore::new(
             dir.clone(),
@@ -1185,10 +1201,11 @@ mod tests {
 
         runner.tick().unwrap();
 
-        let summary = store
-            .lock()
-            .unwrap()
-            .summary("uid:00000000000000aa", StatsPeriod::All, "2026-01-01");
+        let summary =
+            store
+                .lock()
+                .unwrap()
+                .summary("uid:00000000000000aa", StatsPeriod::All, "2026-01-01");
         assert_eq!(summary.total, 6);
         assert_eq!(runner.take_uplink_events().len(), 1);
         let _ = std::fs::remove_dir_all(dir);

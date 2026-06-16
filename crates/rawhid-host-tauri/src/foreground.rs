@@ -67,9 +67,7 @@ mod windows_impl {
                     )
                 };
 
-                let thread_id = unsafe {
-                    windows::Win32::System::Threading::GetCurrentThreadId()
-                };
+                let thread_id = unsafe { windows::Win32::System::Threading::GetCurrentThreadId() };
                 let _ = id_tx.send(thread_id);
 
                 if hook.is_invalid() {

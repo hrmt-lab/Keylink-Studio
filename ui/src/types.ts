@@ -2,6 +2,7 @@
 
 export interface PollingConfig {
   interval_ms: number;
+  uplink_interval_ms: number;
 }
 
 export interface HidConfig {
@@ -170,6 +171,12 @@ export interface KeyStatsSummary {
 
 export type StatsPeriod = "today" | "last7days" | "all";
 
+export interface KeyPressEvent {
+  device_uid: string;
+  position: number;
+  pressed: boolean;
+}
+
 export interface MonitorStatus {
   running: boolean;
   connected_devices: number;
@@ -332,6 +339,47 @@ export interface StudioRawBinding {
   behavior_id: number;
   param1: number;
   param2: number;
+}
+
+export type KeyCatalogCategory =
+  | "letters"
+  | "numbers"
+  | "symbols"
+  | "control"
+  | "navigation"
+  | "locks"
+  | "function"
+  | "international"
+  | "language"
+  | "miscellaneous"
+  | "modifiers"
+  | "keypad"
+  | "editing"
+  | "media"
+  | "applications"
+  | "input_assist"
+  | "power_lock"
+  | "other";
+
+export interface KeyCatalogEntry {
+  display: string;
+  canonical: string;
+  hid_usage: number;
+  category: KeyCatalogCategory;
+  aliases: string[];
+  names: string[];
+}
+
+export type EditBehavior =
+  | { kind: "key_press"; hid_usage: number }
+  | { kind: "transparent" }
+  | { kind: "none" };
+
+export interface EditState {
+  mode: "viewing" | "editing";
+  dirty: boolean;
+  operation: "idle" | "setting" | "saving" | "discarding" | "ending";
+  problem: null | "save_failed" | "save_unknown" | "locked_again" | "disconnected";
 }
 export interface ProbeResult {
   device: DeviceInfo;

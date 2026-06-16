@@ -2,6 +2,9 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppConfig,
+  EditBehavior,
+  KeyPressEvent,
+  KeyCatalogEntry,
   KeyStatsSummary,
   LogEntry,
   MonitorStatus,
@@ -57,6 +60,30 @@ export const probeDevices = () => invoke<ProbeResult[]>("probe_devices");
 export const probeStudioDevices = () => invoke<StudioDeviceStatus[]>("probe_studio_devices");
 export const readStudioKeymap = (deviceId: string) =>
   invoke<StudioKeymapSnapshot>("read_studio_keymap", { deviceId });
+export const studioKeyCatalog = () =>
+  invoke<KeyCatalogEntry[]>("studio_key_catalog");
+export const studioBeginEdit = (deviceId: string, forceDiscard: boolean) =>
+  invoke<StudioKeymapSnapshot>("studio_begin_edit", { deviceId, forceDiscard });
+export const studioSetKey = (
+  deviceId: string,
+  layerId: number,
+  position: number,
+  behavior: EditBehavior
+) =>
+  invoke<StudioKeymapSnapshot>("studio_set_key", {
+    deviceId,
+    layerId,
+    position,
+    behavior,
+  });
+export const studioSaveChanges = (deviceId: string) =>
+  invoke<void>("studio_save_changes", { deviceId });
+export const studioDiscardChanges = (deviceId: string) =>
+  invoke<StudioKeymapSnapshot>("studio_discard_changes", { deviceId });
+export const studioHasUnsaved = (deviceId: string) =>
+  invoke<boolean>("studio_has_unsaved", { deviceId });
+export const studioEndEdit = (deviceId: string) =>
+  invoke<void>("studio_end_edit", { deviceId });
 
 // ─── Monitoring ───────────────────────────────────────────────────────────────
 
@@ -87,3 +114,8 @@ export const onKeyStatsUpdated = (
   cb: (deviceKey: string) => void
 ): Promise<UnlistenFn> =>
   listen<string>("key-stats-updated", (e) => cb(e.payload));
+
+export const onKeyPressEvent = (
+  cb: (event: KeyPressEvent) => void
+): Promise<UnlistenFn> =>
+  listen<KeyPressEvent>("key-press-event", (e) => cb(e.payload));

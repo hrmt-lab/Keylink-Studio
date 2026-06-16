@@ -5,20 +5,22 @@ use std::{
         mpsc, Arc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
+#[cfg(debug_assertions)]
+use rawhid_host_core::hid::DeviceInfo;
 use rawhid_host_core::{
     active_app::SystemActiveAppProvider,
     ai_usage::{AiUsageRefreshError, AiUsageRuntime, AiUsageShared},
     config::{load_config, ActionsConfig, AppConfig, ConfigPaths},
-    hid::{DeviceInfo, HidDeviceManager, ProbeResult},
+    hid::{HidDeviceManager, ProbeResult},
     packet::UplinkPacket,
     runner::{uplink_device_key, RunEvent, Runner},
     stats::{KeyStatsSummary, SharedKeyStatsStore, StatsPeriod},
     studio::{
-        probe_usb_serial_devices, read_keymap_for_device, StudioDeviceStatus, StudioError,
-        StudioKeymapSnapshot,
+        key_catalog, probe_usb_serial_devices, read_keymap_for_device, EditBehavior,
+        KeyCatalogEntry, StudioDeviceStatus, StudioEditSession, StudioError, StudioKeymapSnapshot,
     },
 };
 use tauri::{AppHandle, Emitter, State};
@@ -343,6 +345,9 @@ pub async fn probe_devices(state: State<'_, AppState>) -> Result<Vec<ProbeResult
 pub async fn probe_studio_devices(
     state: State<'_, AppState>,
 ) -> Result<Vec<StudioDeviceStatus>, String> {
+    if state.studio_edit.lock().unwrap().is_some() {
+        return Err("port_busy".to_string());
+    }
     let studio_config = state.config.lock().unwrap().studio.clone();
     tauri::async_runtime::spawn_blocking(move || probe_usb_serial_devices(&studio_config))
         .await
@@ -354,12 +359,191 @@ pub async fn read_studio_keymap(
     device_id: String,
     state: State<'_, AppState>,
 ) -> Result<StudioKeymapSnapshot, String> {
+    let edit = Arc::clone(&state.studio_edit);
     let studio_config = state.config.lock().unwrap().studio.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = edit.lock().unwrap();
+        if let Some(session) = guard.as_mut() {
+            if session.device_id == device_id {
+                return session.snapshot().map_err(studio_error_code);
+            }
+            return Err("port_busy".to_string());
+        }
         read_keymap_for_device(&device_id, &studio_config).map_err(studio_error_code)
     })
     .await
     .map_err(|_| "studio_read_failed".to_string())?
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum EditBehaviorDto {
+    KeyPress { hid_usage: u32 },
+    Transparent,
+    None,
+}
+
+impl From<EditBehaviorDto> for EditBehavior {
+    fn from(value: EditBehaviorDto) -> Self {
+        match value {
+            EditBehaviorDto::KeyPress { hid_usage } => EditBehavior::KeyPress(hid_usage),
+            EditBehaviorDto::Transparent => EditBehavior::Transparent,
+            EditBehaviorDto::None => EditBehavior::None,
+        }
+    }
+}
+
+#[tauri::command]
+pub fn studio_key_catalog() -> Vec<KeyCatalogEntry> {
+    key_catalog()
+}
+
+#[tauri::command]
+pub async fn studio_begin_edit(
+    device_id: String,
+    force_discard: bool,
+    state: State<'_, AppState>,
+) -> Result<StudioKeymapSnapshot, String> {
+    let studio_config = state.config.lock().unwrap().studio.clone();
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = edit.lock().unwrap();
+        if let Some(session) = guard.as_mut() {
+            if session.device_id == device_id {
+                if force_discard {
+                    return session.discard().map_err(studio_error_code);
+                }
+                return session.snapshot().map_err(studio_error_code);
+            }
+            if force_discard {
+                let _ = session.discard();
+                *guard = None;
+            } else if session.has_unsaved().map_err(studio_error_code)? {
+                return Err(studio_error_code(StudioError::UnsavedChangesExist));
+            } else {
+                *guard = None;
+            }
+        }
+
+        let mut session =
+            StudioEditSession::open(&device_id, &studio_config).map_err(studio_error_code)?;
+        let snapshot = session.snapshot().map_err(studio_error_code)?;
+        *guard = Some(session);
+        Ok(snapshot)
+    })
+    .await
+    .map_err(|_| "studio_begin_edit_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_set_key(
+    device_id: String,
+    layer_id: u32,
+    position: i32,
+    behavior: EditBehaviorDto,
+    state: State<'_, AppState>,
+) -> Result<StudioKeymapSnapshot, String> {
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = edit.lock().unwrap();
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+        if session.device_id != device_id {
+            return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+        }
+        session
+            .set_binding(layer_id, position, behavior.into())
+            .map_err(studio_error_code)
+    })
+    .await
+    .map_err(|_| "studio_set_key_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_save_changes(
+    device_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = edit.lock().unwrap();
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+        if session.device_id != device_id {
+            return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+        }
+        session.save().map_err(studio_error_code)
+    })
+    .await
+    .map_err(|_| "studio_save_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_discard_changes(
+    device_id: String,
+    state: State<'_, AppState>,
+) -> Result<StudioKeymapSnapshot, String> {
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = edit.lock().unwrap();
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+        if session.device_id != device_id {
+            return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+        }
+        session.discard().map_err(studio_error_code)
+    })
+    .await
+    .map_err(|_| "studio_discard_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_has_unsaved(
+    device_id: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = edit.lock().unwrap();
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+        if session.device_id != device_id {
+            return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+        }
+        session.has_unsaved().map_err(studio_error_code)
+    })
+    .await
+    .map_err(|_| "studio_has_unsaved_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_end_edit(device_id: String, state: State<'_, AppState>) -> Result<(), String> {
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = edit.lock().unwrap();
+        let Some(session) = guard.as_mut() else {
+            return Ok(());
+        };
+        if session.device_id != device_id {
+            tracing::debug!(
+                requested_device_id = %device_id,
+                active_device_id = %session.device_id,
+                "ignored stale studio edit cleanup"
+            );
+            return Ok(());
+        }
+        if session.has_unsaved().map_err(studio_error_code)? {
+            return Err(studio_error_code(StudioError::UnsavedChangesExist));
+        }
+        *guard = None;
+        Ok(())
+    })
+    .await
+    .map_err(|_| "studio_end_edit_failed".to_string())?
 }
 
 fn studio_error_code(error: StudioError) -> String {
@@ -367,6 +551,20 @@ fn studio_error_code(error: StudioError) -> String {
         StudioError::DeviceNotFound => "device_not_found",
         StudioError::Locked => "locked",
         StudioError::Timeout => "timeout",
+        StudioError::Disconnected => "disconnected",
+        StudioError::InvalidLocation => "invalid_location",
+        StudioError::InvalidBehavior => "invalid_behavior",
+        StudioError::InvalidParameters => "invalid_parameters",
+        StudioError::MissingBehaviorRole => "missing_behavior_role",
+        StudioError::SaveFailed => "save_failed",
+        StudioError::SaveNotSupported => "save_not_supported",
+        StudioError::SaveNoSpace => "save_no_space",
+        StudioError::SaveResultUnknown => "save_result_unknown",
+        StudioError::NoEditSession => "no_edit_session",
+        StudioError::EditSessionExists => "edit_session_exists",
+        StudioError::UnsavedChangesExist => "unsaved_changes_exist",
+        StudioError::SessionDeviceMismatch => "session_device_mismatch",
+        StudioError::PortBusy => "port_busy",
         StudioError::RpcFailed => "rpc_failed",
     }
     .to_string()
@@ -629,6 +827,7 @@ fn apply_monitor_config(
     next_config: AppConfig,
     runner: &mut MonitorRunner,
     interval: &mut Duration,
+    uplink_interval: &mut Duration,
     status: &Arc<std::sync::Mutex<MonitorStatus>>,
     ai_usage_shared: Option<AiUsageShared>,
     extras: &MonitorExtras,
@@ -636,11 +835,14 @@ fn apply_monitor_config(
 ) -> Result<(), String> {
     *actions_cfg = next_config.actions.clone();
     if let Ok(mut store) = extras.key_stats.lock() {
-        store.set_flush_interval(Duration::from_secs(next_config.stats.flush_interval_sec.max(1)));
+        store.set_flush_interval(Duration::from_secs(
+            next_config.stats.flush_interval_sec.max(1),
+        ));
     }
     *runner = rebuild_runner(&next_config, ai_usage_shared)?;
     runner.set_key_stats_store(Arc::clone(&extras.key_stats));
-    *interval = Duration::from_millis(next_config.polling.interval_ms);
+    *interval = Duration::from_millis(next_config.polling.interval_ms.max(1));
+    *uplink_interval = Duration::from_millis(next_config.polling.uplink_interval_ms.max(5));
 
     let mut s = status.lock().unwrap();
     s.current_layer = None;
@@ -663,6 +865,7 @@ fn process_command(
     app: &AppHandle,
     runner: &mut MonitorRunner,
     interval: &mut Duration,
+    uplink_interval: &mut Duration,
     status: &Arc<std::sync::Mutex<MonitorStatus>>,
     log_entries: &Arc<std::sync::Mutex<std::collections::VecDeque<LogEntry>>>,
     log_counter: &Arc<std::sync::Mutex<u64>>,
@@ -682,6 +885,7 @@ fn process_command(
                 next_config,
                 runner,
                 interval,
+                uplink_interval,
                 status,
                 ai_usage_shared,
                 extras,
@@ -699,6 +903,13 @@ fn process_command(
             false
         }
     }
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+struct KeyPressPayload {
+    device_uid: String,
+    position: u8,
+    pressed: bool,
 }
 
 /// Handle uplink events drained from the runner. Returns `true` when a
@@ -765,6 +976,16 @@ fn handle_uplink_events(
             UplinkPacket::KeyStats(_) => {
                 let _ = app.emit("key-stats-updated", uplink_device_key(&event.device));
             }
+            UplinkPacket::KeyPress(p) => {
+                let _ = app.emit(
+                    "key-press-event",
+                    KeyPressPayload {
+                        device_uid: uplink_device_key(&event.device),
+                        position: p.position,
+                        pressed: p.pressed,
+                    },
+                );
+            }
             // Battery / layer state are part of MonitorStatus and flow
             // through the regular status-update emission.
             UplinkPacket::Battery(_) | UplinkPacket::LayerState(_) => {}
@@ -811,7 +1032,8 @@ fn run_monitor_loop(
     let entry = add_log(&log_entries, &log_counter, "info", "Monitoring started");
     let _ = app.emit("log-added", entry);
 
-    let mut interval = Duration::from_millis(config.polling.interval_ms);
+    let mut interval = Duration::from_millis(config.polling.interval_ms.max(1));
+    let mut uplink_interval = Duration::from_millis(config.polling.uplink_interval_ms.max(5));
 
     loop {
         let mut should_stop = false;
@@ -823,6 +1045,7 @@ fn run_monitor_loop(
                         &app,
                         &mut runner,
                         &mut interval,
+                        &mut uplink_interval,
                         &status,
                         &log_entries,
                         &log_counter,
@@ -906,24 +1129,55 @@ fn run_monitor_loop(
             break;
         }
 
-        match rx.recv_timeout(interval) {
-            Ok(command) => {
-                if process_command(
-                    command,
-                    &app,
-                    &mut runner,
-                    &mut interval,
-                    &status,
-                    &log_entries,
-                    &log_counter,
-                    &extras,
-                    &mut actions_cfg,
-                ) {
-                    break;
-                }
+        // Wait for the next control-loop tick, draining uplink every uplink_interval_ms.
+        let mut should_stop = false;
+        let deadline = Instant::now() + interval;
+        'wait: loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break 'wait;
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
+            let wait = uplink_interval.min(remaining);
+            match rx.recv_timeout(wait) {
+                Ok(command) => {
+                    if process_command(
+                        command,
+                        &app,
+                        &mut runner,
+                        &mut interval,
+                        &mut uplink_interval,
+                        &status,
+                        &log_entries,
+                        &log_counter,
+                        &extras,
+                        &mut actions_cfg,
+                    ) {
+                        should_stop = true;
+                    }
+                    break 'wait;
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    should_stop = true;
+                    break 'wait;
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+            runner.drain_uplink_only();
+            if handle_uplink_events(
+                &app,
+                &mut runner,
+                &actions_cfg,
+                &extras,
+                &status,
+                &log_entries,
+                &log_counter,
+            ) {
+                should_stop = true;
+                break 'wait;
+            }
+        }
+        if should_stop {
+            break;
         }
     }
 

@@ -625,9 +625,7 @@ mod tests {
     }
     #[test]
     fn drain_uplink_decodes_pending_packets_in_order() {
-        use crate::packet::{
-            BatteryEntry, BatteryStatusPacket, LayerStatePacket, UplinkPacket,
-        };
+        use crate::packet::{BatteryEntry, BatteryStatusPacket, LayerStatePacket, UplinkPacket};
 
         let transport = MockTransport {
             candidates: RefCell::new(vec![device("a")]),

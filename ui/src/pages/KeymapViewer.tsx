@@ -1,9 +1,25 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode, type Dispatch, type SetStateAction } from "react";
-import { AlertCircle, BarChart3, Keyboard, Lock, RefreshCw, XCircle } from "lucide-react";
-import { getKeyStats, onKeyStatsUpdated, readStudioKeymap } from "../api";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type Dispatch, type SetStateAction } from "react";
+import { Crosshair, AlertCircle, BarChart3, Keyboard, Lock, RefreshCw, XCircle, Pencil, Save, Trash2, LogOut, Search } from "lucide-react";
+import {
+  getKeyStats,
+  onKeyPressEvent,
+  onKeyStatsUpdated,
+  readStudioKeymap,
+  studioBeginEdit,
+  studioDiscardChanges,
+  studioEndEdit,
+  studioHasUnsaved,
+  studioKeyCatalog,
+  studioSaveChanges,
+  studioSetKey,
+} from "../api";
 import { KeymapCanvas } from "../components/KeymapCanvas";
 import { useLang, type TranslationKey } from "../i18n";
 import type {
+  KeyPressEvent,
+  EditBehavior,
+  EditState,
+  KeyCatalogEntry,
   KeyStatsSummary,
   MonitorStatus,
   StatsPeriod,
@@ -11,6 +27,7 @@ import type {
   StudioDeviceStatus,
   StudioKeymapSnapshot,
   StudioLayer,
+  StudioPhysicalKey,
 } from "../types";
 
 interface KeymapViewerProps {
@@ -29,6 +46,10 @@ function serialsMatch(a: string | null, b: string | null): boolean {
   return a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 
+function compareDeviceName(a: string, b: string): number {
+  return a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
+}
+
 export default function KeymapViewer({
   studioDevices,
   studioScanning,
@@ -41,12 +62,26 @@ export default function KeymapViewer({
   const { t } = useLang();
   const [selectedId, setSelectedId] = useState<string>("");
   const [activeLayer, setActiveLayer] = useState(0);
-  const [viewMode, setViewMode] = useState<"keymap" | "heatmap">("keymap");
+  const [viewMode, setViewMode] = useState<"keymap" | "heatmap" | "tester">("keymap");
   const [reading, setReading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [editState, setEditState] = useState<EditState>({
+    mode: "viewing",
+    dirty: false,
+    operation: "idle",
+    problem: null,
+  });
+  const [catalog, setCatalog] = useState<KeyCatalogEntry[]>([]);
+  const [picker, setPicker] = useState<{
+    key: StudioPhysicalKey;
+    layer: StudioLayer;
+    rect: { left: number; top: number; width: number; height: number };
+  } | null>(null);
 
   const devices = useMemo(
-    () => studioDevices.filter((device) => device.rpc_status === "ok"),
+    () => studioDevices
+      .filter((device) => device.rpc_status === "ok")
+      .sort((a, b) => compareDeviceName(a.display_name, b.display_name)),
     [studioDevices]
   );
   const selected = useMemo(
@@ -88,10 +123,11 @@ export default function KeymapViewer({
   // work until the keyboard next changes layers.
   const reportedLayerIndex = reportedLayer?.active_layer ?? null;
   useEffect(() => {
+    if (editState.mode === "editing") return;
     if (reportedLayerIndex === null || !snapshot) return;
     const index = snapshot.layers.findIndex((item) => item.index === reportedLayerIndex);
     if (index >= 0) setActiveLayer(index);
-  }, [reportedLayerIndex, snapshot]);
+  }, [editState.mode, reportedLayerIndex, snapshot]);
 
   const readDevice = useCallback(async (device: StudioDeviceStatus) => {
     setReading(true);
@@ -113,11 +149,18 @@ export default function KeymapViewer({
   }, [readDevice, reading, selected, snapshot, studioScanning]);
 
   const refresh = useCallback(async () => {
+    if (editState.mode === "editing") {
+      setError(errorLabel("port_busy", t));
+      return;
+    }
     setError(null);
     try {
       const refreshed = await refreshStudioDevices();
+      const nextAvailable = refreshed
+        .filter((device) => device.rpc_status === "ok")
+        .sort((a, b) => compareDeviceName(a.display_name, b.display_name))[0] ?? null;
       const nextSelected = refreshed.find((device) => device.id === selectedId)
-        ?? refreshed.find((device) => device.rpc_status === "ok")
+        ?? nextAvailable
         ?? null;
       if (nextSelected?.id && nextSelected.id !== selectedId) {
         setSelectedId(nextSelected.id);
@@ -128,9 +171,136 @@ export default function KeymapViewer({
     } catch (e) {
       setError(String(e));
     }
-  }, [readDevice, refreshStudioDevices, selectedId]);
+  }, [editState.mode, readDevice, refreshStudioDevices, selectedId, t]);
+
+  const mapEditProblem = useCallback((code: string): EditState["problem"] => {
+    if (code === "save_result_unknown") return "save_unknown";
+    if (code === "save_failed" || code === "save_not_supported" || code === "save_no_space") return "save_failed";
+    if (code === "locked") return "locked_again";
+    if (code === "disconnected" || code === "timeout") return "disconnected";
+    return null;
+  }, []);
+
+  const beginEdit = useCallback(async (forceDiscard = false) => {
+    if (!selected) return;
+    setError(null);
+    setPicker(null);
+    setEditState((current) => ({ ...current, operation: "setting", problem: null }));
+    try {
+      const result = await studioBeginEdit(selected.id, forceDiscard);
+      setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
+      if (catalog.length === 0) setCatalog(await studioKeyCatalog());
+      const dirty = await studioHasUnsaved(selected.id).catch(() => false);
+      setEditState({ mode: "editing", dirty, operation: "idle", problem: null });
+    } catch (e) {
+      const code = String(e);
+      if (code === "unsaved_changes_exist") {
+        const discard = window.confirm(t("keymap.edit.confirm_discard_switch"));
+        if (discard) {
+          try {
+            const result = await studioBeginEdit(selected.id, true);
+            setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
+            if (catalog.length === 0) setCatalog(await studioKeyCatalog());
+            const dirty = await studioHasUnsaved(selected.id).catch(() => false);
+            setEditState({ mode: "editing", dirty, operation: "idle", problem: null });
+          } catch (retryError) {
+            const retryCode = String(retryError);
+            const problem = mapEditProblem(retryCode);
+            setEditState((current) => ({ ...current, operation: "idle", problem }));
+            setError(errorLabel(retryCode, t));
+          }
+          return;
+        }
+      } else {
+        const problem = mapEditProblem(code);
+        if (problem) setEditState((current) => ({ ...current, operation: "idle", problem }));
+        setError(errorLabel(code, t));
+      }
+      setEditState((current) => ({ ...current, operation: "idle" }));
+    }
+  }, [catalog.length, mapEditProblem, selected, setSnapshotsByDeviceId, t]);
+
+  const saveEdit = useCallback(async () => {
+    if (!selected) return;
+    setEditState((current) => ({ ...current, operation: "saving", problem: null }));
+    try {
+      await studioSaveChanges(selected.id);
+      setEditState((current) => ({ ...current, dirty: false, operation: "idle", problem: null }));
+    } catch (e) {
+      const code = String(e);
+      const problem = mapEditProblem(code) ?? "save_failed";
+      setEditState((current) => ({ ...current, operation: "idle", problem }));
+      setError(errorLabel(code, t));
+    }
+  }, [mapEditProblem, selected, t]);
+
+  const discardEdit = useCallback(async () => {
+    if (!selected) return false;
+    setEditState((current) => ({ ...current, operation: "discarding", problem: null }));
+    try {
+      const result = await studioDiscardChanges(selected.id);
+      setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
+      setPicker(null);
+      setEditState((current) => ({ ...current, dirty: false, operation: "idle", problem: null }));
+      return true;
+    } catch (e) {
+      const code = String(e);
+      setEditState((current) => ({ ...current, operation: "idle" }));
+      setError(errorLabel(code, t));
+      return false;
+    }
+  }, [selected, setSnapshotsByDeviceId, t]);
+
+  const endEdit = useCallback(async () => {
+    if (!selected) return;
+    let dirty = editState.dirty;
+    if (dirty) dirty = await studioHasUnsaved(selected.id).catch(() => true);
+    if (dirty) {
+      const discard = window.confirm(t("keymap.edit.confirm_discard_end"));
+      if (!discard) return;
+      const discarded = await discardEdit();
+      if (!discarded) return;
+    }
+    setEditState((current) => ({ ...current, operation: "ending" }));
+    try {
+      await studioEndEdit(selected.id);
+      setPicker(null);
+      setEditState({ mode: "viewing", dirty: false, operation: "idle", problem: null });
+    } catch (e) {
+      const code = String(e);
+      setEditState((current) => ({ ...current, operation: "idle" }));
+      setError(errorLabel(code, t));
+    }
+  }, [discardEdit, editState.dirty, selected, t]);
+
+  const setKey = useCallback(async (key: StudioPhysicalKey, targetLayer: StudioLayer, behavior: EditBehavior) => {
+    if (!selected || editState.operation !== "idle") return;
+    setEditState((current) => ({ ...current, operation: "setting", problem: null }));
+    try {
+      const result = await studioSetKey(selected.id, targetLayer.id, key.position, behavior);
+      setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
+      setPicker(null);
+      setEditState((current) => ({ ...current, dirty: true, operation: "idle", problem: null }));
+    } catch (e) {
+      const code = String(e);
+      const problem = mapEditProblem(code);
+      setEditState((current) => ({ ...current, operation: "idle", problem }));
+      setError(errorLabel(code, t));
+    }
+  }, [editState.operation, mapEditProblem, selected, setSnapshotsByDeviceId, t]);
+
+  useEffect(() => {
+    setPicker(null);
+  }, [selectedId, viewMode, activeLayer]);
+
+  useEffect(() => {
+    return () => {
+      if (selectedId) void studioEndEdit(selectedId).catch(() => undefined);
+    };
+  }, [selectedId]);
 
   const busy = studioScanning || reading;
+  const editing = editState.mode === "editing";
   const viewerAvailable = selected?.keymap_viewer_status === "available";
   const selectedLocked = selected?.keymap_viewer_status === "locked" || selected?.lock_state === "locked";
 
@@ -144,12 +314,24 @@ export default function KeymapViewer({
         <div className="flex items-center gap-2">
           <button
             onClick={refresh}
-            disabled={busy}
+            disabled={busy || editing}
             className="btn-neu flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium text-ink disabled:opacity-60"
           >
             <RefreshCw size={15} className={busy ? "animate-spin" : ""} />
             {t("keymap.refresh")}
           </button>
+          {viewMode === "keymap" && viewerAvailable && !selectedLocked && (
+            <button
+              onClick={() => editing ? void endEdit() : void beginEdit(false)}
+              disabled={busy || editState.operation !== "idle"}
+              className={`btn-neu flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium disabled:opacity-60 ${
+                editing ? "text-accent-deep" : "text-ink"
+              }`}
+            >
+              <Pencil size={15} />
+              {editing ? t("keymap.edit.on") : t("keymap.edit")}
+            </button>
+          )}
         </div>
       </div>
 
@@ -214,22 +396,67 @@ export default function KeymapViewer({
                   icon={<BarChart3 size={13} />}
                   label={t("keymap.view.heatmap")}
                 />
+                <ViewTab
+                  active={viewMode === "tester"}
+                  onClick={() => setViewMode("tester")}
+                  icon={<Crosshair size={13} />}
+                  label={t("keymap.view.tester")}
+                />
               </div>
-              {viewMode === "keymap" ? (
+              {viewMode === "keymap" && (
                 <KeymapContent
                   snapshot={snapshot}
                   activeLayer={activeLayer}
                   setActiveLayer={setActiveLayer}
                   layer={layer}
                   reportedLayerIndex={reportedLayerIndex}
+                  onKeyClick={editing ? (key, element) => {
+                    if (!layer || editState.operation !== "idle") return;
+                    const rect = element.getBoundingClientRect();
+                    setPicker({
+                      key,
+                      layer,
+                      rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+                    });
+                  } : undefined}
                 />
-              ) : (
+              )}
+              {viewMode === "heatmap" && (
                 <HeatmapContent snapshot={snapshot} statsUid={statsUid} />
+              )}
+              {viewMode === "tester" && (
+                <TesterContent
+                  snapshot={snapshot}
+                  activeLayer={activeLayer}
+                  setActiveLayer={setActiveLayer}
+                  layer={layer}
+                  reportedLayerIndex={reportedLayerIndex}
+                  statsUid={statsUid}
+                />
               )}
             </>
           )}
         </section>
       </div>
+      {editing && selected && (
+        <EditBar
+          dirty={editState.dirty}
+          operation={editState.operation}
+          problem={editState.problem}
+          onSave={saveEdit}
+          onDiscard={discardEdit}
+          onEnd={endEdit}
+        />
+      )}
+      {picker && (
+        <KeyPicker
+          catalog={catalog}
+          rect={picker.rect}
+          busy={editState.operation === "setting"}
+          onClose={() => setPicker(null)}
+          onSelect={(behavior) => void setKey(picker.key, picker.layer, behavior)}
+        />
+      )}
     </div>
   );
 }
@@ -253,13 +480,17 @@ function ViewTab({ active, onClick, icon, label }: {
   );
 }
 
-function KeymapContent({ snapshot, activeLayer, setActiveLayer, layer, reportedLayerIndex }: {
+function KeymapContent({ snapshot, activeLayer, setActiveLayer, layer, reportedLayerIndex, keyStyle, marquee, onKeyClick }: {
   snapshot: StudioKeymapSnapshot;
   activeLayer: number;
   setActiveLayer: (value: number) => void;
   layer: StudioLayer | null;
   /** Layer the keyboard itself reports as active (LAYER_STATE uplink), or null. */
   reportedLayerIndex: number | null;
+  keyStyle?: (key: StudioPhysicalKey) => CSSProperties | undefined;
+  onKeyClick?: (key: StudioPhysicalKey, element: HTMLDivElement) => void;
+  /** Optional element shown to the right of the layer tabs (tester typed-char marquee). */
+  marquee?: ReactNode;
 }) {
   const { t } = useLang();
   const bindingsByPosition = useMemo(() => {
@@ -273,25 +504,28 @@ function KeymapContent({ snapshot, activeLayer, setActiveLayer, layer, reportedL
       <div>
         <div className="text-sm font-medium text-ink">{snapshot.device_name}</div>
       </div>
-      <div className="flex flex-wrap gap-2">
-        {snapshot.layers.map((item, index) => {
-          const live = reportedLayerIndex !== null && item.index === reportedLayerIndex;
-          return (
-            <button
-              key={item.id}
-              onClick={() => setActiveLayer(index)}
-              title={live ? t("keymap.active_layer") : undefined}
-              className={`relative rounded-pill px-3 py-1.5 text-sm font-medium ring-1 transition-colors ${
-                activeLayer === index ? "bg-plate text-accent ring-transparent shadow-neu-sel-in" : "bg-background text-muted ring-border hover:bg-plate hover:text-ink"
-              }`}
-            >
-              {item.name}
-              {live && (
-                <span className="animate-layer-pulse absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-accent ring-2 ring-white" />
-              )}
-            </button>
-          );
-        })}
+      <div className="flex items-start gap-2">
+        <div className="flex flex-wrap gap-2">
+          {snapshot.layers.map((item, index) => {
+            const live = reportedLayerIndex !== null && item.index === reportedLayerIndex;
+            return (
+              <button
+                key={item.id}
+                onClick={() => setActiveLayer(index)}
+                title={live ? t("keymap.active_layer") : undefined}
+                className={`relative rounded-pill px-3 py-1.5 text-sm font-medium ring-1 transition-colors ${
+                  activeLayer === index ? "bg-plate text-accent ring-transparent shadow-neu-sel-in" : "bg-background text-muted ring-border hover:bg-plate hover:text-ink"
+                }`}
+              >
+                {item.name}
+                {live && (
+                  <span className="animate-layer-pulse absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-accent ring-2 ring-white" />
+                )}
+              </button>
+            );
+          })}
+        </div>
+        {marquee}
       </div>
       {!layer || snapshot.selected_layout_keys.length === 0 ? (
         <EmptyState icon={<Keyboard size={32} />} title={t("keymap.empty_keymap_title")} body={t("keymap.empty_keymap_body")} />
@@ -299,6 +533,8 @@ function KeymapContent({ snapshot, activeLayer, setActiveLayer, layer, reportedL
         <KeymapCanvas
           keys={snapshot.selected_layout_keys}
           keyTitle={(key) => bindingsByPosition.get(key.position)?.full_label ?? "--"}
+          keyStyle={keyStyle}
+          onKeyClick={onKeyClick}
           keyContent={(key) => {
             const binding = bindingsByPosition.get(key.position);
             return (
@@ -318,6 +554,176 @@ function KeymapContent({ snapshot, activeLayer, setActiveLayer, layer, reportedL
       )}
     </div>
   );
+}
+
+function EditBar({ dirty, operation, problem, onSave, onDiscard, onEnd }: {
+  dirty: boolean;
+  operation: EditState["operation"];
+  problem: EditState["problem"];
+  onSave: () => void;
+  onDiscard: () => void;
+  onEnd: () => void;
+}) {
+  const { t } = useLang();
+  const busy = operation !== "idle";
+  const message = problem
+    ? t(`keymap.edit.problem.${problem}` as TranslationKey)
+    : dirty
+      ? t("keymap.edit.dirty")
+      : t("keymap.edit.no_changes");
+  return (
+    <div className="fixed bottom-4 left-1/2 z-40 flex w-[min(720px,calc(100vw-32px))] -translate-x-1/2 flex-wrap items-center justify-between gap-3 rounded-card bg-surface px-4 py-3 shadow-neu-up ring-1 ring-border">
+      <div className={`text-sm font-medium ${problem ? "text-red-700" : dirty ? "text-ink" : "text-muted"}`}>
+        {message}
+      </div>
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          onClick={onSave}
+          disabled={busy || !dirty}
+          className="flex items-center gap-1.5 rounded-pill bg-accent px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+        >
+          <Save size={14} />
+          {operation === "saving" ? t("keymap.edit.saving") : t("keymap.edit.save")}
+        </button>
+        <button
+          onClick={onDiscard}
+          disabled={busy || !dirty}
+          className="flex items-center gap-1.5 rounded-pill bg-background px-3 py-1.5 text-sm font-medium text-muted ring-1 ring-border disabled:opacity-50"
+        >
+          <Trash2 size={14} />
+          {t("keymap.edit.discard")}
+        </button>
+        <button
+          onClick={onEnd}
+          disabled={busy}
+          className="flex items-center gap-1.5 rounded-pill bg-background px-3 py-1.5 text-sm font-medium text-muted ring-1 ring-border disabled:opacity-50"
+        >
+          <LogOut size={14} />
+          {t("keymap.edit.end")}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function KeyPicker({ catalog, rect, busy, onClose, onSelect }: {
+  catalog: KeyCatalogEntry[];
+  rect: { left: number; top: number; width: number; height: number };
+  busy: boolean;
+  onClose: () => void;
+  onSelect: (behavior: EditBehavior) => void;
+}) {
+  const { t } = useLang();
+  const [query, setQuery] = useState("");
+  const queryLower = query.trim().toLowerCase();
+  const filtered = useMemo(() => {
+    if (!queryLower) return catalog;
+    return catalog.filter((entry) => {
+      const usage = `0x${entry.hid_usage.toString(16)}`;
+      return (
+        entry.display.toLowerCase().includes(queryLower) ||
+        entry.canonical.toLowerCase().includes(queryLower) ||
+        usage.includes(queryLower) ||
+        entry.aliases.some((alias) => alias.toLowerCase().includes(queryLower))
+      );
+    });
+  }, [catalog, queryLower]);
+
+  const position = pickerPosition(rect);
+  const grouped = useMemo(() => {
+    const map = new Map<KeyCatalogEntry["category"], KeyCatalogEntry[]>();
+    for (const entry of filtered) {
+      const list = map.get(entry.category) ?? [];
+      list.push(entry);
+      map.set(entry.category, list);
+    }
+    return [...map.entries()];
+  }, [filtered]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return (
+    <>
+      <button className="fixed inset-0 z-40 cursor-default bg-transparent" onClick={onClose} />
+      <div
+        className="fixed z-50 flex max-h-[min(560px,calc(100vh-32px))] w-[min(520px,calc(100vw-24px))] flex-col rounded-card bg-surface p-3 shadow-neu-up ring-1 ring-border"
+        style={{ left: position.left, top: position.top }}
+      >
+        <div className="flex items-center gap-2 rounded-pill bg-background px-3 py-2 ring-1 ring-border">
+          <Search size={15} className="text-faint" />
+          <input
+            autoFocus
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder={t("keymap.edit.search")}
+            className="min-w-0 flex-1 bg-transparent text-sm text-ink outline-none placeholder:text-faint"
+          />
+        </div>
+        <div className="mt-3 flex gap-2">
+          <button
+            disabled={busy}
+            onClick={() => onSelect({ kind: "transparent" })}
+            className="flex-1 rounded-lg bg-background px-3 py-2 text-left text-sm ring-1 ring-border disabled:opacity-50"
+          >
+            <div className="font-medium text-ink">{t("keymap.edit.transparent")}</div>
+            <div className="mt-0.5 text-xs text-faint">{t("keymap.edit.transparent_desc")}</div>
+          </button>
+          <button
+            disabled={busy}
+            onClick={() => onSelect({ kind: "none" })}
+            className="flex-1 rounded-lg bg-background px-3 py-2 text-left text-sm ring-1 ring-border disabled:opacity-50"
+          >
+            <div className="font-medium text-ink">{t("keymap.edit.none")}</div>
+            <div className="mt-0.5 text-xs text-faint">{t("keymap.edit.none_desc")}</div>
+          </button>
+        </div>
+        <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
+          {grouped.map(([category, entries]) => (
+            <div key={category} className="mb-3">
+              <div className="mb-1.5 text-xs font-medium uppercase text-faint">
+                {t(`keymap.catalog.${category}` as TranslationKey)}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {entries.map((entry) => (
+                  <button
+                    key={`${entry.hid_usage}-${entry.canonical}`}
+                    disabled={busy}
+                    onClick={() => onSelect({ kind: "key_press", hid_usage: entry.hid_usage })}
+                    className="rounded-md bg-background px-2.5 py-1.5 text-sm font-medium text-ink ring-1 ring-border hover:bg-plate disabled:opacity-50"
+                    title={(entry.names?.length ? entry.names : [entry.canonical]).join(" / ")}
+                  >
+                    {entry.display}
+                  </button>
+                ))}
+              </div>
+            </div>
+          ))}
+          {grouped.length === 0 && (
+            <div className="py-8 text-center text-sm text-faint">
+              {t("keymap.edit.no_results")}
+            </div>
+          )}
+        </div>
+      </div>
+    </>
+  );
+}
+
+function pickerPosition(rect: { left: number; top: number; width: number; height: number }) {
+  const width = Math.min(520, window.innerWidth - 24);
+  const height = Math.min(560, window.innerHeight - 32);
+  let left = rect.left + rect.width / 2 - width / 2;
+  let top = rect.top + rect.height + 8;
+  if (left + width > window.innerWidth - 12) left = window.innerWidth - width - 12;
+  if (left < 12) left = 12;
+  if (top + height > window.innerHeight - 12) top = Math.max(12, rect.top - height - 8);
+  return { left, top };
 }
 
 function HeatmapContent({ snapshot, statsUid }: {
@@ -515,6 +921,122 @@ function HeatmapContent({ snapshot, statsUid }: {
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function TesterContent({ snapshot, activeLayer, setActiveLayer, layer, reportedLayerIndex, statsUid }: {
+  snapshot: StudioKeymapSnapshot;
+  activeLayer: number;
+  setActiveLayer: (v: number) => void;
+  layer: StudioLayer | null;
+  reportedLayerIndex: number | null;
+  statsUid: string | null;
+}) {
+  const { t } = useLang();
+  const [pressedKeys, setPressedKeys] = useState<Set<number>>(new Set());
+  const [testedKeys, setTestedKeys] = useState<Set<number>>(new Set());
+  const [typed, setTyped] = useState<{ id: number; label: string }[]>([]);
+
+  // Resolve a pressed position to its keymap label on the currently displayed
+  // layer. We have no real keycode from the firmware (KEY_PRESS carries only
+  // position), so this shows the binding label, not the OS-level character.
+  const labelByPosition = useMemo(() => {
+    const map = new Map<number, string>();
+    if (layer) for (const b of layer.bindings) map.set(b.position, b.primary_label);
+    return map;
+  }, [layer]);
+  const labelByPositionRef = useRef(labelByPosition);
+  labelByPositionRef.current = labelByPosition;
+
+  useEffect(() => {
+    if (!statsUid) return;
+    let unlisten: (() => void) | null = null;
+    let disposed = false;
+    let nextId = 0;
+    void onKeyPressEvent((ev: KeyPressEvent) => {
+      if (ev.device_uid !== statsUid) return;
+      if (ev.pressed) {
+        setPressedKeys((prev) => new Set(prev).add(ev.position));
+        setTestedKeys((prev) => new Set(prev).add(ev.position));
+        const label = labelByPositionRef.current.get(ev.position);
+        if (label && label !== "--") {
+          setTyped((prev) => [...prev, { id: nextId++, label }].slice(-40));
+        }
+      } else {
+        setPressedKeys((prev) => {
+          const next = new Set(prev);
+          next.delete(ev.position);
+          return next;
+        });
+      }
+    }).then((fn) => {
+      if (disposed) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+      setPressedKeys(new Set());
+    };
+  }, [statsUid]);
+
+  const keyStyle = useCallback(
+    (key: StudioPhysicalKey): CSSProperties | undefined => {
+      if (pressedKeys.has(key.position))
+        return { backgroundColor: "rgb(var(--accent-rgb))", color: "#fff", transition: "background-color 50ms" };
+      if (testedKeys.has(key.position))
+        return { backgroundColor: "rgb(var(--accent-rgb) / 0.25)" };
+      return undefined;
+    },
+    [pressedKeys, testedKeys],
+  );
+
+  if (!statsUid) {
+    return (
+      <EmptyState
+        icon={<Crosshair size={32} />}
+        title={t("stats.no_link")}
+        body={t("stats.no_link.hint")}
+      />
+    );
+  }
+
+  return (
+    <KeymapContent
+      snapshot={snapshot}
+      activeLayer={activeLayer}
+      setActiveLayer={setActiveLayer}
+      layer={layer}
+      reportedLayerIndex={reportedLayerIndex}
+      keyStyle={keyStyle}
+      marquee={
+        <>
+          <TypedMarquee typed={typed} />
+          <button
+            onClick={() => { setTestedKeys(new Set()); setPressedKeys(new Set()); setTyped([]); }}
+            className="shrink-0 rounded-pill px-3 py-1.5 text-sm text-muted hover:bg-plate hover:text-ink transition-colors"
+          >
+            {t("tester.reset")}
+          </button>
+        </>
+      }
+    />
+  );
+}
+
+/** Right-to-left marquee of typed key labels, shown beside the tester's layer
+ *  tabs. Grows/shrinks via flex-1 as the layer tabs take more/less width. */
+function TypedMarquee({ typed }: { typed: { id: number; label: string }[] }) {
+  return (
+    <div className="flex h-8 min-w-0 flex-1 items-center overflow-hidden rounded-pill bg-background px-3 ring-1 ring-border">
+      <div className="ml-auto flex items-center gap-2 whitespace-nowrap">
+        {typed.map((item) => (
+          <span key={item.id} className="animate-key-flow font-mono text-sm font-medium text-accent">
+            {item.label}
+          </span>
+        ))}
+      </div>
     </div>
   );
 }

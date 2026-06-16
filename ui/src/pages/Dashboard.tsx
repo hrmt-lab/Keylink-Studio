@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   Play,
   Square,
@@ -34,6 +34,10 @@ interface Props {
 function serialsMatch(a: string | null, b: string | null): boolean {
   if (!a || !b) return false;
   return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+function compareDeviceName(a: string, b: string): number {
+  return a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
 }
 
 export default function Dashboard({ config, setConfig, status, logs }: Props) {
@@ -106,6 +110,16 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
   // Layer rules are per-device only; summarize across all device configs.
   const allDeviceRules = Object.values(config.layer_switch.devices ?? {}).flatMap(
     (device) => device.rules
+  );
+  const connectedDevices = useMemo(
+    () =>
+      status.connected_device_names
+        .map((name, index) => ({
+          name,
+          device: status.host_link_devices[index] ?? null,
+        }))
+        .sort((a, b) => compareDeviceName(a.name, b.name)),
+    [status.connected_device_names, status.host_link_devices]
   );
 
   return (
@@ -182,11 +196,9 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
               mono
             />
 
-            {status.connected_device_names.length > 0 ? (
+            {connectedDevices.length > 0 ? (
               <div className="space-y-1 border-t border-background pt-2.5">
-                {status.connected_device_names.slice(0, 2).map((name, i) => {
-                  // connected_device_names and host_link_devices share the same order.
-                  const device = status.host_link_devices[i] ?? null;
+                {connectedDevices.slice(0, 2).map(({ name, device }) => {
                   const battery = device
                     ? status.device_battery.find(
                         (b) =>
@@ -195,7 +207,7 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
                       ) ?? null
                     : null;
                   return (
-                    <div key={i} className="flex items-center gap-1.5 text-[11px] text-muted">
+                    <div key={device?.device_uid_hash ?? device?.path ?? name} className="flex items-center gap-1.5 text-[11px] text-muted">
                       <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-accent" />
                       <span className="min-w-0 truncate">{name}</span>
                       {battery && (
@@ -214,9 +226,9 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
                     </div>
                   );
                 })}
-                {status.connected_device_names.length > 2 && (
+                {connectedDevices.length > 2 && (
                   <div className="text-[11px] text-disabled">
-                    {t("dashboard.feature.rules_others", { n: status.connected_device_names.length - 2 })}
+                    {t("dashboard.feature.rules_others", { n: connectedDevices.length - 2 })}
                   </div>
                 )}
               </div>

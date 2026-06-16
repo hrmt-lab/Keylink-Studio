@@ -14,10 +14,12 @@ pub const CAPABILITY_BATTERY: u32 = 1 << 4;
 pub const CAPABILITY_HOST_ACTION: u32 = 1 << 5;
 pub const CAPABILITY_KEY_STATS: u32 = 1 << 6;
 pub const CAPABILITY_LAYER_STATE: u32 = 1 << 7;
+pub const CAPABILITY_KEY_PRESS: u32 = 1 << 8;
 
 pub const BATTERY_LEVEL_UNKNOWN: u8 = 0xFF;
 pub const KEY_STATS_MAX_ENTRIES: usize = 8;
 pub const KEY_STATS_FLAG_MORE_FOLLOWS: u8 = 1 << 0;
+pub const KEY_PRESS_FLAG_PRESSED: u8 = 1 << 0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -34,6 +36,7 @@ pub enum PacketType {
     HostAction = 0x50,
     KeyStats = 0x60,
     LayerState = 0x70,
+    KeyPress = 0x80,
 }
 
 impl TryFrom<u8> for PacketType {
@@ -53,6 +56,7 @@ impl TryFrom<u8> for PacketType {
             0x50 => Ok(Self::HostAction),
             0x60 => Ok(Self::KeyStats),
             0x70 => Ok(Self::LayerState),
+            0x80 => Ok(Self::KeyPress),
             other => Err(PacketError::UnknownType(other)),
         }
     }
@@ -344,12 +348,20 @@ pub struct LayerStatePacket {
     pub seq: u8,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyPressPacket {
+    pub position: u8,
+    pub pressed: bool,
+    pub seq: u8,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UplinkPacket {
     Battery(BatteryStatusPacket),
     HostAction(HostActionPacket),
     KeyStats(KeyStatsPacket),
     LayerState(LayerStatePacket),
+    KeyPress(KeyPressPacket),
 }
 
 impl UplinkPacket {
@@ -359,6 +371,7 @@ impl UplinkPacket {
             Self::HostAction(_) => PacketType::HostAction,
             Self::KeyStats(_) => PacketType::KeyStats,
             Self::LayerState(_) => PacketType::LayerState,
+            Self::KeyPress(_) => PacketType::KeyPress,
         }
     }
 
@@ -368,6 +381,7 @@ impl UplinkPacket {
             Self::HostAction(_) => CAPABILITY_HOST_ACTION,
             Self::KeyStats(_) => CAPABILITY_KEY_STATS,
             Self::LayerState(_) => CAPABILITY_LAYER_STATE,
+            Self::KeyPress(_) => CAPABILITY_KEY_PRESS,
         }
     }
 
@@ -389,6 +403,7 @@ impl UplinkPacket {
             PacketType::HostAction => Self::decode_host_action(bytes),
             PacketType::KeyStats => Self::decode_key_stats(bytes),
             PacketType::LayerState => Self::decode_layer_state(bytes),
+            PacketType::KeyPress => Self::decode_key_press(bytes),
             other => Err(PacketError::DecodeUnsupportedType(other as u8)),
         }
     }
@@ -484,6 +499,21 @@ impl UplinkPacket {
         }))
     }
 
+    fn decode_key_press(bytes: &[u8]) -> Result<Self, PacketError> {
+        let flags = bytes[5];
+        if flags & !KEY_PRESS_FLAG_PRESSED != 0
+            || bytes[6] != 0
+            || bytes[8..].iter().any(|b| *b != 0)
+        {
+            return Err(PacketError::ReservedNotZero);
+        }
+        Ok(Self::KeyPress(KeyPressPacket {
+            position: bytes[4],
+            pressed: flags & KEY_PRESS_FLAG_PRESSED != 0,
+            seq: bytes[7],
+        }))
+    }
+
     /// Encode for round-trip tests and debug injection. Not used in the
     /// production send path (these packets are device-initiated).
     pub fn encode_payload(&self) -> [u8; PACKET_SIZE] {
@@ -522,6 +552,11 @@ impl UplinkPacket {
                 bytes[4] = p.active_layer;
                 bytes[7] = p.seq;
                 bytes[8..12].copy_from_slice(&p.layer_mask.to_le_bytes());
+            }
+            Self::KeyPress(p) => {
+                bytes[4] = p.position;
+                bytes[5] = if p.pressed { KEY_PRESS_FLAG_PRESSED } else { 0 };
+                bytes[7] = p.seq;
             }
         }
         bytes
@@ -580,7 +615,8 @@ impl Packet {
             | PacketType::BatteryStatus
             | PacketType::HostAction
             | PacketType::KeyStats
-            | PacketType::LayerState => {}
+            | PacketType::LayerState
+            | PacketType::KeyPress => {}
         }
         bytes
     }
@@ -652,9 +688,8 @@ impl Packet {
             | PacketType::BatteryStatus
             | PacketType::HostAction
             | PacketType::KeyStats
-            | PacketType::LayerState => {
-                Err(PacketError::DecodeUnsupportedType(packet_type as u8))
-            }
+            | PacketType::LayerState
+            | PacketType::KeyPress => Err(PacketError::DecodeUnsupportedType(packet_type as u8)),
         }
     }
 

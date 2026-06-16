@@ -156,6 +156,31 @@ export default function Settings({ config, setConfig }: Props) {
             <span className="text-sm text-muted w-8">ms</span>
           </div>
         </SettingRow>
+        <SettingRow
+          label={t("settings.polling.uplink_interval")}
+          description={t("settings.polling.uplink_interval.desc")}
+        >
+          <div className="flex items-center gap-2">
+            <input
+              type="number"
+              min={5}
+              max={500}
+              step={5}
+              value={draft.polling.uplink_interval_ms}
+              onChange={(e) =>
+                setDraft({
+                  ...draft,
+                  polling: {
+                    ...draft.polling,
+                    uplink_interval_ms: Math.max(5, Number(e.target.value)),
+                  },
+                })
+              }
+              className="input !w-28 text-right font-mono"
+            />
+            <span className="text-sm text-muted w-8">ms</span>
+          </div>
+        </SettingRow>
       </SectionCard>
 
       {/* HID */}

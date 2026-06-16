@@ -548,7 +548,10 @@ fn rate_limit_window(value: Option<&Value>) -> Option<(u64, AiUsageWindow)> {
     ))
 }
 
-fn codex_history_snapshot(sessions_dirs: &[PathBuf], config: &CodexAiUsageConfig) -> AiUsageSnapshot {
+fn codex_history_snapshot(
+    sessions_dirs: &[PathBuf],
+    config: &CodexAiUsageConfig,
+) -> AiUsageSnapshot {
     let now = unix_now();
     let mut five_tokens = 0u64;
     let mut seven_tokens = 0u64;
@@ -1057,9 +1060,12 @@ fn read_session_text(path: &Path) -> Option<String> {
     if len <= MAX_SESSION_READ_BYTES {
         return fs::read_to_string(path).ok();
     }
-    file.seek(SeekFrom::Start(len - MAX_SESSION_READ_BYTES)).ok()?;
+    file.seek(SeekFrom::Start(len - MAX_SESSION_READ_BYTES))
+        .ok()?;
     let mut buf = Vec::with_capacity(MAX_SESSION_READ_BYTES as usize);
-    file.take(MAX_SESSION_READ_BYTES).read_to_end(&mut buf).ok()?;
+    file.take(MAX_SESSION_READ_BYTES)
+        .read_to_end(&mut buf)
+        .ok()?;
     let text = String::from_utf8_lossy(&buf).into_owned();
     Some(match text.find('\n') {
         Some(idx) => text[idx + 1..].to_string(),
@@ -1235,11 +1241,9 @@ mod tests {
             .set_modified(base + Duration::from_secs(10))
             .unwrap();
 
-        let snapshot = codex_rate_limits_snapshot(&[
-            older.path().to_path_buf(),
-            newer.path().to_path_buf(),
-        ])
-        .unwrap();
+        let snapshot =
+            codex_rate_limits_snapshot(&[older.path().to_path_buf(), newer.path().to_path_buf()])
+                .unwrap();
 
         assert_eq!(snapshot.five_hour.unwrap().used_bp, 4200);
     }

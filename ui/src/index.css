@@ -135,6 +135,15 @@ body {
   animation: saved-pop 1.6s ease forwards;
 }
 
+/* Tester typed-char marquee: newest label slides in from the right + fades. */
+@keyframes key-flow {
+  from { opacity: 0; transform: translateX(10px); }
+  to   { opacity: 1; transform: translateX(0); }
+}
+.animate-key-flow {
+  animation: key-flow 0.18s ease-out;
+}
+
 /* Layer badge swap: fade out, swap text, fade in (140ms each way). */
 .badge-swap {
   transition: opacity 0.14s ease;

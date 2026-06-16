@@ -134,11 +134,13 @@ mod windows_impl {
     /// bar (Ctrl+L), type the path and press Enter.
     unsafe fn open_in_new_tab(hwnd: HWND, path: &str) {
         bring_to_front(hwnd);
-        sleep(Duration::from_millis(120));
-        send_chord(VK_T);
         sleep(Duration::from_millis(150));
+        send_chord(VK_T);
+        // Wait for the new tab to open and receive focus before sending Ctrl+L.
+        sleep(Duration::from_millis(350));
         send_chord(VK_L);
-        sleep(Duration::from_millis(80));
+        // Wait for the address bar to become ready for input.
+        sleep(Duration::from_millis(150));
         type_text(path);
         send_key(VK_RETURN);
     }
@@ -247,9 +249,7 @@ mod windows_impl {
         let mut i = 0;
         while i < bytes.len() {
             if bytes[i] == b'%' && i + 2 < bytes.len() {
-                if let (Some(h), Some(l)) =
-                    (hex_val(bytes[i + 1]), hex_val(bytes[i + 2]))
-                {
+                if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
                     out.push(h << 4 | l);
                     i += 3;
                     continue;

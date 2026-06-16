@@ -6,11 +6,13 @@ use std::{
 };
 
 use serde::Serialize;
+use strum::IntoEnumIterator;
 use thiserror::Error;
 use zmk_studio_api::{
     proto::zmk::{self, core::LockState},
+    transport::serial::SerialTransport,
     transport::serial::SerialTransportError,
-    ClientError, HidUsage, StudioClient,
+    Behavior, ClientError, HidUsage, Keycode, StudioClient,
 };
 
 use crate::config::StudioConfig;
@@ -141,6 +143,23 @@ pub struct StudioRawBinding {
     pub param2: u32,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct KeyCatalogEntry {
+    pub display: String,
+    pub canonical: String,
+    pub hid_usage: u32,
+    pub category: String,
+    pub aliases: Vec<String>,
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EditBehavior {
+    KeyPress(u32),
+    Transparent,
+    None,
+}
+
 #[derive(Debug, Error)]
 pub enum StudioError {
     #[error("device not found")]
@@ -149,6 +168,34 @@ pub enum StudioError {
     Locked,
     #[error("RPC timeout")]
     Timeout,
+    #[error("device disconnected")]
+    Disconnected,
+    #[error("invalid key location")]
+    InvalidLocation,
+    #[error("invalid behavior")]
+    InvalidBehavior,
+    #[error("invalid behavior parameters")]
+    InvalidParameters,
+    #[error("missing behavior role")]
+    MissingBehaviorRole,
+    #[error("save failed")]
+    SaveFailed,
+    #[error("save is not supported")]
+    SaveNotSupported,
+    #[error("no space left for save")]
+    SaveNoSpace,
+    #[error("save result is unknown")]
+    SaveResultUnknown,
+    #[error("no edit session")]
+    NoEditSession,
+    #[error("edit session already exists")]
+    EditSessionExists,
+    #[error("unsaved changes exist")]
+    UnsavedChangesExist,
+    #[error("edit session device mismatch")]
+    SessionDeviceMismatch,
+    #[error("studio port is busy")]
+    PortBusy,
     #[error("RPC failed")]
     RpcFailed,
 }
@@ -209,6 +256,129 @@ pub fn read_keymap_for_device(
         read_keymap(candidate)
     })
     .unwrap_or(Err(StudioError::Timeout))
+}
+
+pub struct StudioEditSession {
+    client: StudioClient<SerialTransport>,
+    pub device_id: String,
+    fallback_name: String,
+    layout_selection: LayoutSelection,
+    behavior_names: BTreeMap<i32, String>,
+}
+
+impl StudioEditSession {
+    pub fn open(device_id: &str, _config: &StudioConfig) -> Result<Self, StudioError> {
+        let candidates = serial_candidates().map_err(|_| StudioError::DeviceNotFound)?;
+        let Some(candidate) = candidates
+            .into_iter()
+            .find(|candidate| candidate.id() == device_id)
+        else {
+            return Err(StudioError::DeviceNotFound);
+        };
+
+        let mut client = StudioClient::open_serial(&candidate.port_name)
+            .map_err(|_| StudioError::Disconnected)?;
+        let lock_state = client
+            .get_lock_state()
+            .map_err(map_client_to_studio_error)?;
+        if lock_state_to_status(lock_state) != StudioLockState::Unlocked {
+            return Err(StudioError::Locked);
+        }
+
+        let keymap = client.get_keymap().map_err(map_client_to_studio_error)?;
+        let layout_selection = select_layout(client.get_physical_layouts().ok(), &keymap);
+        let behavior_names = behavior_names_for_keymap(&mut client, &keymap);
+
+        Ok(Self {
+            client,
+            device_id: candidate.id(),
+            fallback_name: candidate.display_name(),
+            layout_selection,
+            behavior_names,
+        })
+    }
+
+    pub fn has_unsaved(&mut self) -> Result<bool, StudioError> {
+        self.client
+            .check_unsaved_changes()
+            .map_err(map_client_to_studio_error)
+    }
+
+    pub fn snapshot(&mut self) -> Result<StudioKeymapSnapshot, StudioError> {
+        let keymap = self
+            .client
+            .get_keymap()
+            .map_err(map_client_to_studio_error)?;
+        Ok(snapshot_from_parts(
+            self.device_id.clone(),
+            self.fallback_name.clone(),
+            StudioLockState::Unlocked,
+            keymap,
+            self.layout_selection.clone(),
+            self.behavior_names.clone(),
+        ))
+    }
+
+    pub fn set_binding(
+        &mut self,
+        layer_id: u32,
+        position: i32,
+        behavior: EditBehavior,
+    ) -> Result<StudioKeymapSnapshot, StudioError> {
+        self.client
+            .set_key_at(layer_id, position, behavior_to_zmk(behavior))
+            .map_err(map_client_to_studio_error)?;
+        self.snapshot()
+    }
+
+    pub fn save(&mut self) -> Result<(), StudioError> {
+        match self.client.save_changes() {
+            Ok(()) => Ok(()),
+            Err(save_error) => match self.client.check_unsaved_changes() {
+                Ok(false) => Ok(()),
+                Ok(true) => Err(map_client_to_studio_error(save_error)),
+                Err(_) => Err(StudioError::SaveResultUnknown),
+            },
+        }
+    }
+
+    pub fn discard(&mut self) -> Result<StudioKeymapSnapshot, StudioError> {
+        self.client
+            .discard_changes()
+            .map_err(map_client_to_studio_error)?;
+        self.snapshot()
+    }
+}
+
+pub fn key_catalog() -> Vec<KeyCatalogEntry> {
+    let mut entries: Vec<_> = Keycode::iter()
+        .map(|keycode| {
+            let canonical = keycode.to_name().to_string();
+            let display = display_key_name(&canonical);
+            let hid_usage = keycode.to_hid_usage();
+            let category = key_category(&canonical, hid_usage).to_string();
+            let names = key_names(&canonical);
+            let aliases = key_aliases(&canonical, &display, &names);
+            KeyCatalogEntry {
+                display,
+                canonical,
+                hid_usage,
+                category,
+                aliases,
+                names,
+            }
+        })
+        .collect();
+
+    entries.sort_by(|a, b| {
+        let a_rank = category_rank(&a.category);
+        let b_rank = category_rank(&b.category);
+        a_rank
+            .cmp(&b_rank)
+            .then_with(|| key_sort_value(a).cmp(&key_sort_value(b)))
+            .then_with(|| a.display.cmp(&b.display))
+    });
+    entries
 }
 
 fn probe_candidate(candidate: StudioPortCandidate, timeout_ms: u64) -> StudioDeviceStatus {
@@ -292,20 +462,41 @@ fn read_keymap(candidate: StudioPortCandidate) -> Result<StudioKeymapSnapshot, S
         return Err(StudioError::Locked);
     }
 
-    let keymap = client.get_keymap().map_err(|error| match error {
-        ClientError::Meta(_) => StudioError::Locked,
-        _ => StudioError::RpcFailed,
-    })?;
-    let layout_selection = select_layout(client.get_physical_layouts().ok(), &keymap);
-    let behavior_names = behavior_names_for_keymap(&mut client, &keymap);
-
-    Ok(StudioKeymapSnapshot {
-        device_id: candidate.id(),
-        device_name: if info.name.is_empty() {
+    let (keymap, layout_selection, behavior_names) = fetch_snapshot_data(&mut client)?;
+    Ok(snapshot_from_parts(
+        candidate.id(),
+        if info.name.is_empty() {
             candidate.display_name()
         } else {
             info.name
         },
+        lock_state,
+        keymap,
+        layout_selection,
+        behavior_names,
+    ))
+}
+
+fn fetch_snapshot_data(
+    client: &mut StudioClient<SerialTransport>,
+) -> Result<(zmk::keymap::Keymap, LayoutSelection, BTreeMap<i32, String>), StudioError> {
+    let keymap = client.get_keymap().map_err(map_client_to_studio_error)?;
+    let layout_selection = select_layout(client.get_physical_layouts().ok(), &keymap);
+    let behavior_names = behavior_names_for_keymap(client, &keymap);
+    Ok((keymap, layout_selection, behavior_names))
+}
+
+fn snapshot_from_parts(
+    device_id: String,
+    device_name: String,
+    lock_state: StudioLockState,
+    keymap: zmk::keymap::Keymap,
+    layout_selection: LayoutSelection,
+    behavior_names: BTreeMap<i32, String>,
+) -> StudioKeymapSnapshot {
+    StudioKeymapSnapshot {
+        device_id,
+        device_name,
         connection_type: "usb_serial".to_string(),
         lock_state,
         physical_layouts: layout_selection.physical_layouts,
@@ -315,7 +506,7 @@ fn read_keymap(candidate: StudioPortCandidate) -> Result<StudioKeymapSnapshot, S
         selected_layout_keys: layout_selection.selected_layout_keys,
         layers: keymap_to_layers(keymap, &behavior_names),
         updated_ms: now_ms(),
-    })
+    }
 }
 
 fn base_status(candidate: &StudioPortCandidate) -> StudioDeviceStatus {
@@ -356,6 +547,7 @@ fn serial_candidates() -> Result<Vec<StudioPortCandidate>, serialport::Error> {
     Ok(candidates)
 }
 
+#[derive(Debug, Clone)]
 struct LayoutSelection {
     physical_layouts: Vec<StudioPhysicalLayout>,
     selected_physical_layout_index: Option<usize>,
@@ -623,14 +815,17 @@ fn key_label(encoded: u32) -> String {
 }
 
 fn normalize_key_name(name: &str) -> String {
+    if let Some(digit) = keypad_digit(name) {
+        return format!("Num {}", digit);
+    }
     if let Some(digit) = number_key_digit(name) {
-        return digit.to_string();
+        return us_number_display(digit);
     }
     name.to_string()
 }
 
 fn number_key_digit(name: &str) -> Option<char> {
-    const PREFIXES: [&str; 5] = ["NUMBER_", "NUM_", "N", "KP_NUMBER_", "KP_N"];
+    const PREFIXES: [&str; 3] = ["NUMBER_", "NUM_", "N"];
     for prefix in PREFIXES {
         if let Some(rest) = name.strip_prefix(prefix) {
             if rest.len() == 1 {
@@ -655,6 +850,495 @@ fn modifier_label(label: &str) -> &str {
         "RGUI" => "RG",
         _ => label,
     }
+}
+
+fn behavior_to_zmk(behavior: EditBehavior) -> Behavior {
+    match behavior {
+        EditBehavior::KeyPress(encoded) => Behavior::KeyPress(HidUsage::from_encoded(encoded)),
+        EditBehavior::Transparent => Behavior::Transparent,
+        EditBehavior::None => Behavior::None,
+    }
+}
+
+fn map_client_to_studio_error(error: ClientError) -> StudioError {
+    match error {
+        ClientError::Io(err) if err.kind() == std::io::ErrorKind::TimedOut => StudioError::Timeout,
+        ClientError::Io(_) => StudioError::Disconnected,
+        ClientError::Meta(_) => StudioError::Locked,
+        ClientError::SetLayerBindingFailed(code) => match code {
+            zmk::keymap::SetLayerBindingResponse::SetLayerBindingRespInvalidLocation => {
+                StudioError::InvalidLocation
+            }
+            zmk::keymap::SetLayerBindingResponse::SetLayerBindingRespInvalidBehavior => {
+                StudioError::InvalidBehavior
+            }
+            zmk::keymap::SetLayerBindingResponse::SetLayerBindingRespInvalidParameters => {
+                StudioError::InvalidParameters
+            }
+            _ => StudioError::RpcFailed,
+        },
+        ClientError::InvalidLayerOrPosition { .. } => StudioError::InvalidLocation,
+        ClientError::MissingBehaviorRole(_) => StudioError::MissingBehaviorRole,
+        ClientError::SaveChangesFailed(code) => match code {
+            zmk::keymap::SaveChangesErrorCode::SaveChangesErrGeneric => StudioError::SaveFailed,
+            zmk::keymap::SaveChangesErrorCode::SaveChangesErrNotSupported => {
+                StudioError::SaveNotSupported
+            }
+            zmk::keymap::SaveChangesErrorCode::SaveChangesErrNoSpace => StudioError::SaveNoSpace,
+            _ => StudioError::SaveFailed,
+        },
+        _ => StudioError::RpcFailed,
+    }
+}
+
+fn display_key_name(canonical: &str) -> String {
+    if let Some(digit) = keypad_digit(canonical) {
+        return format!("Num {}", digit);
+    }
+    let normalized = normalize_key_name(canonical);
+    match normalized.as_str() {
+        "ESC" | "ESCAPE" => "Esc".to_string(),
+        "BKSP" | "BSPC" | "BACKSPACE" => "Backspace".to_string(),
+        "RET" | "RETURN" => "Enter".to_string(),
+        "SPACE" => "Space".to_string(),
+        "SPC" => "Space".to_string(),
+        "DELETE" => "Delete".to_string(),
+        "LEFT_CONTROL" | "LCTL" | "LCTRL" => "Left Control".to_string(),
+        "RIGHT_CONTROL" | "RCTL" | "RCTRL" => "Right Control".to_string(),
+        "LEFT_SHIFT" | "LSFT" | "LSHFT" | "LSHIFT" => "Left Shift".to_string(),
+        "RIGHT_SHIFT" | "RSFT" | "RSHFT" | "RSHIFT" => "Right Shift".to_string(),
+        "LEFT_ALT" | "LALT" => "Left Alt".to_string(),
+        "RIGHT_ALT" | "RALT" => "Right Alt".to_string(),
+        "LEFT_COMMAND" | "LCMD" | "LEFT_GUI" | "LGUI" | "LEFT_META" | "LMETA" | "LEFT_WIN"
+        | "LWIN" => "Left GUI".to_string(),
+        "RIGHT_COMMAND" | "RCMD" | "RIGHT_GUI" | "RGUI" | "RIGHT_META" | "RMETA" | "RIGHT_WIN"
+        | "RWIN" => "Right GUI".to_string(),
+        "LEFT_ARROW" | "LARW" | "LEFT" => "Left Arrow".to_string(),
+        "RIGHT_ARROW" | "RARW" | "RIGHT" => "Right Arrow".to_string(),
+        "UP_ARROW" | "UARW" | "UP" => "Up Arrow".to_string(),
+        "DOWN_ARROW" | "DARW" | "DOWN" => "Down Arrow".to_string(),
+        "PAGE_UP" => "Page Up".to_string(),
+        "PAGE_DOWN" => "Page Down".to_string(),
+        "PRINTSCREEN" => "Print Screen".to_string(),
+        "PAUSE_BREAK" => "Pause / Break".to_string(),
+        "CAPSLOCK" => "Caps Lock".to_string(),
+        "SCROLLLOCK" => "Scroll Lock".to_string(),
+        "KP_NUMLOCK" => "Numlock and Clear".to_string(),
+        "KP_ENTER" => "Enter".to_string(),
+        "KP_DOT" => "Decimal Separator".to_string(),
+        "KP_EQUAL" => "Equal".to_string(),
+        "KP_PLUS" => "Plus".to_string(),
+        "KP_SUBTRACT" => "Minus".to_string(),
+        "KP_ASTERISK" => "Asterisk / Star".to_string(),
+        "KP_DIVIDE" => "Forward Slash".to_string(),
+        "SINGLE_QUOTE" | "APOS" | "APOSTROPHE" | "QUOT" | "SQT" => "' \"".to_string(),
+        "DOUBLE_QUOTES" | "DQT" => "\"".to_string(),
+        "MINUS" => "- _".to_string(),
+        "EQUAL" | "EQL" => "= +".to_string(),
+        "GRAVE" | "GRAV" => "` ~".to_string(),
+        "COMMA" | "CMMA" => ", <".to_string(),
+        "PERIOD" | "DOT" => ". >".to_string(),
+        "SLASH" | "FSLH" => "/ ?".to_string(),
+        "BACKSLASH" | "BSLH" => "\\ |".to_string(),
+        "SEMICOLON" | "SCLN" | "SEMI" => "; :".to_string(),
+        "LEFT_BRACKET" | "LBKT" => "[ {".to_string(),
+        "RIGHT_BRACKET" | "RBKT" => "] }".to_string(),
+        "LEFT_BRACE" | "LBRC" => "{".to_string(),
+        "RIGHT_BRACE" | "RBRC" => "}".to_string(),
+        "LEFT_PARENTHESIS" | "LPAR" => "(".to_string(),
+        "RIGHT_PARENTHESIS" | "RPAR" => ")".to_string(),
+        "EXCLAMATION" | "EXCL" => "!".to_string(),
+        "AT_SIGN" | "AT" => "@".to_string(),
+        "HASH" | "POUND" => "#".to_string(),
+        "DOLLAR" | "DLLR" => "$".to_string(),
+        "PERCENT" | "PRCNT" => "%".to_string(),
+        "CARET" => "^".to_string(),
+        "AMPERSAND" | "AMPS" => "&".to_string(),
+        "ASTERISK" | "ASTRK" | "STAR" => "*".to_string(),
+        "PLUS" => "+".to_string(),
+        "UNDERSCORE" | "UNDER" => "_".to_string(),
+        "QUESTION" | "QMARK" => "?".to_string(),
+        "PIPE" => "|".to_string(),
+        "COLON" => ":".to_string(),
+        "LESS_THAN" | "LT" => "<".to_string(),
+        "GREATER_THAN" | "GT" => ">".to_string(),
+        "TILDE" => "~".to_string(),
+        other => other.replace('_', " "),
+    }
+}
+
+fn key_category(canonical: &str, hid_usage: u32) -> &'static str {
+    let usage_page = (hid_usage >> 16) & 0xff;
+    let usage_id = hid_usage & 0xffff;
+    let keyboard_modifier_bits = hid_usage >> 24;
+
+    if usage_page == 0x01 {
+        return "power_lock";
+    }
+    if is_power_lock_keycode(canonical) {
+        return "power_lock";
+    }
+
+    if usage_page == 0x07 {
+        if is_keypad_usage(usage_id) {
+            return "keypad";
+        }
+        if canonical.len() == 1 && canonical.as_bytes()[0].is_ascii_uppercase() {
+            return "letters";
+        }
+        if (0x04..=0x1d).contains(&usage_id) {
+            return "letters";
+        }
+        if (0x1e..=0x27).contains(&usage_id) && keyboard_modifier_bits == 0 {
+            return "numbers";
+        }
+        if is_keyboard_symbol_usage(usage_id)
+            || ((0x1e..=0x27).contains(&usage_id) && keyboard_modifier_bits != 0)
+        {
+            return "symbols";
+        }
+        if matches!(usage_id, 0x28..=0x2c | 0x49 | 0x4c | 0x9e) {
+            return "control";
+        }
+        if matches!(usage_id, 0x4a | 0x4b | 0x4d..=0x52 | 0x65) {
+            return "navigation";
+        }
+        if matches!(usage_id, 0x39 | 0x47 | 0x82..=0x84) {
+            return "locks";
+        }
+        if matches!(usage_id, 0x3a..=0x45 | 0x68..=0x73) {
+            return "function";
+        }
+        if (0x87..=0x8f).contains(&usage_id) {
+            return "international";
+        }
+        if (0x90..=0x98).contains(&usage_id) {
+            return "language";
+        }
+        if (0xe0..=0xe7).contains(&usage_id) {
+            return "modifiers";
+        }
+        if is_keyboard_editing_usage(usage_id) {
+            return "editing";
+        }
+        if is_keyboard_media_usage(usage_id) {
+            return "media";
+        }
+        if is_keyboard_application_usage(usage_id) {
+            return "applications";
+        }
+        return "miscellaneous";
+    }
+
+    if is_editing_keycode(canonical) {
+        return "editing";
+    }
+    if canonical.starts_with("C_KEYBOARD_INPUT_ASSIST") {
+        return "input_assist";
+    }
+    if canonical.starts_with("C_AL_") || is_application_keycode(canonical) {
+        return "applications";
+    }
+    if is_media_keycode(canonical) {
+        return "media";
+    }
+    "miscellaneous"
+}
+
+fn category_rank(category: &str) -> u8 {
+    match category {
+        "letters" => 0,
+        "numbers" => 1,
+        "symbols" => 2,
+        "control" => 3,
+        "navigation" => 4,
+        "locks" => 5,
+        "function" => 6,
+        "international" => 7,
+        "language" => 8,
+        "modifiers" => 9,
+        "keypad" => 10,
+        "editing" => 11,
+        "media" => 12,
+        "applications" => 13,
+        "input_assist" => 14,
+        "power_lock" => 15,
+        "miscellaneous" => 16,
+        _ => 17,
+    }
+}
+
+fn key_sort_value(entry: &KeyCatalogEntry) -> u32 {
+    if entry.category == "letters" {
+        return entry.display.as_bytes().first().copied().unwrap_or(b'Z') as u32;
+    }
+    if entry.category == "keypad" {
+        if let Some(digit) = keypad_digit(&entry.canonical) {
+            return digit.to_digit(10).unwrap_or(99);
+        }
+    }
+    if let Some(digit) = number_key_digit(&entry.canonical) {
+        return digit.to_digit(10).unwrap_or(99);
+    }
+    entry.hid_usage
+}
+
+fn is_editing_keycode(canonical: &str) -> bool {
+    matches!(
+        canonical,
+        "CUT"
+            | "COPY"
+            | "PSTE"
+            | "UNDO"
+            | "K_REDO"
+            | "K_CUT"
+            | "K_COPY"
+            | "K_PASTE"
+            | "K_UNDO"
+            | "K_AGAIN"
+            | "C_AC_CUT"
+            | "C_AC_COPY"
+            | "C_AC_PASTE"
+            | "C_AC_UNDO"
+            | "C_AC_REDO"
+    )
+}
+
+fn is_keypad_usage(usage_id: u32) -> bool {
+    matches!(
+        usage_id,
+        0x53..=0x63 | 0x67 | 0x85 | 0x86 | 0xb6 | 0xb7 | 0xd8
+    )
+}
+
+fn is_keyboard_symbol_usage(usage_id: u32) -> bool {
+    matches!(usage_id, 0x2d..=0x38 | 0x64)
+}
+
+fn is_keyboard_editing_usage(usage_id: u32) -> bool {
+    matches!(usage_id, 0x79..=0x7d)
+}
+
+fn is_keyboard_media_usage(usage_id: u32) -> bool {
+    matches!(usage_id, 0x7f..=0x81 | 0xe8..=0xef | 0xf3)
+}
+
+fn is_keyboard_application_usage(usage_id: u32) -> bool {
+    matches!(usage_id, 0x74..=0x78 | 0x7e | 0xf0..=0xf2 | 0xf4..=0xf6 | 0xfa | 0xfb)
+}
+
+fn is_application_keycode(canonical: &str) -> bool {
+    canonical.starts_with("C_AC_")
+        || matches!(
+            canonical,
+            "K_MENU"
+                | "K_SELECT"
+                | "K_EXECUTE"
+                | "K_REFRESH"
+                | "K_STOP"
+                | "K_FORWARD"
+                | "K_BACK"
+                | "K_FIND"
+                | "K_FIND2"
+                | "K_SCROLL_UP"
+                | "K_SCROLL_DOWN"
+                | "K_CALCULATOR"
+                | "K_HELP"
+                | "K_WWW"
+        )
+}
+
+fn is_media_keycode(canonical: &str) -> bool {
+    matches!(
+        canonical,
+        "K_MUTE"
+            | "K_MUTE2"
+            | "K_VOLUME_UP"
+            | "K_VOLUME_UP2"
+            | "K_VOLUME_DOWN"
+            | "K_VOLUME_DOWN2"
+            | "K_PLAY_PAUSE"
+            | "K_STOP2"
+            | "K_STOP3"
+            | "K_PREVIOUS"
+            | "K_NEXT"
+            | "K_EJECT"
+    ) || (canonical.starts_with("C_")
+        && !canonical.starts_with("C_AC_")
+        && !canonical.starts_with("C_AL_")
+        && !canonical.starts_with("C_KEYBOARD_INPUT_ASSIST")
+        && !is_power_lock_keycode(canonical))
+}
+
+fn is_power_lock_keycode(canonical: &str) -> bool {
+    canonical.starts_with("SYSTEM_")
+        || matches!(
+            canonical,
+            "K_POWER"
+                | "K_SLEEP"
+                | "K_SCREENSAVER"
+                | "C_POWER"
+                | "C_RESET"
+                | "C_SLEEP"
+                | "C_SLEEP_MODE"
+                | "C_AL_SCREENSAVER"
+                | "C_AL_LOGOFF"
+        )
+}
+
+fn key_names(canonical: &str) -> Vec<String> {
+    let extras: &[&str] = match canonical {
+        "RETURN" => &["ENTER", "RET"],
+        "ESCAPE" => &["ESC"],
+        "BACKSPACE" => &["BKSP", "BSPC"],
+        "SPACE" => &["SPC"],
+        "EQUAL" | "EQL" => &["EQUAL", "EQL"],
+        "LEFT_BRACKET" => &["LBKT"],
+        "RIGHT_BRACKET" => &["RBKT"],
+        "BACKSLASH" => &["BSLH"],
+        "NON_US_HASH" => &["NUHS"],
+        "SEMICOLON" => &["SCLN", "SEMI"],
+        "SINGLE_QUOTE" => &["APOS", "APOSTROPHE", "QUOT", "SQT"],
+        "GRAVE" => &["GRAV"],
+        "COMMA" => &["CMMA"],
+        "PERIOD" => &["DOT"],
+        "SLASH" => &["FSLH"],
+        "PRINTSCREEN" => &["PRSC", "PSCRN"],
+        "SCROLLLOCK" => &["SCLK", "SLCK"],
+        "INSERT" => &["INS"],
+        "DELETE" => &["DEL"],
+        "PAGE_UP" => &["PG_UP", "PGUP"],
+        "PAGE_DOWN" => &["PG_DN", "PGDN"],
+        "RIGHT_ARROW" => &["RARW", "RIGHT"],
+        "LEFT_ARROW" => &["LARW", "LEFT"],
+        "DOWN_ARROW" => &["DARW", "DOWN"],
+        "UP_ARROW" => &["UARW", "UP"],
+        "K_CONTEXT_MENU" => &["GUI", "K_APP", "K_APPLICATION", "K_CMENU"],
+        "KP_NUMLOCK" => &["KP_NLCK", "KP_NUM"],
+        "KP_DIVIDE" => &["KDIV", "KP_SLASH"],
+        "KP_ASTERISK" => &["KMLT", "KP_MULTIPLY"],
+        "KP_SUBTRACT" => &["KMIN", "KP_MINUS"],
+        "KP_LEFT_PARENTHESIS" => &["KP_LPAR"],
+        "KP_RIGHT_PARENTHESIS" => &["KP_RPAR"],
+        "LEFT_CONTROL" => &["LCTL", "LCTRL"],
+        "LEFT_SHIFT" => &["LSFT", "LSHFT", "LSHIFT"],
+        "LEFT_ALT" => &["LALT"],
+        "LEFT_COMMAND" | "LCMD" | "LEFT_GUI" | "LGUI" | "LEFT_META" | "LMETA" | "LEFT_WIN"
+        | "LWIN" => &[
+            "LCMD",
+            "LEFT_GUI",
+            "LGUI",
+            "LEFT_META",
+            "LMETA",
+            "LEFT_WIN",
+            "LWIN",
+        ],
+        "RIGHT_CONTROL" => &["RCTL", "RCTRL"],
+        "RIGHT_SHIFT" => &["RSFT", "RSHFT", "RSHIFT"],
+        "RIGHT_ALT" => &["RALT"],
+        "RIGHT_COMMAND" | "RCMD" | "RIGHT_GUI" | "RGUI" | "RIGHT_META" | "RMETA" | "RIGHT_WIN"
+        | "RWIN" => &[
+            "RCMD",
+            "RGUI",
+            "RIGHT_GUI",
+            "RIGHT_META",
+            "RMETA",
+            "RIGHT_WIN",
+            "RWIN",
+        ],
+        _ => &[],
+    };
+
+    let mut names = Vec::with_capacity(extras.len() + 1);
+    names.push(canonical.to_string());
+    names.extend(extras.iter().map(|name| name.to_string()));
+    names.dedup();
+    names
+}
+
+fn key_aliases(canonical: &str, display: &str, names: &[String]) -> Vec<String> {
+    let mut aliases = vec![display.to_ascii_lowercase(), canonical.to_ascii_lowercase()];
+    aliases.extend(names.iter().map(|name| name.to_ascii_lowercase()));
+    let extras: &[&str] = match canonical {
+        "ESC" | "ESCAPE" => &["esc"],
+        "BKSP" | "BSPC" | "BACKSPACE" => &["bs", "bspc", "bksp"],
+        "RET" | "RETURN" => &["enter", "ret"],
+        "SPC" | "SPACE" => &["spc"],
+        "DEL" | "DELETE" => &["del"],
+        "LEFT_CONTROL" => &["lctl", "lctrl", "lc"],
+        "RIGHT_CONTROL" => &["rctl", "rctrl", "rc"],
+        "LEFT_SHIFT" => &["lsft", "lshift", "ls"],
+        "RIGHT_SHIFT" => &["rsft", "rshift", "rs"],
+        "LEFT_ALT" => &["lalt", "la"],
+        "RIGHT_ALT" => &["ralt", "ra"],
+        "LEFT_COMMAND" => &["lgui", "lcmd", "lwin", "lg", "left gui"],
+        "RIGHT_COMMAND" => &["rgui", "rcmd", "rwin", "rg", "right gui"],
+        "MINUS" => &["-"],
+        "EQUAL" => &["="],
+        "SINGLE_QUOTE" => &["'", "quote", "apostrophe"],
+        "DOUBLE_QUOTES" => &["\"", "double quote"],
+        "SLASH" => &["/"],
+        "BACKSLASH" => &["\\"],
+        "COMMA" => &[","],
+        "PERIOD" => &["."],
+        "SEMICOLON" => &[";"],
+        _ => &[],
+    };
+    aliases.extend(extras.iter().map(|value| value.to_string()));
+    if let Some(digit) = keypad_digit(canonical) {
+        aliases.extend([
+            format!("kp{}", digit),
+            format!("kp {}", digit),
+            format!("keypad {}", digit),
+            format!("numpad {}", digit),
+        ]);
+    }
+    if let Some(digit) = number_key_digit(canonical) {
+        aliases.push(digit.to_string());
+        if let Some(shifted) = us_shifted_number_symbol(digit) {
+            aliases.push(shifted.to_string());
+        }
+    }
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
+fn us_number_display(digit: char) -> String {
+    us_shifted_number_symbol(digit)
+        .map(|shifted| format!("{} {}", digit, shifted))
+        .unwrap_or_else(|| digit.to_string())
+}
+
+fn us_shifted_number_symbol(digit: char) -> Option<char> {
+    match digit {
+        '1' => Some('!'),
+        '2' => Some('@'),
+        '3' => Some('#'),
+        '4' => Some('$'),
+        '5' => Some('%'),
+        '6' => Some('^'),
+        '7' => Some('&'),
+        '8' => Some('*'),
+        '9' => Some('('),
+        '0' => Some(')'),
+        _ => None,
+    }
+}
+
+fn keypad_digit(name: &str) -> Option<char> {
+    const PREFIXES: [&str; 2] = ["KP_NUMBER_", "KP_N"];
+    for prefix in PREFIXES {
+        if let Some(rest) = name.strip_prefix(prefix) {
+            if rest.len() == 1 {
+                let digit = rest.as_bytes()[0] as char;
+                if digit.is_ascii_digit() {
+                    return Some(digit);
+                }
+            }
+        }
+    }
+    None
 }
 fn binding_to_view(
     position: usize,
@@ -802,8 +1486,91 @@ mod tests {
     }
     #[test]
     fn key_label_normalizes_number_keys() {
-        assert_eq!(key_label(0x0007_001E), "1");
-        assert_eq!(key_label(0x0007_0059), "1");
+        assert_eq!(key_label(0x0007_001E), "1 !");
+        assert_eq!(key_label(0x0007_0059), "Num 1");
+    }
+
+    #[test]
+    fn key_catalog_uses_zmk_reference_category_order() {
+        let catalog = key_catalog();
+        assert!(!catalog.is_empty());
+        assert!(catalog.iter().any(|entry| entry.display == "Esc"
+            && entry.category == "control"
+            && entry.aliases.contains(&"esc".to_string())));
+        assert!(catalog
+            .iter()
+            .any(|entry| entry.display == "A" && entry.category == "letters"));
+        assert!(catalog
+            .iter()
+            .any(|entry| entry.display == "1 !" && entry.category == "numbers"));
+        assert!(catalog
+            .iter()
+            .any(|entry| entry.display == "Num 1" && entry.category == "keypad"));
+        assert!(catalog
+            .iter()
+            .any(|entry| entry.display == "CUT" && entry.category == "editing"));
+        assert!(catalog.iter().any(|entry| entry.display == "= +"
+            && entry.category == "symbols"
+            && entry.names.contains(&"EQL".to_string())));
+        assert!(catalog.iter().any(|entry| entry.display == "Left GUI"
+            && entry.category == "modifiers"
+            && entry.names.contains(&"LGUI".to_string())
+            && entry.names.contains(&"LEFT_META".to_string())));
+        assert!(catalog
+            .iter()
+            .any(|entry| entry.canonical.starts_with("C_AL_") && entry.category == "applications"));
+        assert_eq!(catalog[0].category, "letters");
+        assert!(category_rank("miscellaneous") > category_rank("power_lock"));
+    }
+
+    #[test]
+    fn key_category_follows_zmk_keycode_reference_membership() {
+        assert_eq!(key_category("ENTER", 0x0007_0028), "control");
+        assert_eq!(key_category("EQL", 0x0007_002e), "symbols");
+        assert_eq!(key_category("EXCL", 0x0207_001e), "symbols");
+        assert_eq!(key_category("GUI", 0x0007_0065), "navigation");
+        assert_eq!(key_category("PSCRN", 0x0007_0046), "miscellaneous");
+        assert_eq!(key_category("KP_CLEAR", 0x0007_00d8), "keypad");
+        assert_eq!(key_category("K_STOP3", 0x0007_00f3), "media");
+        assert_eq!(key_category("K_REFRESH", 0x0007_00fa), "applications");
+        assert_eq!(
+            key_category("C_KEYBOARD_INPUT_ASSIST_NEXT", 0x000c_02c8),
+            "input_assist"
+        );
+        assert_eq!(key_category("C_POWER", 0x000c_0030), "power_lock");
+    }
+
+    #[test]
+    fn edit_behavior_maps_to_typed_zmk_behavior() {
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::KeyPress(0x0007_0004)),
+            Behavior::KeyPress(HidUsage::from_encoded(0x0007_0004))
+        );
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::Transparent),
+            Behavior::Transparent
+        );
+        assert_eq!(behavior_to_zmk(EditBehavior::None), Behavior::None);
+    }
+
+    #[test]
+    fn client_error_mapping_preserves_edit_specific_codes() {
+        assert!(matches!(
+            map_client_to_studio_error(ClientError::SetLayerBindingFailed(
+                zmk::keymap::SetLayerBindingResponse::SetLayerBindingRespInvalidLocation
+            )),
+            StudioError::InvalidLocation
+        ));
+        assert!(matches!(
+            map_client_to_studio_error(ClientError::MissingBehaviorRole("Key Press")),
+            StudioError::MissingBehaviorRole
+        ));
+        assert!(matches!(
+            map_client_to_studio_error(ClientError::SaveChangesFailed(
+                zmk::keymap::SaveChangesErrorCode::SaveChangesErrNoSpace
+            )),
+            StudioError::SaveNoSpace
+        ));
     }
 
     #[test]

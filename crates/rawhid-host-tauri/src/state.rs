@@ -12,6 +12,7 @@ use rawhid_host_core::{
     packet::UplinkPacket,
     runner::{DeviceBatteryStatus, DeviceLayerState},
     stats::{default_stats_dir, KeyStatsStore, SharedKeyStatsStore},
+    studio::StudioEditSession,
 };
 
 pub const MAX_LOG_ENTRIES: usize = 200;
@@ -65,6 +66,7 @@ pub struct AppState {
     pub ai_usage_refreshing: Arc<AtomicBool>,
     pub ai_usage_runtime: Arc<Mutex<Option<AiUsageRuntime>>>,
     pub key_stats: SharedKeyStatsStore,
+    pub studio_edit: Arc<Mutex<Option<StudioEditSession>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -102,6 +104,7 @@ impl AppState {
             ai_usage_refreshing: Arc::new(AtomicBool::new(false)),
             ai_usage_runtime: Arc::new(Mutex::new(ai_usage_runtime)),
             key_stats,
+            studio_edit: Arc::new(Mutex::new(None)),
         }
     }
 }

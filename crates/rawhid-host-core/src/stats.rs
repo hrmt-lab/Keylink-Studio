@@ -23,8 +23,7 @@ pub type SharedKeyStatsStore = Arc<Mutex<KeyStatsStore>>;
 
 /// Production stats directory: `<user data dir>/RawHID Host/data/stats`.
 pub fn default_stats_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "RawHID Host")
-        .map(|dirs| dirs.data_dir().join("stats"))
+    directories::ProjectDirs::from("", "", "RawHID Host").map(|dirs| dirs.data_dir().join("stats"))
 }
 
 const FILE_VERSION: u32 = 1;
@@ -373,7 +372,10 @@ mod tests {
         }
 
         let mut store = KeyStatsStore::new(dir.clone(), Duration::from_secs(60));
-        assert_eq!(store.summary("uid:1", StatsPeriod::All, "2026-06-11").total, 3);
+        assert_eq!(
+            store.summary("uid:1", StatsPeriod::All, "2026-06-11").total,
+            3
+        );
         let _ = fs::remove_dir_all(dir);
     }
 

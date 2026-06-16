@@ -146,11 +146,15 @@ impl Default for AppBehaviorConfig {
 #[serde(default)]
 pub struct PollingConfig {
     pub interval_ms: u64,
+    pub uplink_interval_ms: u64,
 }
 
 impl Default for PollingConfig {
     fn default() -> Self {
-        Self { interval_ms: 500 }
+        Self {
+            interval_ms: 500,
+            uplink_interval_ms: 20,
+        }
     }
 }
 
@@ -493,6 +497,7 @@ start_monitoring_on_launch = false
 
 [polling]
 interval_ms = 500
+uplink_interval_ms = 20
 
 [hid]
 usage_page = 65376 # 0xFF60
@@ -624,6 +629,7 @@ mod tests {
         let config: AppConfig = toml::from_str(example_config()).unwrap();
 
         assert_eq!(config.polling.interval_ms, 500);
+        assert_eq!(config.polling.uplink_interval_ms, 20);
         assert_eq!(config.hid.usage_page, 0xFF60);
         assert_eq!(config.hid.usage, 0x61);
         assert_eq!(config.hid.rescan_interval_sec, 5);

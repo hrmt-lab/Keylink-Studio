@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from "react";
-import { RefreshCw, Search, Trash2, Check, Plus } from "lucide-react";
+import { RefreshCw, Search, Trash2, Plus } from "lucide-react";
 import { saveConfig, getRunningApps, getAppIcons, type RunningApp } from "../api";
 import { Toggle } from "../components/Toggle";
 import { LayerBadge } from "../components/LayerBadge";
+import { friendlyError } from "../lib/errors";
 import { useLang } from "../i18n";
 import type { AppConfig, DeviceInfo, RuleConfig } from "../types";
 
@@ -34,7 +35,6 @@ export default function Rules({ config, setConfig, status }: Props) {
   const [layer, setLayer] = useState(1);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [justAdded, setJustAdded] = useState<string | null>(null);
   const [targetKey, setTargetKey] = useState("");
 
   const appLayerDevices = status.host_link_devices.filter(isAppLayerDevice);
@@ -115,11 +115,9 @@ export default function Rules({ config, setConfig, status }: Props) {
     try {
       await saveConfig(updated);
       setConfig(updated);
-      setJustAdded(selected.exe);
-      setTimeout(() => setJustAdded(null), 2000);
       setSelected(null);
     } catch (e) {
-      setError(String(e));
+      setError(friendlyError(e, t));
     } finally {
       setSaving(false);
     }
@@ -132,7 +130,7 @@ export default function Rules({ config, setConfig, status }: Props) {
       await saveConfig(updated);
       setConfig(updated);
     } catch (e) {
-      setError(String(e));
+      setError(friendlyError(e, t));
     } finally {
       setSaving(false);
     }
@@ -157,7 +155,7 @@ export default function Rules({ config, setConfig, status }: Props) {
       await saveConfig(updated);
       setConfig(updated);
     } catch (e) {
-      setError(String(e));
+      setError(friendlyError(e, t));
     } finally {
       setSaving(false);
     }
@@ -264,9 +262,6 @@ export default function Rules({ config, setConfig, status }: Props) {
                             <span className={`truncate text-sm font-medium ${isSelected ? "text-accent-deep" : "text-ink"}`}>
                               {app.display_name}
                             </span>
-                            {justAdded === app.exe && (
-                              <Check size={11} className="flex-shrink-0 text-accent-deep" />
-                            )}
                           </div>
                           <span className={`block truncate font-mono text-[11px] ${isSelected ? "text-accent-deep/60" : "text-faint"}`}>
                             {app.exe}

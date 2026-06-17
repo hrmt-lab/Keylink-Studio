@@ -47,6 +47,7 @@ export default function AiUsage({ config, setConfig, status }: Props) {
     setConfig,
     select: (c) => c,
     apply: (_c, d) => d,
+    t,
   });
   const [refreshing, setRefreshing] = useState(false);
   const [message, setMessage] = useState<string | null>(null);

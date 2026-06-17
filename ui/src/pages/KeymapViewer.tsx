@@ -17,6 +17,7 @@ import {
   studioSetKey,
 } from "../api";
 import { KeymapCanvas } from "../components/KeymapCanvas";
+import { friendlyError } from "../lib/errors";
 import { useLang, type TranslationKey } from "../i18n";
 import type {
   KeyPressEvent,
@@ -173,7 +174,7 @@ export default function KeymapViewer({
         await readDevice(nextSelected);
       }
     } catch (e) {
-      setError(String(e));
+      setError(friendlyError(e, t));
     }
   }, [editState.mode, readDevice, refreshStudioDevices, selectedId, t]);
 
@@ -402,7 +403,7 @@ export default function KeymapViewer({
         </div>
       </div>
 
-      {(error || studioError) && <Notice>{error ?? studioError}</Notice>}
+      {(error || studioError) && <Notice>{error ?? friendlyError(studioError, t)}</Notice>}
 
       <div className="space-y-5">
         <section className="rounded-card bg-surface p-4 space-y-3">
@@ -664,7 +665,9 @@ function KeymapContent({
   return (
     <div className="min-w-0 space-y-4">
       <div className="flex min-w-0 items-start gap-2">
-        <div className="min-w-0 flex-1 overflow-x-auto pb-1">
+        {/* pt-2/pr-2: room for the live-layer dot (-top-1 -right-1) and its
+            pulse ring so overflow-x-auto doesn't clip them into a half-circle. */}
+        <div className="min-w-0 flex-1 overflow-x-auto pt-2 pr-2 pb-1">
           <div className="flex w-max gap-2">
           {snapshot.layers.map((item, index) => {
             const live = reportedLayerIndex !== null && item.index === reportedLayerIndex;
@@ -738,7 +741,9 @@ function KeymapContent({
           </div>
         </div>
         {editAvailable && onToggleEdit && (
-          <div className="flex shrink-0 items-center gap-1">
+          /* pt-2 matches the layer-tab scroller above so this control row stays
+             vertically aligned with the tabs (parent is items-start). */
+          <div className="flex shrink-0 items-center gap-1 pt-2">
             {editing && (
               <button
                 type="button"

@@ -3,6 +3,7 @@ import { Check, ChevronDown, ChevronRight, FolderOpen, Pencil, Plus, Search, Tra
 import { open } from "@tauri-apps/plugin-dialog";
 import { saveConfig, getRunningApps, getAppIcons, type RunningApp } from "../api";
 import { Toggle } from "../components/Toggle";
+import { friendlyError } from "../lib/errors";
 import { useLang, type TranslationKey } from "../i18n";
 import type {
   ActionBinding,
@@ -123,7 +124,7 @@ export default function Actions({ config, setConfig, status }: Props) {
       await saveConfig(updated);
       setConfig(updated);
     } catch (e) {
-      setError(String(e));
+      setError(friendlyError(e, t));
     } finally {
       setSaving(false);
     }

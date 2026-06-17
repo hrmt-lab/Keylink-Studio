@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from "react";
 import { RefreshCw, CheckCircle2, XCircle, Usb, AlertCircle, BatteryMedium, Keyboard } from "lucide-react";
 import { probeDevices } from "../api";
 import { RollingNumber } from "../components/RollingNumber";
+import { friendlyError } from "../lib/errors";
 import { useLang, type TranslationKey } from "../i18n";
 import type { DeviceBatteryStatus, MonitorStatus, ProbeResult, StudioDeviceStatus } from "../types";
 
@@ -69,7 +70,7 @@ export default function Devices({ studioDevices, studioScanning, studioError, re
       {(error || studioError) && (
         <div className="flex items-start gap-2.5 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700 ring-1 ring-red-200">
           <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
-          <span>{error ?? studioError}</span>
+          <span>{friendlyError(error ?? studioError, t)}</span>
         </div>
       )}
 

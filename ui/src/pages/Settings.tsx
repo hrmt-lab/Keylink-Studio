@@ -4,6 +4,7 @@ import { reloadConfig, getLaunchAtLogin, setLaunchAtLogin } from "../api";
 import { Toggle } from "../components/Toggle";
 import { ErrorNotice, PageHeader, PrimaryButton, SecondaryButton, SectionCard, SettingRow } from "../components/Ui";
 import { useConfigSection } from "../hooks/useConfigSection";
+import { friendlyError } from "../lib/errors";
 import { useLang } from "../i18n";
 import {
   PRESET_ACCENTS,
@@ -29,14 +30,23 @@ export default function Settings({ config, setConfig }: Props) {
     setConfig,
     select: (c) => c,
     apply: (_c, d) => d,
+    t,
   });
 
-  const [launchAtLogin, setLaunchAtLoginState] = useState(false);
+  // "Launch at login" is an OS-level setting (outside AppConfig), so it has its
+  // own draft. Like the rest of this page it is applied on the Save button, not
+  // immediately. launchSaved is the persisted baseline; launchDraft is the edit.
+  const [launchSaved, setLaunchSaved] = useState(false);
+  const [launchDraft, setLaunchDraft] = useState(false);
   const [launchBusy, setLaunchBusy] = useState(false);
+  const launchDirty = launchDraft !== launchSaved;
 
   useEffect(() => {
     void getLaunchAtLogin()
-      .then(setLaunchAtLoginState)
+      .then((v) => {
+        setLaunchSaved(v);
+        setLaunchDraft(v);
+      })
       .catch(() => {});
   }, []);
 
@@ -44,7 +54,23 @@ export default function Settings({ config, setConfig }: Props) {
     try {
       setConfig(await reloadConfig());
     } catch (e) {
-      setError(String(e));
+      setError(friendlyError(e, t));
+    }
+  };
+
+  const handleSave = async () => {
+    if (isDirty) await save();
+    if (launchDirty) {
+      setLaunchBusy(true);
+      try {
+        await setLaunchAtLogin(launchDraft);
+        setLaunchSaved(launchDraft);
+      } catch (e) {
+        setLaunchDraft(launchSaved);
+        setError(friendlyError(e, t));
+      } finally {
+        setLaunchBusy(false);
+      }
     }
   };
 
@@ -58,21 +84,6 @@ export default function Settings({ config, setConfig }: Props) {
     setDraft({ ...draft, hid: { ...draft.hid, [field]: value } });
   };
 
-  const toggleLaunchAtLogin = async (enabled: boolean) => {
-    setLaunchBusy(true);
-    setError(null);
-    const previous = launchAtLogin;
-    setLaunchAtLoginState(enabled);
-    try {
-      await setLaunchAtLogin(enabled);
-    } catch (e) {
-      setLaunchAtLoginState(previous);
-      setError(String(e));
-    } finally {
-      setLaunchBusy(false);
-    }
-  };
-
   return (
     <div className="p-6 max-w-2xl mx-auto space-y-5">
       <PageHeader
@@ -84,9 +95,9 @@ export default function Settings({ config, setConfig }: Props) {
               {t("settings.reload")}
             </SecondaryButton>
             <PrimaryButton
-              onClick={save}
-              disabled={!isDirty}
-              loading={saving}
+              onClick={handleSave}
+              disabled={!isDirty && !launchDirty}
+              loading={saving || launchBusy}
               icon={<Save size={15} />}
             >
               {t("settings.save")}
@@ -121,9 +132,12 @@ export default function Settings({ config, setConfig }: Props) {
           description={t("settings.app.launch_at_login.desc")}
         >
           <Toggle
-            checked={launchAtLogin}
+            checked={launchDraft}
             disabled={launchBusy}
-            onChange={toggleLaunchAtLogin}
+            onChange={(v) => {
+              setError(null);
+              setLaunchDraft(v);
+            }}
             label={t("settings.app.launch_at_login")}
           />
         </SettingRow>

@@ -12,8 +12,9 @@ import {
 import { startMonitoring, stopMonitoring, saveConfig } from "../api";
 import { Toggle } from "../components/Toggle";
 import { RollingNumber } from "../components/RollingNumber";
-import { ErrorNotice, SavedIndicator } from "../components/Ui";
+import { ErrorNotice } from "../components/Ui";
 import { aiStatusKey, formatClockTime, formatUsedBp, usageBarColor } from "../lib/format";
+import { friendlyError } from "../lib/errors";
 import { useLang, type TranslationKey } from "../i18n";
 import type {
   AppConfig,
@@ -46,19 +47,15 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
   const [actionError, setActionError] = useState<string | null>(null);
   const [featureSaving, setFeatureSaving] = useState(false);
   const [featureError, setFeatureError] = useState<string | null>(null);
-  const [justSaved, setJustSaved] = useState(false);
 
   const saveFeatureConfig = async (updated: AppConfig) => {
     const previous = config;
     setActionError(null);
     setFeatureError(null);
-    setJustSaved(false);
     setConfig(updated);
     setFeatureSaving(true);
     try {
       await saveConfig(updated);
-      setJustSaved(true);
-      setTimeout(() => setJustSaved(false), 2000);
     } catch {
       setConfig(previous);
       setFeatureError(t("dashboard.save_failed"));
@@ -100,7 +97,7 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
         await startMonitoring();
       }
     } catch (e) {
-      setActionError(String(e));
+      setActionError(friendlyError(e, t));
     } finally {
       setActionLoading(false);
     }
@@ -130,7 +127,6 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
           <p className="text-sm text-muted mt-0.5">{t("dashboard.subtitle")}</p>
         </div>
         <div className="flex items-center gap-3">
-          {justSaved && <SavedIndicator label={t("common.saved")} />}
           <button
           onClick={handleToggle}
           disabled={actionLoading}
@@ -157,7 +153,7 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
           <AlertCircle size={16} className="mt-0.5 flex-shrink-0" />
           <div>
             <div className="font-medium">{t("dashboard.error.title")}</div>
-            <div className="mt-0.5 text-red-600">{status.last_error}</div>
+            <div className="mt-0.5 text-red-600">{friendlyError(status.last_error, t)}</div>
           </div>
         </div>
       )}

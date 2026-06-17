@@ -34,6 +34,7 @@ export default function TimeSync({ config, setConfig }: Props) {
     setConfig,
     select: (c) => c.time,
     apply: (c, time) => ({ ...c, time }),
+    t,
   });
 
   return (

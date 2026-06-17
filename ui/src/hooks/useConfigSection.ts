@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { saveConfig } from "../api";
+import { friendlyError } from "../lib/errors";
+import type { TranslationKey } from "../i18n";
 import type { AppConfig } from "../types";
 
 interface Options<T> {
@@ -9,6 +11,8 @@ interface Options<T> {
   select: (c: AppConfig) => T;
   /** Merge an edited slice back into the full config. */
   apply: (c: AppConfig, draft: T) => AppConfig;
+  /** Translator, used to surface a human-readable message on save failure. */
+  t: (key: TranslationKey, params?: Record<string, string | number>) => string;
 }
 
 interface Result<T> {
@@ -25,7 +29,7 @@ interface Result<T> {
  * Shared draft/dirty/save/error state for settings pages. The draft is reset
  * whenever the upstream config changes (e.g. after a save or reload).
  */
-export function useConfigSection<T>({ config, setConfig, select, apply }: Options<T>): Result<T> {
+export function useConfigSection<T>({ config, setConfig, select, apply, t }: Options<T>): Result<T> {
   const [draft, setDraft] = useState<T>(() => select(config));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -46,7 +50,7 @@ export function useConfigSection<T>({ config, setConfig, select, apply }: Option
       await saveConfig(updated);
       setConfig(updated);
     } catch (e) {
-      setError(String(e));
+      setError(friendlyError(e, t));
     } finally {
       setSaving(false);
     }

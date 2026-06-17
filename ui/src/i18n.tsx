@@ -12,6 +12,14 @@ const T = {
   ja: {
     "app.loading": "読み込み中...",
 
+    "error.generic": "操作に失敗しました。",
+    "error.permission_denied":
+      "アクセスが拒否されました。アプリの権限や、他のアプリがデバイスを使用していないか確認してください。",
+    "error.device_busy":
+      "デバイスが使用中です。デバイスを使う他のアプリを閉じてから再試行してください。",
+    "error.connection_failed":
+      "デバイスとの通信に失敗しました。再接続してから再試行してください。",
+
     "nav.dashboard": "ダッシュボード",
     "nav.rules": "レイヤールール",
     "nav.actions": "アクション",
@@ -526,6 +534,14 @@ const T = {
   },
   en: {
     "app.loading": "Loading...",
+
+    "error.generic": "The operation failed.",
+    "error.permission_denied":
+      "Access was denied. Check app permissions and make sure no other app is using the device.",
+    "error.device_busy":
+      "The device is busy. Close other apps using it and try again.",
+    "error.connection_failed":
+      "Failed to communicate with the device. Reconnect it and try again.",
 
     "nav.dashboard": "Dashboard",
     "nav.rules": "Layer Rules",

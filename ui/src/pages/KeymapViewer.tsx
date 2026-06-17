@@ -71,6 +71,7 @@ export default function KeymapViewer({
     operation: "idle",
     problem: null,
   });
+  const [editNotice, setEditNotice] = useState<"saved" | "discarded" | null>(null);
   const [catalog, setCatalog] = useState<KeyCatalogEntry[]>([]);
   const [picker, setPicker] = useState<{
     key: StudioPhysicalKey;
@@ -184,6 +185,7 @@ export default function KeymapViewer({
   const beginEdit = useCallback(async (forceDiscard = false) => {
     if (!selected) return;
     setError(null);
+    setEditNotice(null);
     setPicker(null);
     setEditState((current) => ({ ...current, operation: "setting", problem: null }));
     try {
@@ -222,10 +224,12 @@ export default function KeymapViewer({
 
   const saveEdit = useCallback(async () => {
     if (!selected) return;
+    setEditNotice(null);
     setEditState((current) => ({ ...current, operation: "saving", problem: null }));
     try {
       await studioSaveChanges(selected.id);
       setEditState((current) => ({ ...current, dirty: false, operation: "idle", problem: null }));
+      setEditNotice("saved");
     } catch (e) {
       const code = String(e);
       const problem = mapEditProblem(code) ?? "save_failed";
@@ -236,12 +240,14 @@ export default function KeymapViewer({
 
   const discardEdit = useCallback(async () => {
     if (!selected) return false;
+    setEditNotice(null);
     setEditState((current) => ({ ...current, operation: "discarding", problem: null }));
     try {
       const result = await studioDiscardChanges(selected.id);
       setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
       setPicker(null);
       setEditState((current) => ({ ...current, dirty: false, operation: "idle", problem: null }));
+      setEditNotice("discarded");
       return true;
     } catch (e) {
       const code = String(e);
@@ -275,6 +281,7 @@ export default function KeymapViewer({
 
   const setKey = useCallback(async (key: StudioPhysicalKey, targetLayer: StudioLayer, behavior: EditBehavior) => {
     if (!selected || editState.operation !== "idle") return;
+    setEditNotice(null);
     setEditState((current) => ({ ...current, operation: "setting", problem: null }));
     try {
       const result = await studioSetKey(selected.id, targetLayer.id, key.position, behavior);
@@ -292,6 +299,12 @@ export default function KeymapViewer({
   useEffect(() => {
     setPicker(null);
   }, [selectedId, viewMode, activeLayer]);
+
+  useEffect(() => {
+    if (!editNotice) return undefined;
+    const timer = window.setTimeout(() => setEditNotice(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [editNotice]);
 
   useEffect(() => {
     return () => {
@@ -443,14 +456,16 @@ export default function KeymapViewer({
           dirty={editState.dirty}
           operation={editState.operation}
           problem={editState.problem}
+          notice={editNotice}
           onSave={saveEdit}
           onDiscard={discardEdit}
           onEnd={endEdit}
         />
       )}
       {picker && (
-        <KeyPicker
+        <BindingPicker
           catalog={catalog}
+          layers={snapshot?.layers ?? []}
           rect={picker.rect}
           busy={editState.operation === "setting"}
           onClose={() => setPicker(null)}
@@ -556,10 +571,11 @@ function KeymapContent({ snapshot, activeLayer, setActiveLayer, layer, reportedL
   );
 }
 
-function EditBar({ dirty, operation, problem, onSave, onDiscard, onEnd }: {
+function EditBar({ dirty, operation, problem, notice, onSave, onDiscard, onEnd }: {
   dirty: boolean;
   operation: EditState["operation"];
   problem: EditState["problem"];
+  notice: "saved" | "discarded" | null;
   onSave: () => void;
   onDiscard: () => void;
   onEnd: () => void;
@@ -568,12 +584,14 @@ function EditBar({ dirty, operation, problem, onSave, onDiscard, onEnd }: {
   const busy = operation !== "idle";
   const message = problem
     ? t(`keymap.edit.problem.${problem}` as TranslationKey)
+    : notice
+      ? t(`keymap.edit.${notice}` as TranslationKey)
     : dirty
       ? t("keymap.edit.dirty")
-      : t("keymap.edit.no_changes");
+      : "";
   return (
     <div className="fixed bottom-4 left-1/2 z-40 flex w-[min(720px,calc(100vw-32px))] -translate-x-1/2 flex-wrap items-center justify-between gap-3 rounded-card bg-surface px-4 py-3 shadow-neu-up ring-1 ring-border">
-      <div className={`text-sm font-medium ${problem ? "text-red-700" : dirty ? "text-ink" : "text-muted"}`}>
+      <div className={`min-h-5 text-sm font-medium ${problem ? "text-red-700" : "text-muted"}`}>
         {message}
       </div>
       <div className="flex flex-wrap items-center gap-2">
@@ -606,14 +624,17 @@ function EditBar({ dirty, operation, problem, onSave, onDiscard, onEnd }: {
   );
 }
 
-function KeyPicker({ catalog, rect, busy, onClose, onSelect }: {
+function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
   catalog: KeyCatalogEntry[];
+  layers: StudioLayer[];
   rect: { left: number; top: number; width: number; height: number };
   busy: boolean;
   onClose: () => void;
   onSelect: (behavior: EditBehavior) => void;
 }) {
   const { t } = useLang();
+  const [tab, setTab] = useState<"key" | "layer">("key");
+  const [layerBehavior, setLayerBehavior] = useState<"momentary_layer" | "toggle_layer" | "to_layer">("momentary_layer");
   const [query, setQuery] = useState("");
   const queryLower = query.trim().toLowerCase();
   const filtered = useMemo(() => {
@@ -655,61 +676,130 @@ function KeyPicker({ catalog, rect, busy, onClose, onSelect }: {
         className="fixed z-50 flex max-h-[min(560px,calc(100vh-32px))] w-[min(520px,calc(100vw-24px))] flex-col rounded-card bg-surface p-3 shadow-neu-up ring-1 ring-border"
         style={{ left: position.left, top: position.top }}
       >
-        <div className="flex items-center gap-2 rounded-pill bg-background px-3 py-2 ring-1 ring-border">
-          <Search size={15} className="text-faint" />
-          <input
-            autoFocus
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={t("keymap.edit.search")}
-            className="min-w-0 flex-1 bg-transparent text-sm text-ink outline-none placeholder:text-faint"
-          />
+        <div className="flex gap-1 rounded-pill bg-background p-1 ring-1 ring-border">
+          {(["key", "layer"] as const).map((item) => (
+            <button
+              key={item}
+              type="button"
+              onClick={() => setTab(item)}
+              className={`flex-1 rounded-pill px-3 py-1.5 text-sm font-medium transition-colors ${
+                tab === item ? "bg-plate text-accent-deep shadow-neu-sel-in" : "text-muted hover:text-ink"
+              }`}
+            >
+              {t(item === "key" ? "keymap.edit.tab_key" : "keymap.edit.tab_layer")}
+            </button>
+          ))}
         </div>
-        <div className="mt-3 flex gap-2">
-          <button
-            disabled={busy}
-            onClick={() => onSelect({ kind: "transparent" })}
-            className="flex-1 rounded-lg bg-background px-3 py-2 text-left text-sm ring-1 ring-border disabled:opacity-50"
-          >
-            <div className="font-medium text-ink">{t("keymap.edit.transparent")}</div>
-            <div className="mt-0.5 text-xs text-faint">{t("keymap.edit.transparent_desc")}</div>
-          </button>
-          <button
-            disabled={busy}
-            onClick={() => onSelect({ kind: "none" })}
-            className="flex-1 rounded-lg bg-background px-3 py-2 text-left text-sm ring-1 ring-border disabled:opacity-50"
-          >
-            <div className="font-medium text-ink">{t("keymap.edit.none")}</div>
-            <div className="mt-0.5 text-xs text-faint">{t("keymap.edit.none_desc")}</div>
-          </button>
-        </div>
-        <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
-          {grouped.map(([category, entries]) => (
-            <div key={category} className="mb-3">
+        {tab === "key" ? (
+          <>
+            <div className="mt-3 flex items-center gap-2 rounded-pill bg-background px-3 py-2 ring-1 ring-border">
+              <Search size={15} className="text-faint" />
+              <input
+                autoFocus
+                value={query}
+                onChange={(event) => setQuery(event.target.value)}
+                placeholder={t("keymap.edit.search")}
+                className="min-w-0 flex-1 bg-transparent text-sm text-ink outline-none placeholder:text-faint"
+              />
+            </div>
+            <div className="mt-3 flex gap-2">
+              <button
+                disabled={busy}
+                onClick={() => onSelect({ kind: "transparent" })}
+                className="flex-1 rounded-lg bg-background px-3 py-2 text-left text-sm ring-1 ring-border disabled:opacity-50"
+              >
+                <div className="font-medium text-ink">{t("keymap.edit.transparent")}</div>
+                <div className="mt-0.5 text-xs text-faint">{t("keymap.edit.transparent_desc")}</div>
+              </button>
+              <button
+                disabled={busy}
+                onClick={() => onSelect({ kind: "none" })}
+                className="flex-1 rounded-lg bg-background px-3 py-2 text-left text-sm ring-1 ring-border disabled:opacity-50"
+              >
+                <div className="font-medium text-ink">{t("keymap.edit.none")}</div>
+                <div className="mt-0.5 text-xs text-faint">{t("keymap.edit.none_desc")}</div>
+              </button>
+            </div>
+            <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
+              {grouped.map(([category, entries]) => (
+                <div key={category} className="mb-3">
+                  <div className="mb-1.5 text-xs font-medium uppercase text-faint">
+                    {t(`keymap.catalog.${category}` as TranslationKey)}
+                  </div>
+                  <div className="flex flex-wrap gap-1.5">
+                    {entries.map((entry) => (
+                      <button
+                        key={`${entry.hid_usage}-${entry.canonical}`}
+                        disabled={busy}
+                        onClick={() => onSelect({ kind: "key_press", hid_usage: entry.hid_usage })}
+                        className="rounded-md bg-background px-2.5 py-1.5 text-sm font-medium text-ink ring-1 ring-border hover:bg-plate disabled:opacity-50"
+                        title={(entry.names?.length ? entry.names : [entry.canonical]).join(" / ")}
+                      >
+                        {entry.display}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+              {grouped.length === 0 && (
+                <div className="py-8 text-center text-sm text-faint">
+                  {t("keymap.edit.no_results")}
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
+            <div className="mb-3">
               <div className="mb-1.5 text-xs font-medium uppercase text-faint">
-                {t(`keymap.catalog.${category}` as TranslationKey)}
+                {t("keymap.edit.layer_behavior")}
               </div>
-              <div className="flex flex-wrap gap-1.5">
-                {entries.map((entry) => (
+              <div className="flex gap-1.5">
+                {(["momentary_layer", "toggle_layer", "to_layer"] as const).map((kind) => (
                   <button
-                    key={`${entry.hid_usage}-${entry.canonical}`}
+                    key={kind}
+                    type="button"
                     disabled={busy}
-                    onClick={() => onSelect({ kind: "key_press", hid_usage: entry.hid_usage })}
-                    className="rounded-md bg-background px-2.5 py-1.5 text-sm font-medium text-ink ring-1 ring-border hover:bg-plate disabled:opacity-50"
-                    title={(entry.names?.length ? entry.names : [entry.canonical]).join(" / ")}
+                    onClick={() => setLayerBehavior(kind)}
+                    title={t(`keymap.edit.${kind}_tooltip` as TranslationKey)}
+                    className={`rounded-md px-3 py-1.5 text-sm font-semibold ring-1 disabled:opacity-50 ${
+                      layerBehavior === kind
+                        ? "bg-plate text-accent-deep ring-transparent shadow-neu-sel-in"
+                        : "bg-background text-ink ring-border hover:bg-plate"
+                    }`}
                   >
-                    {entry.display}
+                    {t(`keymap.edit.${kind}` as TranslationKey)}
                   </button>
                 ))}
               </div>
             </div>
-          ))}
-          {grouped.length === 0 && (
-            <div className="py-8 text-center text-sm text-faint">
-              {t("keymap.edit.no_results")}
+            <div>
+              <div className="mb-1.5 text-xs font-medium uppercase text-faint">
+                {t("keymap.edit.target_layer")}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {layers.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => onSelect({ kind: layerBehavior, target_layer_index: item.index })}
+                    className="inline-flex max-w-full items-center gap-1.5 rounded-md bg-background px-2.5 py-1.5 text-xs font-medium text-ink ring-1 ring-border hover:bg-plate disabled:opacity-50"
+                    title={`${item.name} (#${item.index})`}
+                  >
+                    <span className="font-mono text-[11px] text-faint">#{item.index}</span>
+                    <span className="truncate">{item.name}</span>
+                  </button>
+                ))}
+              </div>
+              {layers.length === 0 && (
+                <div className="py-8 text-center text-sm text-faint">
+                  {t("keymap.edit.no_layers")}
+                </div>
+              )}
             </div>
-          )}
-        </div>
+          </div>
+        )}
       </div>
     </>
   );

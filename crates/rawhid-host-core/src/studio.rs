@@ -158,6 +158,9 @@ pub enum EditBehavior {
     KeyPress(u32),
     Transparent,
     None,
+    MomentaryLayer(u32),
+    ToggleLayer(u32),
+    ToLayer(u32),
 }
 
 #[derive(Debug, Error)]
@@ -738,18 +741,18 @@ fn binding_labels(behavior: &str, param1: u32, param2: u32) -> BindingLabels {
             format!("&mt {} {}", key_label(param1), key_label(param2)),
         )),
         "momentary layer" => Some((
-            "&mo".to_string(),
-            param1.to_string(),
+            format!("mo {}", param1),
+            String::new(),
             format!("&mo {}", param1),
         )),
         "toggle layer" => Some((
-            "&tog".to_string(),
-            param1.to_string(),
+            format!("tog {}", param1),
+            String::new(),
             format!("&tog {}", param1),
         )),
         "to layer" => Some((
-            "&to".to_string(),
-            param1.to_string(),
+            format!("to {}", param1),
+            String::new(),
             format!("&to {}", param1),
         )),
         "sticky layer" => Some((
@@ -821,7 +824,15 @@ fn normalize_key_name(name: &str) -> String {
     if let Some(digit) = number_key_digit(name) {
         return us_number_display(digit);
     }
-    name.to_string()
+    match name {
+        "LEFT_COMMAND" | "LCMD" | "LEFT_META" | "LMETA" | "LEFT_WIN" | "LWIN" => {
+            "LEFT_GUI".to_string()
+        }
+        "RIGHT_COMMAND" | "RCMD" | "RIGHT_META" | "RMETA" | "RIGHT_WIN" | "RWIN" => {
+            "RIGHT_GUI".to_string()
+        }
+        _ => name.to_string(),
+    }
 }
 
 fn number_key_digit(name: &str) -> Option<char> {
@@ -857,6 +868,9 @@ fn behavior_to_zmk(behavior: EditBehavior) -> Behavior {
         EditBehavior::KeyPress(encoded) => Behavior::KeyPress(HidUsage::from_encoded(encoded)),
         EditBehavior::Transparent => Behavior::Transparent,
         EditBehavior::None => Behavior::None,
+        EditBehavior::MomentaryLayer(layer) => Behavior::MomentaryLayer { layer_id: layer },
+        EditBehavior::ToggleLayer(layer) => Behavior::ToggleLayer { layer_id: layer },
+        EditBehavior::ToLayer(layer) => Behavior::ToLayer { layer_id: layer },
     }
 }
 
@@ -1491,6 +1505,14 @@ mod tests {
     }
 
     #[test]
+    fn key_label_normalizes_meta_to_gui() {
+        assert_eq!(normalize_key_name("LEFT_META"), "LEFT_GUI");
+        assert_eq!(normalize_key_name("RIGHT_META"), "RIGHT_GUI");
+        assert_eq!(display_key_name("LEFT_META"), "Left GUI");
+        assert_eq!(display_key_name("RIGHT_META"), "Right GUI");
+    }
+
+    #[test]
     fn key_catalog_uses_zmk_reference_category_order() {
         let catalog = key_catalog();
         assert!(!catalog.is_empty());
@@ -1551,6 +1573,65 @@ mod tests {
             Behavior::Transparent
         );
         assert_eq!(behavior_to_zmk(EditBehavior::None), Behavior::None);
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::MomentaryLayer(1)),
+            Behavior::MomentaryLayer { layer_id: 1 }
+        );
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::ToggleLayer(2)),
+            Behavior::ToggleLayer { layer_id: 2 }
+        );
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::ToLayer(0)),
+            Behavior::ToLayer { layer_id: 0 }
+        );
+    }
+
+    #[test]
+    fn layer_behaviors_use_zmk_keymap_style_labels() {
+        let mut names = BTreeMap::new();
+        names.insert(10, "momentary layer".to_string());
+        names.insert(11, "toggle layer".to_string());
+        names.insert(12, "to layer".to_string());
+
+        let mo = binding_to_view(
+            1,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 10,
+                param1: 1,
+                param2: 0,
+            },
+            &names,
+        );
+        assert_eq!(mo.primary_label, "mo 1");
+        assert_eq!(mo.secondary_label, "");
+        assert_eq!(mo.full_label, "&mo 1");
+
+        let tog = binding_to_view(
+            2,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 11,
+                param1: 2,
+                param2: 0,
+            },
+            &names,
+        );
+        assert_eq!(tog.primary_label, "tog 2");
+        assert_eq!(tog.secondary_label, "");
+        assert_eq!(tog.full_label, "&tog 2");
+
+        let to = binding_to_view(
+            3,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 12,
+                param1: 0,
+                param2: 0,
+            },
+            &names,
+        );
+        assert_eq!(to.primary_label, "to 0");
+        assert_eq!(to.secondary_label, "");
+        assert_eq!(to.full_label, "&to 0");
     }
 
     #[test]

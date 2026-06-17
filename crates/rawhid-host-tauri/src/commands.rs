@@ -381,6 +381,9 @@ pub enum EditBehaviorDto {
     KeyPress { hid_usage: u32 },
     Transparent,
     None,
+    MomentaryLayer { target_layer_index: u32 },
+    ToggleLayer { target_layer_index: u32 },
+    ToLayer { target_layer_index: u32 },
 }
 
 impl From<EditBehaviorDto> for EditBehavior {
@@ -389,6 +392,15 @@ impl From<EditBehaviorDto> for EditBehavior {
             EditBehaviorDto::KeyPress { hid_usage } => EditBehavior::KeyPress(hid_usage),
             EditBehaviorDto::Transparent => EditBehavior::Transparent,
             EditBehaviorDto::None => EditBehavior::None,
+            EditBehaviorDto::MomentaryLayer { target_layer_index } => {
+                EditBehavior::MomentaryLayer(target_layer_index)
+            }
+            EditBehaviorDto::ToggleLayer { target_layer_index } => {
+                EditBehavior::ToggleLayer(target_layer_index)
+            }
+            EditBehaviorDto::ToLayer { target_layer_index } => {
+                EditBehavior::ToLayer(target_layer_index)
+            }
         }
     }
 }

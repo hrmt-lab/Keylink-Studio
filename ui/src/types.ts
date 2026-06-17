@@ -373,7 +373,10 @@ export interface KeyCatalogEntry {
 export type EditBehavior =
   | { kind: "key_press"; hid_usage: number }
   | { kind: "transparent" }
-  | { kind: "none" };
+  | { kind: "none" }
+  | { kind: "momentary_layer"; target_layer_index: number }
+  | { kind: "toggle_layer"; target_layer_index: number }
+  | { kind: "to_layer"; target_layer_index: number };
 
 export interface EditState {
   mode: "viewing" | "editing";

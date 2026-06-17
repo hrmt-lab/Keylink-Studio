@@ -279,12 +279,13 @@ bit4 = BATTERY      (device sends BATTERY_STATUS)
 bit5 = HOST_ACTION  (device sends HOST_ACTION)
 bit6 = KEY_STATS    (device sends KEY_STATS)
 bit7 = LAYER_STATE  (device sends LAYER_STATE)
+bit8 = KEY_PRESS    (device sends KEY_PRESS)
 ```
 
 RawHID Host は `APP_LAYER` capability がないデバイスへ `APP_LAYER` packet を送信しません。その場合もデバイスは Devices 画面に Host Link device として表示されます。
 
 ### capability の host 側動作
 
-host は `capabilities` を機能ゲートとして扱います。capability がない場合も verified Host Link device は Devices 画面に表示されますが、機能 packet は対応する capability がある場合にのみ送信されます。v1 ではこのゲートは `APP_LAYER` のルーティングに適用されます。
+host は `capabilities` を機能ゲートとして扱います。capability がない場合も verified Host Link device は Devices 画面に表示されますが、機能 packet は対応する capability がある場合にのみ送信または受理されます。`APP_LAYER` / `TIME_SYNC` / `AI_USAGE` は送信可否、`BATTERY_STATUS` / `HOST_ACTION` / `KEY_STATS` / `LAYER_STATE` / `KEY_PRESS` は受信可否に使います。
 
 `device_uid_hash` は識別ヒントであり、通信経路ではありません。host は非ゼロ値を config および UI 向けに `uid:<16桁小文字16進数>` として保存します。値 `0` は識別子として無効であり、`None` に正規化されます。

@@ -4,21 +4,21 @@ RawHID Host のアプリバージョンと Host Link プロトコルバージョ
 
 - アプリバージョンは PC 側アプリ、UI、CLI、配布物のバージョンです。
 - Host Link プロトコルバージョンは、ZMK firmware 側と Raw HID packet で合意する通信仕様のバージョンです。
-- RawHID Host `0.6.0` 時点の Host Link プロトコルは `v1` です。
+- RawHID Host `0.9.0` 時点の Host Link プロトコルは `v1` です。
 
 ## 互換性一覧
 
-| ホストアプリバージョン | Host Link プロトコル | 必要 firmware 側対応 | 主な機能 |
+| ホストアプリバージョン | Host Link プロトコル | 必要な firmware 側対応 | 主な機能 |
 | --- | --- | --- | --- |
-| `0.8.5` | `v1` | 0.6.0 と同じ (Host Link firmware 側変更なし)。ZMK Studio 編集には firmware 側の ZMK Studio 対応と実機での `&studio_unlock` が必要 | 0.8.1 の機能 + ZMK Studio RPC 経由のキーマップ編集 v1 (通常キー / 透過 / 無効、保存 / 破棄、キーコードピッカー)。キーマップ表示の自動縮小、左右余白調整、キーマップ画面・ダッシュボードのデバイス名順表示 |
-| `0.8.1` | `v1` | 0.6.0 と同じ (firmware 側変更なし) | 0.8.0 の機能 + HOST_ACTION の `launch` を focus-or-launch 化 (起動済みなら前面化・未起動なら起動、exe 名で判定、最大化保持)。起動中アプリピッカー / 参照ボタン (ファイル・フォルダ選択) / `.lnk`・関連付け起動 / 「前面化する exe 名」上書きを追加 |
-| `0.8.0` | `v1` | 0.6.0 と同じ (firmware 側変更なし) | 0.7.0 の機能 + HOST_ACTION に `open_folder` (Explorer でフォルダを開く / 既存ウィンドウ前面化 / `prefer_tab` でタブ再利用) を追加。アクション画面のバインディング編集・ID順表示、システムトレイのツールチップにバッテリー残量表示、`show_window` の最小化/トレイからの復帰修正 |
-| `0.7.0` | `v1` | 0.6.0 と同じ (firmware 側変更なし) | 0.6.0 の機能 + UI デザイン全面刷新 (Studio Gadget)、アクセント色カスタマイズ、マニュアル画像更新 |
-| `0.6.0` | `v1` | 従来対応 + 任意で uplink capability (`BATTERY` / `HOST_ACTION` / `KEY_STATS` / `LAYER_STATE`) | 0.5.0 の機能 + バッテリー表示、キーボードからの PC 操作、タイピング統計ヒートマップ、レイヤー逆同期 |
-| `0.5.0` | `v1` | `HOST_HELLO` / `DEVICE_HELLO`, capability 情報, `APP_LAYER`, `TIME_SYNC`, `AI_USAGE` | デバイス単位のレイヤールール (Global fallback 廃止)、時刻同期、AI 使用量送信、Keymap Viewer、自動起動 |
-| `0.4.0` | `v1` | `HOST_HELLO` / `DEVICE_HELLO`, capability 情報, `APP_LAYER`, `TIME_SYNC`, `AI_USAGE` | アプリ別レイヤー切り替え (即時検知)、時刻同期、AI 使用量送信、Keymap Viewer、自動起動 |
-| `0.3.1` | `v1` | `HOST_HELLO` / `DEVICE_HELLO`, capability 情報, `APP_LAYER`, `TIME_SYNC`, `AI_USAGE` | アプリ別レイヤー切り替え、時刻同期、AI 使用量送信、Keymap Viewer |
-| `0.3.0` | `v1` | `HOST_HELLO` / `DEVICE_HELLO`, capability 情報, `APP_LAYER`, `TIME_SYNC`, `AI_USAGE` | アプリ別レイヤー切り替え、時刻同期、AI 使用量送信、Keymap Viewer |
+| `0.9.0` | `v1` | Host Link は 0.6.0 と同系統。キーテスターには `KEY_PRESS` capability が必要。ZMK Studio 編集には firmware 側の ZMK Studio 対応と実機での `&studio_unlock` が必要 | ZMK Studio RPC 経由のキーマップ編集を拡張。MO / TG / TO、MT / LT、Sticky、Bluetooth、Output、Mouse、Utility、System、レイヤー追加 / 名前変更 / 削除、キーテスター。README / docs を現状仕様へ更新 |
+| `0.8.5` | `v1` | 0.6.0 と同じ (Host Link firmware 側変更なし)。ZMK Studio 編集 v1 には firmware 側の ZMK Studio 対応と実機での `&studio_unlock` が必要 | 0.8.1 の機能 + ZMK Studio RPC 経由のキーマップ編集 v1 (通常キー / 透過 / 無効、保存 / 破棄、キーコードピッカー)。キーマップ表示の自動縮小、左右余白調整、キーマップ画面・ダッシュボードのデバイス名順表示 |
+| `0.8.1` | `v1` | 0.6.0 と同じ | HOST_ACTION `launch` の focus-or-launch 化、起動中アプリピッカー、参照ボタン、`.lnk` / 関連付け起動、`match_exe` |
+| `0.8.0` | `v1` | 0.6.0 と同じ | HOST_ACTION `open_folder`、アクション画面のバインディング編集、ID 順表示、トレイのバッテリー残量表示、`show_window` の最小化 / トレイ復帰修正 |
+| `0.7.0` | `v1` | 0.6.0 と同じ | UI デザイン全面刷新、アクセント色カスタマイズ、マニュアル画像更新 |
+| `0.6.0` | `v1` | 従来対応 + 任意で uplink capability (`BATTERY` / `HOST_ACTION` / `KEY_STATS` / `LAYER_STATE`) | バッテリー表示、キーボードからの PC 操作、タイピング統計ヒートマップ、レイヤー逆同期 |
+| `0.5.0` | `v1` | `HOST_HELLO` / `DEVICE_HELLO`, capability 情報, `APP_LAYER`, `TIME_SYNC`, `AI_USAGE` | デバイス単位のレイヤールール、時刻同期、AI 使用量送信、Keymap Viewer、自動起動 |
+| `0.4.0` | `v1` | `HOST_HELLO` / `DEVICE_HELLO`, capability 情報, `APP_LAYER`, `TIME_SYNC`, `AI_USAGE` | アプリ別レイヤー切り替え、時刻同期、AI 使用量送信、Keymap Viewer、自動起動 |
+| `0.3.x` | `v1` | `HOST_HELLO` / `DEVICE_HELLO`, capability 情報, `APP_LAYER`, `TIME_SYNC`, `AI_USAGE` | アプリ別レイヤー切り替え、時刻同期、AI 使用量送信、Keymap Viewer |
 | `0.2.x` | `v1` | `HOST_HELLO` / `DEVICE_HELLO`, `APP_LAYER`, `TIME_SYNC`, `AI_USAGE` | アプリ別レイヤー切り替え、時刻同期、AI 使用量送信 |
 | `0.1.x` | `v1` | `HOST_HELLO` / `DEVICE_HELLO`, `APP_LAYER`, `TIME_SYNC` | アプリ別レイヤー切り替え、時刻同期 |
 
@@ -27,37 +27,42 @@ RawHID Host のアプリバージョンと Host Link プロトコルバージョ
 | 項目 | 値 |
 | --- | --- |
 | magic | `HL` |
-| プロトコルバージョン byte | `0x01` |
+| protocol version byte | `0x01` |
 | HID Usage Page | `0xFF60` |
 | HID Usage | `0x0061` |
-| payload サイズ | 32 bytes |
+| payload size | 32 bytes |
+| HID write size | 33 bytes |
 | Report ID | `0x00` |
 
 ## 機能ごとの必要対応
 
 | 機能 | ホストアプリ側 | Firmware 側 | 補足 |
 | --- | --- | --- | --- |
-| `APP_LAYER` | Raw HID packet 送信とルール振り分け | `APP_LAYER` packet の受信と layer set / clear 処理 | RawHID Host は `APP_LAYER` capability を返したデバイスにだけ送信します。 |
-| `TIME_SYNC` | ローカル時刻 snapshot の packet 送信 | `TIME_SYNC` packet の受信と表示状態の更新 | Host は毎秒送信しません。Firmware 側は uptime 差分で表示時刻を進める想定です。 |
+| `APP_LAYER` | Raw HID packet 送信とルール振り分け | `APP_LAYER` packet の受信と layer set / clear 処理 | `APP_LAYER` capability を返したデバイスにだけ送信します。 |
+| `TIME_SYNC` | ローカル時刻 snapshot の packet 送信 | `TIME_SYNC` packet の受信と表示状態更新 | Host は毎秒送信しません。firmware 側は uptime 差分で表示時刻を進める想定です。 |
 | `AI_USAGE` | Codex / Claude Code 使用量の取得と packet 送信 | `AI_USAGE` packet の受信と表示処理 | error / status は固定 code です。機密情報の raw data は送信しません。 |
-| Keymap Viewer / ZMK Studio 読み取り専用ビューア | USB serial / CDC ACM の ZMK Studio RPC client | ZMK Studio USB serial RPC と unlocked Studio state | Host Link Raw HID とは別経路です。編集、書き込み、保存、復元、unlock は行いません。 |
+| BATTERY 表示 | `BATTERY_STATUS` uplink 受信と UI / tray 表示 | `BATTERY_STATUS 0x40` 送信 | `BATTERY` capability が必要です。 |
+| HOST_ACTION | 許可リストに基づく PC 側アクション実行 | `HOST_ACTION 0x50` 送信 | `HOST_ACTION` capability が必要です。既定 disabled です。 |
+| KEY_STATS | 押下回数の記録とヒートマップ表示 | `KEY_STATS 0x60` 送信 | 記録するのは position と回数のみです。 |
+| LAYER_STATE | アクティブレイヤー表示 | `LAYER_STATE 0x70` 送信 | 表示専用で、`APP_LAYER` としてエコーバックしません。 |
+| KEY_PRESS | キーテスターのリアルタイム表示 | `KEY_PRESS 0x80` 送信 + `KEY_PRESS` capability | 押下 / 離しの一時表示のみで、累積記録はしません。 |
+| Keymap Viewer / ZMK Studio | USB serial / CDC ACM の ZMK Studio RPC client | ZMK Studio USB serial RPC と unlocked Studio state | Host Link Raw HID とは別経路です。BLE transport は対象外です。 |
 
-## Uplink 機能 (0.6.0+)
+## ZMK Studio 編集の互換性
 
-| 機能 | capability bit | packet | Firmware 側対応 |
-| --- | --- | --- | --- |
-| バッテリー表示 | `BATTERY (bit4)` | `BATTERY_STATUS 0x40` | 自分+ペリフェラルの残量を変化時+定期送信 |
-| キーボードからの PC 操作 | `HOST_ACTION (bit5)` | `HOST_ACTION 0x50` | action_id + value を wrapping seq 付きで送る behavior |
-| タイピング統計 | `KEY_STATS (bit6)` | `KEY_STATS 0x60` | 位置別カウンタ (u16×キー数) を定期送信して 0 クリア |
-| レイヤー逆同期 | `LAYER_STATE (bit7)` | `LAYER_STATE 0x70` | layer-state-changed イベントで最上位レイヤー+mask 送信 |
+ZMK Studio 編集は Host Link protocol ではなく、`zmk-studio-api` 経由の Studio RPC を使います。Host Link firmware を変更しなくても、firmware 側が ZMK Studio に対応していれば利用できます。
 
-- いずれも任意機能です。capability bit を立てた機能だけ host が受け付けます (段階実装可)。
-- uplink は best-effort です。host が読んでいない間の packet は失われます。
-- host はこれらの packet を表示・記録に使い、`LAYER_STATE` を `APP_LAYER` としてエコーバックしません。
+必要条件:
+
+- USB serial / CDC ACM の ZMK Studio transport が使えること
+- 実機で `&studio_unlock` を実行して Studio が unlocked であること
+- 編集対象 behavior が firmware 側に存在すること
+
+編集できる behavior はアプリ側の UI に段階的に追加されています。対応していない behavior や firmware 側に role がない behavior は、`missing_behavior_role` などのエラーになります。
 
 ## 補足
 
-- Host Link `v1` は、`DEVICE_HELLO` で返る capability bits を使って機能ごとの送信可否を判断します。
-- 対応 capability がないデバイスも Host Link device として表示される場合がありますが、その機能の packet は送信されないことがあります。
-- Keymap Viewer は ZMK Studio transport を使います。Host Link Raw HID transport ではありません。
-- Firmware 更新 / 書き換えは Host Link `v1` には含まれません。
+- Host Link `v1` は `DEVICE_HELLO` の capability bits を使って機能ごとの送受信可否を判断します。
+- 対応 capability がないデバイスも Host Link device として表示される場合がありますが、その機能の packet は送信または実行されません。
+- uplink は best-effort です。host が読んでいない間の packet は失われます。
+- firmware 更新 / 書き換えは Host Link `v1` には含まれません。

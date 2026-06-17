@@ -3143,7 +3143,7 @@ checksum = "20675572f6f24e9e76ef639bc5552774ed45f1c30e2951e1e99c59888861c539"
 
 [[package]]
 name = "rawhid-host-cli"
-version = "0.8.5"
+version = "0.9.0"
 dependencies = [
  "clap",
  "rawhid-host-core",
@@ -3154,7 +3154,7 @@ dependencies = [
 
 [[package]]
 name = "rawhid-host-core"
-version = "0.8.5"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "directories",
@@ -3174,7 +3174,7 @@ dependencies = [
 
 [[package]]
 name = "rawhid-host-tauri"
-version = "0.8.5"
+version = "0.9.0"
 dependencies = [
  "chrono",
  "image",

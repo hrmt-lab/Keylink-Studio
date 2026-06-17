@@ -2,6 +2,26 @@
 
 All notable changes to RawHID Host are documented in this file.
 
+## [0.9.0] - 2026-06-17
+
+### Added
+
+- ZMK Studio キーマップ編集を拡張し、`MO` / `TG` / `TO`、`MT` / `LT`、Sticky、Bluetooth、Output、Mouse、Utility、System 系 behavior を追加。
+- キーマップ編集にレイヤー追加 / 名前変更 / 削除を追加。
+- `KEY_PRESS` uplink を使うキーテスター表示を追加。
+
+### Changed
+
+- キーマップ表示のレイヤータブを横スクロール化し、キーボード側のレイヤー変更で対象レイヤータブへ自動スクロールするようにした。
+- キーマップ画面の編集ボタンをレイヤータブ行の右端固定に変更。
+- キーマップ画面の Studio serial port 表示を削除。
+- README と docs 配下を現状仕様に合わせて更新し、文字化けしていたドキュメントを日本語で復元。
+
+### Fixed
+
+- 編集モードの保存 / 破棄メッセージ表示を調整。
+- ZMK Studio 編集中の `port_busy` や session 保持の挙動をドキュメントに明記。
+
 ## [0.8.5] - 2026-06-16
 
 ### Added

@@ -1387,12 +1387,6 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
             </div>
             <div>
               <div className="mb-1.5 text-xs font-medium uppercase text-faint">
-                {t("keymap.edit.sticky_key")}
-              </div>
-              {renderCatalogButtons((entry) => onSelect({ kind: "sticky_key", hid_usage: entry.hid_usage }))}
-            </div>
-            <div>
-              <div className="mb-1.5 text-xs font-medium uppercase text-faint">
                 {t("keymap.edit.sticky_layer")}
               </div>
               <div className="flex flex-wrap gap-1.5">
@@ -1425,6 +1419,12 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
                   {t("keymap.edit.no_layers")}
                 </div>
               )}
+            </div>
+            <div>
+              <div className="mb-1.5 text-xs font-medium uppercase text-faint">
+                {t("keymap.edit.sticky_key")}
+              </div>
+              {renderCatalogButtons((entry) => onSelect({ kind: "sticky_key", hid_usage: entry.hid_usage }))}
             </div>
           </div>
         )}

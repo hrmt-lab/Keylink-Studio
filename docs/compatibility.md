@@ -4,12 +4,13 @@ RawHID Host のアプリバージョンと Host Link プロトコルバージョ
 
 - アプリバージョンは PC 側アプリ、UI、CLI、配布物のバージョンです。
 - Host Link プロトコルバージョンは、ZMK firmware 側と Raw HID packet で合意する通信仕様のバージョンです。
-- RawHID Host `0.9.0` 時点の Host Link プロトコルは `v1` です。
+- RawHID Host `0.9.1` 時点の Host Link プロトコルは `v1` です。
 
 ## 互換性一覧
 
 | ホストアプリバージョン | Host Link プロトコル | 必要な firmware 側対応 | 主な機能 |
 | --- | --- | --- | --- |
+| `0.9.1` | `v1` | 0.9.0 と同じ (Host Link firmware 側変更なし) | UI のみの更新。設定の保存方法を画面ごとに統一 (即時保存画面と保存ボタン画面)、失敗時のエラー文言を利用者向けに変更、キーマップ表示の現在レイヤードット見切れ修正 |
 | `0.9.0` | `v1` | Host Link は 0.6.0 と同系統。キーテスターには `KEY_PRESS` capability が必要。ZMK Studio 編集には firmware 側の ZMK Studio 対応と実機での `&studio_unlock` が必要 | ZMK Studio RPC 経由のキーマップ編集を拡張。MO / TG / TO、MT / LT、Sticky、Bluetooth、Output、Mouse、Utility、System、レイヤー追加 / 名前変更 / 削除、キーテスター。README / docs を現状仕様へ更新 |
 | `0.8.5` | `v1` | 0.6.0 と同じ (Host Link firmware 側変更なし)。ZMK Studio 編集 v1 には firmware 側の ZMK Studio 対応と実機での `&studio_unlock` が必要 | 0.8.1 の機能 + ZMK Studio RPC 経由のキーマップ編集 v1 (通常キー / 透過 / 無効、保存 / 破棄、キーコードピッカー)。キーマップ表示の自動縮小、左右余白調整、キーマップ画面・ダッシュボードのデバイス名順表示 |
 | `0.8.1` | `v1` | 0.6.0 と同じ | HOST_ACTION `launch` の focus-or-launch 化、起動中アプリピッカー、参照ボタン、`.lnk` / 関連付け起動、`match_exe` |

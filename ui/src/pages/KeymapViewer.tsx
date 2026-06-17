@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type Dispatch, type SetStateAction } from "react";
-import { Crosshair, AlertCircle, BarChart3, Keyboard, Lock, RefreshCw, XCircle, Pencil, Save, Trash2, LogOut, Search } from "lucide-react";
+import { Crosshair, AlertCircle, BarChart3, Keyboard, Lock, RefreshCw, XCircle, Pencil, Save, Trash2, LogOut, Search, Plus } from "lucide-react";
 import {
   getKeyStats,
   onKeyPressEvent,
   onKeyStatsUpdated,
   readStudioKeymap,
+  studioAddLayer,
   studioBeginEdit,
   studioDiscardChanges,
   studioEndEdit,
   studioHasUnsaved,
   studioKeyCatalog,
+  studioRemoveLayer,
+  studioRenameLayer,
   studioSaveChanges,
   studioSetKey,
 } from "../api";
@@ -296,6 +299,69 @@ export default function KeymapViewer({
     }
   }, [editState.operation, mapEditProblem, selected, setSnapshotsByDeviceId, t]);
 
+  const addLayer = useCallback(async (name: string) => {
+    if (!selected || editState.operation !== "idle") return null;
+    const previousLayerIds = new Set(snapshot?.layers.map((item) => item.id) ?? []);
+    setEditNotice(null);
+    setEditState((current) => ({ ...current, operation: "setting", problem: null }));
+    try {
+      const result = await studioAddLayer(selected.id, name);
+      setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
+      const addedIndex = result.layers.findIndex((item) => !previousLayerIds.has(item.id));
+      setActiveLayer(addedIndex >= 0 ? addedIndex : Math.max(0, result.layers.length - 1));
+      setPicker(null);
+      setEditState((current) => ({ ...current, dirty: true, operation: "idle", problem: null }));
+      return result;
+    } catch (e) {
+      const code = String(e);
+      const problem = mapEditProblem(code);
+      setEditState((current) => ({ ...current, operation: "idle", problem }));
+      setError(errorLabel(code, t));
+      return null;
+    }
+  }, [editState.operation, mapEditProblem, selected, setSnapshotsByDeviceId, snapshot, t]);
+
+  const renameLayer = useCallback(async (targetLayer: StudioLayer, name: string) => {
+    if (!selected || editState.operation !== "idle") return null;
+    setEditNotice(null);
+    setEditState((current) => ({ ...current, operation: "setting", problem: null }));
+    try {
+      const result = await studioRenameLayer(selected.id, targetLayer.id, name);
+      setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
+      const nextIndex = result.layers.findIndex((item) => item.id === targetLayer.id);
+      if (nextIndex >= 0) setActiveLayer(nextIndex);
+      setPicker(null);
+      setEditState((current) => ({ ...current, dirty: true, operation: "idle", problem: null }));
+      return result;
+    } catch (e) {
+      const code = String(e);
+      const problem = mapEditProblem(code);
+      setEditState((current) => ({ ...current, operation: "idle", problem }));
+      setError(errorLabel(code, t));
+      return null;
+    }
+  }, [editState.operation, mapEditProblem, selected, setSnapshotsByDeviceId, t]);
+
+  const removeLayer = useCallback(async (targetLayer: StudioLayer) => {
+    if (!selected || editState.operation !== "idle") return null;
+    setEditNotice(null);
+    setEditState((current) => ({ ...current, operation: "setting", problem: null }));
+    try {
+      const result = await studioRemoveLayer(selected.id, targetLayer.index);
+      setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
+      setActiveLayer((current) => Math.min(current, Math.max(0, result.layers.length - 1)));
+      setPicker(null);
+      setEditState((current) => ({ ...current, dirty: true, operation: "idle", problem: null }));
+      return result;
+    } catch (e) {
+      const code = String(e);
+      const problem = mapEditProblem(code);
+      setEditState((current) => ({ ...current, operation: "idle", problem }));
+      setError(errorLabel(code, t));
+      return null;
+    }
+  }, [editState.operation, mapEditProblem, selected, setSnapshotsByDeviceId, t]);
+
   useEffect(() => {
     setPicker(null);
   }, [selectedId, viewMode, activeLayer]);
@@ -333,18 +399,6 @@ export default function KeymapViewer({
             <RefreshCw size={15} className={busy ? "animate-spin" : ""} />
             {t("keymap.refresh")}
           </button>
-          {viewMode === "keymap" && viewerAvailable && !selectedLocked && (
-            <button
-              onClick={() => editing ? void endEdit() : void beginEdit(false)}
-              disabled={busy || editState.operation !== "idle"}
-              className={`btn-neu flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium disabled:opacity-60 ${
-                editing ? "text-accent-deep" : "text-ink"
-              }`}
-            >
-              <Pencil size={15} />
-              {editing ? t("keymap.edit.on") : t("keymap.edit")}
-            </button>
-          )}
         </div>
       </div>
 
@@ -423,6 +477,13 @@ export default function KeymapViewer({
                   setActiveLayer={setActiveLayer}
                   layer={layer}
                   reportedLayerIndex={reportedLayerIndex}
+                  editing={editing}
+                  editBusy={busy || editState.operation !== "idle"}
+                  editAvailable={viewerAvailable && !selectedLocked}
+                  onToggleEdit={() => editing ? void endEdit() : void beginEdit(false)}
+                  onAddLayer={addLayer}
+                  onRenameLayer={renameLayer}
+                  onRemoveLayer={removeLayer}
                   onKeyClick={editing ? (key, element) => {
                     if (!layer || editState.operation !== "idle") return;
                     const rect = element.getBoundingClientRect();
@@ -495,7 +556,23 @@ function ViewTab({ active, onClick, icon, label }: {
   );
 }
 
-function KeymapContent({ snapshot, activeLayer, setActiveLayer, layer, reportedLayerIndex, keyStyle, marquee, onKeyClick }: {
+function KeymapContent({
+  snapshot,
+  activeLayer,
+  setActiveLayer,
+  layer,
+  reportedLayerIndex,
+  keyStyle,
+  marquee,
+  onKeyClick,
+  editing = false,
+  editBusy = false,
+  editAvailable = false,
+  onToggleEdit,
+  onAddLayer,
+  onRenameLayer,
+  onRemoveLayer,
+}: {
   snapshot: StudioKeymapSnapshot;
   activeLayer: number;
   setActiveLayer: (value: number) => void;
@@ -506,42 +583,189 @@ function KeymapContent({ snapshot, activeLayer, setActiveLayer, layer, reportedL
   onKeyClick?: (key: StudioPhysicalKey, element: HTMLDivElement) => void;
   /** Optional element shown to the right of the layer tabs (tester typed-char marquee). */
   marquee?: ReactNode;
+  editing?: boolean;
+  editBusy?: boolean;
+  editAvailable?: boolean;
+  onToggleEdit?: () => void;
+  onAddLayer?: (name: string) => Promise<StudioKeymapSnapshot | null>;
+  onRenameLayer?: (layer: StudioLayer, name: string) => Promise<StudioKeymapSnapshot | null>;
+  onRemoveLayer?: (layer: StudioLayer) => Promise<StudioKeymapSnapshot | null>;
 }) {
   const { t } = useLang();
+  const layerTabRefs = useRef(new Map<number, HTMLDivElement>());
+  const editInputRef = useRef<HTMLInputElement | null>(null);
+  const [editingLayerId, setEditingLayerId] = useState<number | null>(null);
+  const [draftLayerName, setDraftLayerName] = useState("");
   const bindingsByPosition = useMemo(() => {
     const map = new Map<number, StudioBinding>();
     if (layer) for (const binding of layer.bindings) map.set(binding.position, binding);
     return map;
   }, [layer]);
 
+  useEffect(() => {
+    const active = snapshot.layers[activeLayer];
+    if (!active) return;
+    layerTabRefs.current.get(active.id)?.scrollIntoView({
+      block: "nearest",
+      inline: "nearest",
+    });
+  }, [activeLayer, snapshot.layers]);
+
+  useEffect(() => {
+    if (!editingLayerId) return;
+    window.setTimeout(() => {
+      editInputRef.current?.focus();
+      editInputRef.current?.select();
+    }, 0);
+  }, [editingLayerId]);
+
+  const beginLayerRename = (target: StudioLayer) => {
+    setActiveLayer(snapshot.layers.findIndex((item) => item.id === target.id));
+    setEditingLayerId(target.id);
+    setDraftLayerName(target.name);
+  };
+
+  const commitLayerRename = async (target: StudioLayer) => {
+    const name = draftLayerName.trim();
+    if (!name || name === target.name) {
+      setEditingLayerId(null);
+      setDraftLayerName("");
+      return;
+    }
+    const result = await onRenameLayer?.(target, name);
+    if (result) {
+      setEditingLayerId(null);
+      setDraftLayerName("");
+    }
+  };
+
+  const addLayer = async () => {
+    if (!onAddLayer) return;
+    const previousIds = new Set(snapshot.layers.map((item) => item.id));
+    const nextNumber = Math.max(-1, ...snapshot.layers.map((item) => item.index)) + 1;
+    const result = await onAddLayer(`Layer ${nextNumber}`);
+    const added = result?.layers.find((item) => !previousIds.has(item.id));
+    if (added) {
+      setEditingLayerId(added.id);
+      setDraftLayerName(added.name);
+    }
+  };
+
+  const removeLayer = async (target: StudioLayer) => {
+    if (!onRemoveLayer || snapshot.layers.length <= 1) return;
+    if (!window.confirm(t("keymap.edit.confirm_delete_layer"))) return;
+    const result = await onRemoveLayer(target);
+    if (result) {
+      setEditingLayerId(null);
+      setDraftLayerName("");
+    }
+  };
+
   return (
     <div className="min-w-0 space-y-4">
-      <div>
-        <div className="text-sm font-medium text-ink">{snapshot.device_name}</div>
-      </div>
-      <div className="flex items-start gap-2">
-        <div className="flex flex-wrap gap-2">
+      <div className="flex min-w-0 items-start gap-2">
+        <div className="min-w-0 flex-1 overflow-x-auto pb-1">
+          <div className="flex w-max gap-2">
           {snapshot.layers.map((item, index) => {
             const live = reportedLayerIndex !== null && item.index === reportedLayerIndex;
+            const active = activeLayer === index;
+            const renaming = editingLayerId === item.id;
             return (
-              <button
+              <div
                 key={item.id}
-                onClick={() => setActiveLayer(index)}
-                title={live ? t("keymap.active_layer") : undefined}
-                className={`relative rounded-pill px-3 py-1.5 text-sm font-medium ring-1 transition-colors ${
-                  activeLayer === index ? "bg-plate text-accent ring-transparent shadow-neu-sel-in" : "bg-background text-muted ring-border hover:bg-plate hover:text-ink"
+                ref={(node) => {
+                  if (node) layerTabRefs.current.set(item.id, node);
+                  else layerTabRefs.current.delete(item.id);
+                }}
+                className={`relative inline-flex items-center rounded-pill text-sm font-medium ring-1 transition-colors ${
+                  active ? "bg-plate text-accent ring-transparent shadow-neu-sel-in" : "bg-background text-muted ring-border hover:bg-plate hover:text-ink"
                 }`}
               >
-                {item.name}
+                {renaming ? (
+                  <input
+                    ref={editInputRef}
+                    value={draftLayerName}
+                    disabled={editBusy}
+                    onChange={(event) => setDraftLayerName(event.target.value)}
+                    onBlur={() => void commitLayerRename(item)}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter") void commitLayerRename(item);
+                      if (event.key === "Escape") {
+                        setEditingLayerId(null);
+                        setDraftLayerName("");
+                      }
+                    }}
+                    className="w-28 rounded-pill bg-background px-3 py-1.5 text-sm font-medium text-ink outline-none ring-1 ring-border"
+                  />
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setActiveLayer(index)}
+                    title={live ? t("keymap.active_layer") : undefined}
+                    className="px-3 py-1.5"
+                  >
+                    {item.name}
+                  </button>
+                )}
+                {editing && active && !renaming && (
+                  <div className="flex items-center pr-1">
+                    <button
+                      type="button"
+                      disabled={editBusy}
+                      onClick={() => beginLayerRename(item)}
+                      title={t("keymap.edit.rename_layer")}
+                      className="rounded-full p-1 text-faint hover:bg-background hover:text-ink disabled:opacity-50"
+                    >
+                      <Pencil size={12} />
+                    </button>
+                    <button
+                      type="button"
+                      disabled={editBusy || snapshot.layers.length <= 1}
+                      onClick={() => void removeLayer(item)}
+                      title={t("keymap.edit.delete_layer")}
+                      className="rounded-full p-1 text-faint hover:bg-background hover:text-red-700 disabled:opacity-50"
+                    >
+                      <Trash2 size={12} />
+                    </button>
+                  </div>
+                )}
                 {live && (
                   <span className="animate-layer-pulse absolute -right-1 -top-1 h-2.5 w-2.5 rounded-full bg-accent ring-2 ring-white" />
                 )}
-              </button>
+              </div>
             );
           })}
+          </div>
+        </div>
+        {editAvailable && onToggleEdit && (
+          <div className="flex shrink-0 items-center gap-1">
+            {editing && (
+              <button
+                type="button"
+                disabled={editBusy}
+                onClick={() => void addLayer()}
+                title={t("keymap.edit.add_layer")}
+                className="btn-neu flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium text-ink disabled:opacity-60"
+              >
+                <Plus size={14} />
+                {t("keymap.edit.add_layer_short")}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onToggleEdit}
+              disabled={editBusy}
+              className={`btn-neu flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium disabled:opacity-60 ${
+                editing ? "text-accent-deep" : "text-ink"
+              }`}
+            >
+              <Pencil size={14} />
+              {editing ? t("keymap.edit.on") : t("keymap.edit")}
+            </button>
+          </div>
+        )}
         </div>
         {marquee}
-      </div>
       {!layer || snapshot.selected_layout_keys.length === 0 ? (
         <EmptyState icon={<Keyboard size={32} />} title={t("keymap.empty_keymap_title")} body={t("keymap.empty_keymap_body")} />
       ) : (
@@ -624,6 +848,109 @@ function EditBar({ dirty, operation, problem, notice, onSave, onDiscard, onEnd }
   );
 }
 
+type PickerTab = "key" | "layer" | "tap_hold" | "bt_out" | "advanced";
+type LayerBehaviorKind = "momentary_layer" | "toggle_layer" | "to_layer";
+type TapHoldBehaviorKind = "mod_tap" | "layer_tap";
+
+interface BehaviorChoice<T extends string> {
+  kind: T;
+  labelKey: TranslationKey;
+  tooltipKey: TranslationKey;
+}
+
+interface ModifierOption {
+  id: string;
+  label: string;
+  zmkName: string;
+  baseUsage: number;
+  modifierBit: number;
+}
+
+const MODIFIER_OPTIONS: ModifierOption[] = [
+  { id: "lctrl", label: "LCtrl", zmkName: "LCTRL", baseUsage: 0x0007_00e0, modifierBit: 0x01 },
+  { id: "lshift", label: "LShift", zmkName: "LSHIFT", baseUsage: 0x0007_00e1, modifierBit: 0x02 },
+  { id: "lalt", label: "LAlt", zmkName: "LALT", baseUsage: 0x0007_00e2, modifierBit: 0x04 },
+  { id: "lgui", label: "LGUI", zmkName: "LGUI", baseUsage: 0x0007_00e3, modifierBit: 0x08 },
+  { id: "rctrl", label: "RCtrl", zmkName: "RCTRL", baseUsage: 0x0007_00e4, modifierBit: 0x10 },
+  { id: "rshift", label: "RShift", zmkName: "RSHIFT", baseUsage: 0x0007_00e5, modifierBit: 0x20 },
+  { id: "ralt", label: "RAlt", zmkName: "RALT", baseUsage: 0x0007_00e6, modifierBit: 0x40 },
+  { id: "rgui", label: "RGUI", zmkName: "RGUI", baseUsage: 0x0007_00e7, modifierBit: 0x80 },
+];
+
+const LAYER_BEHAVIOR_CHOICES: BehaviorChoice<LayerBehaviorKind>[] = [
+  { kind: "momentary_layer", labelKey: "keymap.edit.momentary_layer", tooltipKey: "keymap.edit.momentary_layer_tooltip" },
+  { kind: "toggle_layer", labelKey: "keymap.edit.toggle_layer", tooltipKey: "keymap.edit.toggle_layer_tooltip" },
+  { kind: "to_layer", labelKey: "keymap.edit.to_layer", tooltipKey: "keymap.edit.to_layer_tooltip" },
+];
+
+const TAP_HOLD_BEHAVIOR_CHOICES: BehaviorChoice<TapHoldBehaviorKind>[] = [
+  { kind: "mod_tap", labelKey: "keymap.edit.mod_tap", tooltipKey: "keymap.edit.mod_tap_tooltip" },
+  { kind: "layer_tap", labelKey: "keymap.edit.layer_tap", tooltipKey: "keymap.edit.layer_tap_tooltip" },
+];
+
+const BLUETOOTH_COMMANDS: Array<{
+  label: string;
+  title: string;
+  command: number;
+  value: number | null;
+}> = [
+  { label: "Clear", title: "&bt BT_CLR", command: 0, value: 0 },
+  { label: "Next", title: "&bt BT_NXT", command: 1, value: 0 },
+  { label: "Previous", title: "&bt BT_PRV", command: 2, value: 0 },
+  { label: "Clear All", title: "&bt BT_CLR_ALL", command: 4, value: 0 },
+  ...[0, 1, 2, 3, 4].map((profile) => ({ label: `Select ${profile}`, title: `&bt BT_SEL ${profile}`, command: 3, value: profile })),
+  ...[0, 1, 2, 3, 4].map((profile) => ({ label: `Disconnect ${profile}`, title: `&bt BT_DISC ${profile}`, command: 5, value: profile })),
+];
+
+const OUTPUT_COMMANDS = [
+  { label: "Toggle", title: "&out OUT_TOG", value: 0 },
+  { label: "USB", title: "&out OUT_USB", value: 1 },
+  { label: "BLE", title: "&out OUT_BLE", value: 2 },
+  { label: "None", title: "&out OUT_NONE", value: 3 },
+];
+
+const MOUSE_BUTTON_COMMANDS = [
+  { label: "Left Click", title: "&mkp LCLK", value: 0x01 },
+  { label: "Right Click", title: "&mkp RCLK", value: 0x02 },
+  { label: "Middle Click", title: "&mkp MCLK", value: 0x04 },
+  { label: "Button 4", title: "&mkp MB4", value: 0x08 },
+  { label: "Button 5", title: "&mkp MB5", value: 0x10 },
+];
+
+const MOUSE_MOVE_COMMANDS = [
+  { label: "Move Up", title: "&mmv MOVE_UP", value: 0x0000_fda8 },
+  { label: "Move Down", title: "&mmv MOVE_DOWN", value: 0x0000_0258 },
+  { label: "Move Left", title: "&mmv MOVE_LEFT", value: 0xfda8_0000 },
+  { label: "Move Right", title: "&mmv MOVE_RIGHT", value: 0x0258_0000 },
+];
+
+const MOUSE_SCROLL_COMMANDS = [
+  { label: "Scroll Up", title: "&msc SCRL_UP", value: 0x0000_000a },
+  { label: "Scroll Down", title: "&msc SCRL_DOWN", value: 0x0000_fff6 },
+  { label: "Scroll Left", title: "&msc SCRL_LEFT", value: 0xfff6_0000 },
+  { label: "Scroll Right", title: "&msc SCRL_RIGHT", value: 0x000a_0000 },
+];
+
+const UTILITY_COMMANDS: Array<{ label: string; title: string; behavior: EditBehavior }> = [
+  { label: "Caps Word", title: "&caps_word", behavior: { kind: "caps_word" } },
+  { label: "Key Repeat", title: "&key_repeat", behavior: { kind: "key_repeat" } },
+  { label: "Grave Escape", title: "&gresc", behavior: { kind: "grave_escape" } },
+];
+
+const SYSTEM_COMMANDS: Array<{ label: string; title: string; behavior: EditBehavior }> = [
+  { label: "Reset", title: "&reset", behavior: { kind: "reset" } },
+  { label: "Bootloader", title: "&bootloader", behavior: { kind: "bootloader" } },
+  { label: "Studio Unlock", title: "&studio_unlock", behavior: { kind: "studio_unlock" } },
+];
+
+function holdUsageFromModifiers(selectedIds: string[]): number | null {
+  const selected = MODIFIER_OPTIONS.filter((option) => selectedIds.includes(option.id));
+  if (selected.length === 0) return null;
+  const [base, ...additional] = selected;
+  const modifierBits = additional.reduce((bits, option) => bits | option.modifierBit, 0);
+  return base.baseUsage | (modifierBits << 24);
+}
+
 function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
   catalog: KeyCatalogEntry[];
   layers: StudioLayer[];
@@ -633,8 +960,12 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
   onSelect: (behavior: EditBehavior) => void;
 }) {
   const { t } = useLang();
-  const [tab, setTab] = useState<"key" | "layer">("key");
-  const [layerBehavior, setLayerBehavior] = useState<"momentary_layer" | "toggle_layer" | "to_layer">("momentary_layer");
+  const [tab, setTab] = useState<PickerTab>("key");
+  const [layerBehavior, setLayerBehavior] = useState<LayerBehaviorKind | null>(null);
+  const [tapHoldBehavior, setTapHoldBehavior] = useState<TapHoldBehaviorKind | null>(null);
+  const [selectedModifierIds, setSelectedModifierIds] = useState<string[]>([]);
+  const [selectedTapLayerIndex, setSelectedTapLayerIndex] = useState<number | null>(null);
+  const [selectedStickyLayerIndex, setSelectedStickyLayerIndex] = useState<number | null>(null);
   const [query, setQuery] = useState("");
   const queryLower = query.trim().toLowerCase();
   const filtered = useMemo(() => {
@@ -660,6 +991,19 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
     }
     return [...map.entries()];
   }, [filtered]);
+  const selectedHoldUsage = useMemo(
+    () => holdUsageFromModifiers(selectedModifierIds),
+    [selectedModifierIds]
+  );
+
+  useEffect(() => {
+    if (selectedTapLayerIndex !== null && !layers.some((item) => item.index === selectedTapLayerIndex)) {
+      setSelectedTapLayerIndex(null);
+    }
+    if (selectedStickyLayerIndex !== null && !layers.some((item) => item.index === selectedStickyLayerIndex)) {
+      setSelectedStickyLayerIndex(null);
+    }
+  }, [layers, selectedStickyLayerIndex, selectedTapLayerIndex]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -669,6 +1013,70 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
+  const toggleModifier = (id: string) => {
+    setSelectedModifierIds((current) =>
+      current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
+    );
+  };
+
+  const renderCatalogButtons = (
+    onEntrySelect: (entry: KeyCatalogEntry) => void,
+    entriesDisabled = false,
+  ) => (
+    <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
+      {grouped.map(([category, entries]) => (
+        <div key={category} className="mb-3">
+          <div className="mb-1.5 text-xs font-medium uppercase text-faint">
+            {t(`keymap.catalog.${category}` as TranslationKey)}
+          </div>
+          <div className="flex flex-wrap gap-1.5">
+            {entries.map((entry) => (
+              <button
+                key={`${entry.hid_usage}-${entry.canonical}`}
+                disabled={busy || entriesDisabled}
+                onClick={() => onEntrySelect(entry)}
+                className="rounded-md bg-background px-2.5 py-1.5 text-sm font-medium text-ink ring-1 ring-border hover:bg-plate disabled:opacity-50"
+                title={(entry.names?.length ? entry.names : [entry.canonical]).join(" / ")}
+              >
+                {entry.display}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+      {grouped.length === 0 && (
+        <div className="py-8 text-center text-sm text-faint">
+          {t("keymap.edit.no_results")}
+        </div>
+      )}
+    </div>
+  );
+
+  const renderCommandButtons = (
+    commands: Array<{ label: string; title: string; behavior: EditBehavior }>,
+    confirmBeforeSelect = false,
+  ) => (
+    <div className="flex flex-wrap gap-1.5">
+      {commands.map((command) => (
+        <button
+          key={command.title}
+          type="button"
+          disabled={busy}
+          onClick={() => {
+            if (confirmBeforeSelect && !window.confirm(t("keymap.edit.confirm_system_behavior"))) {
+              return;
+            }
+            onSelect(command.behavior);
+          }}
+          title={command.title}
+          className="rounded-md bg-background px-2.5 py-1.5 text-sm font-medium text-ink ring-1 ring-border hover:bg-plate disabled:opacity-50"
+        >
+          {command.label}
+        </button>
+      ))}
+    </div>
+  );
+
   return (
     <>
       <button className="fixed inset-0 z-40 cursor-default bg-transparent" onClick={onClose} />
@@ -677,7 +1085,7 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
         style={{ left: position.left, top: position.top }}
       >
         <div className="flex gap-1 rounded-pill bg-background p-1 ring-1 ring-border">
-          {(["key", "layer"] as const).map((item) => (
+          {(["key", "layer", "tap_hold", "bt_out", "advanced"] as const).map((item) => (
             <button
               key={item}
               type="button"
@@ -686,7 +1094,17 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
                 tab === item ? "bg-plate text-accent-deep shadow-neu-sel-in" : "text-muted hover:text-ink"
               }`}
             >
-              {t(item === "key" ? "keymap.edit.tab_key" : "keymap.edit.tab_layer")}
+              {t(
+                item === "key"
+                  ? "keymap.edit.tab_key"
+                  : item === "layer"
+                    ? "keymap.edit.tab_layer"
+                    : item === "tap_hold"
+                      ? "keymap.edit.tab_tap_hold"
+                      : item === "bt_out"
+                        ? "keymap.edit.tab_bt_out"
+                        : "keymap.edit.tab_advanced"
+              )}
             </button>
           ))}
         </div>
@@ -720,55 +1138,29 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
                 <div className="mt-0.5 text-xs text-faint">{t("keymap.edit.none_desc")}</div>
               </button>
             </div>
-            <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
-              {grouped.map(([category, entries]) => (
-                <div key={category} className="mb-3">
-                  <div className="mb-1.5 text-xs font-medium uppercase text-faint">
-                    {t(`keymap.catalog.${category}` as TranslationKey)}
-                  </div>
-                  <div className="flex flex-wrap gap-1.5">
-                    {entries.map((entry) => (
-                      <button
-                        key={`${entry.hid_usage}-${entry.canonical}`}
-                        disabled={busy}
-                        onClick={() => onSelect({ kind: "key_press", hid_usage: entry.hid_usage })}
-                        className="rounded-md bg-background px-2.5 py-1.5 text-sm font-medium text-ink ring-1 ring-border hover:bg-plate disabled:opacity-50"
-                        title={(entry.names?.length ? entry.names : [entry.canonical]).join(" / ")}
-                      >
-                        {entry.display}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ))}
-              {grouped.length === 0 && (
-                <div className="py-8 text-center text-sm text-faint">
-                  {t("keymap.edit.no_results")}
-                </div>
-              )}
-            </div>
+            {renderCatalogButtons((entry) => onSelect({ kind: "key_press", hid_usage: entry.hid_usage }))}
           </>
-        ) : (
+        ) : tab === "layer" ? (
           <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
             <div className="mb-3">
               <div className="mb-1.5 text-xs font-medium uppercase text-faint">
                 {t("keymap.edit.layer_behavior")}
               </div>
               <div className="flex gap-1.5">
-                {(["momentary_layer", "toggle_layer", "to_layer"] as const).map((kind) => (
+                {LAYER_BEHAVIOR_CHOICES.map(({ kind, labelKey, tooltipKey }) => (
                   <button
                     key={kind}
                     type="button"
                     disabled={busy}
                     onClick={() => setLayerBehavior(kind)}
-                    title={t(`keymap.edit.${kind}_tooltip` as TranslationKey)}
-                    className={`rounded-md px-3 py-1.5 text-sm font-semibold ring-1 disabled:opacity-50 ${
+                    title={t(tooltipKey)}
+                    className={`rounded-md px-3 py-1.5 text-sm font-medium ring-1 disabled:opacity-50 ${
                       layerBehavior === kind
                         ? "bg-plate text-accent-deep ring-transparent shadow-neu-sel-in"
                         : "bg-background text-ink ring-border hover:bg-plate"
                     }`}
                   >
-                    {t(`keymap.edit.${kind}` as TranslationKey)}
+                    {t(labelKey)}
                   </button>
                 ))}
               </div>
@@ -782,9 +1174,11 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
                   <button
                     key={item.id}
                     type="button"
-                    disabled={busy}
-                    onClick={() => onSelect({ kind: layerBehavior, target_layer_index: item.index })}
-                    className="inline-flex max-w-full items-center gap-1.5 rounded-md bg-background px-2.5 py-1.5 text-xs font-medium text-ink ring-1 ring-border hover:bg-plate disabled:opacity-50"
+                    disabled={busy || layerBehavior === null}
+                    onClick={() => {
+                      if (layerBehavior) onSelect({ kind: layerBehavior, target_layer_index: item.index });
+                    }}
+                    className="inline-flex max-w-full items-center gap-1.5 rounded-md bg-background px-2.5 py-1.5 text-sm font-medium text-ink ring-1 ring-border hover:bg-plate disabled:opacity-50"
                     title={`${item.name} (#${item.index})`}
                   >
                     <span className="font-mono text-[11px] text-faint">#{item.index}</span>
@@ -794,6 +1188,240 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
               </div>
               {layers.length === 0 && (
                 <div className="py-8 text-center text-sm text-faint">
+                  {t("keymap.edit.no_layers")}
+                </div>
+              )}
+              {layers.length > 0 && layerBehavior === null && (
+                <div className="mt-3 text-xs text-faint">
+                  {t("keymap.edit.select_behavior_first")}
+                </div>
+              )}
+            </div>
+          </div>
+        ) : tab === "tap_hold" ? (
+          <div className="mt-3 min-h-0 flex flex-1 flex-col overflow-hidden">
+            <div className="mb-3">
+              <div className="mb-1.5 text-xs font-medium uppercase text-faint">
+                {t("keymap.edit.tap_hold_behavior")}
+              </div>
+              <div className="flex gap-1.5">
+                {TAP_HOLD_BEHAVIOR_CHOICES.map(({ kind, labelKey, tooltipKey }) => (
+                  <button
+                    key={kind}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => setTapHoldBehavior(kind)}
+                    title={t(tooltipKey)}
+                    className={`rounded-md px-3 py-1.5 text-sm font-medium ring-1 disabled:opacity-50 ${
+                      tapHoldBehavior === kind
+                        ? "bg-plate text-accent-deep ring-transparent shadow-neu-sel-in"
+                        : "bg-background text-ink ring-border hover:bg-plate"
+                    }`}
+                  >
+                    {t(labelKey)}
+                  </button>
+                ))}
+              </div>
+            </div>
+            {tapHoldBehavior === null ? (
+              <div className="mb-3 text-xs text-faint">
+                {t("keymap.edit.select_behavior_first")}
+              </div>
+            ) : tapHoldBehavior === "mod_tap" ? (
+              <div className="mb-3">
+                <div className="mb-1.5 text-xs font-medium uppercase text-faint">
+                  {t("keymap.edit.hold_modifier")}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {MODIFIER_OPTIONS.map((option) => {
+                    const active = selectedModifierIds.includes(option.id);
+                    return (
+                      <button
+                        key={option.id}
+                        type="button"
+                        disabled={busy}
+                        onClick={() => toggleModifier(option.id)}
+                        title={option.zmkName}
+                        className={`rounded-md px-2.5 py-1.5 text-sm font-medium ring-1 disabled:opacity-50 ${
+                          active
+                            ? "bg-plate text-accent-deep ring-transparent shadow-neu-sel-in"
+                            : "bg-background text-ink ring-border hover:bg-plate"
+                        }`}
+                      >
+                        {option.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ) : (
+              <div className="mb-3">
+                <div className="mb-1.5 text-xs font-medium uppercase text-faint">
+                  {t("keymap.edit.hold_layer")}
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {layers.map((item) => {
+                    const active = selectedTapLayerIndex === item.index;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setSelectedTapLayerIndex(item.index)}
+                        className={`inline-flex max-w-full items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium ring-1 disabled:opacity-50 ${
+                          active
+                            ? "bg-plate text-accent-deep ring-transparent shadow-neu-sel-in"
+                            : "bg-background text-ink ring-border hover:bg-plate"
+                        }`}
+                        title={`${item.name} (#${item.index})`}
+                      >
+                        <span className="font-mono text-[11px] text-faint">#{item.index}</span>
+                        <span className="truncate">{item.name}</span>
+                      </button>
+                    );
+                  })}
+                </div>
+                {layers.length === 0 && (
+                  <div className="py-4 text-center text-sm text-faint">
+                    {t("keymap.edit.no_layers")}
+                  </div>
+                )}
+              </div>
+            )}
+            <div className="mb-1.5 text-xs font-medium uppercase text-faint">
+              {t("keymap.edit.tap_key")}
+            </div>
+            {renderCatalogButtons((entry) => {
+              if (tapHoldBehavior === "mod_tap" && selectedHoldUsage !== null) {
+                onSelect({
+                  kind: "mod_tap",
+                  hold_hid_usage: selectedHoldUsage,
+                  tap_hid_usage: entry.hid_usage,
+                });
+              } else if (tapHoldBehavior === "layer_tap" && selectedTapLayerIndex !== null) {
+                onSelect({
+                  kind: "layer_tap",
+                  target_layer_index: selectedTapLayerIndex,
+                  tap_hid_usage: entry.hid_usage,
+                });
+              }
+            }, tapHoldBehavior === null || (tapHoldBehavior === "mod_tap" ? selectedHoldUsage === null : selectedTapLayerIndex === null))}
+          </div>
+        ) : tab === "bt_out" ? (
+          <div className="mt-3 min-h-0 flex flex-1 flex-col overflow-y-auto pr-1">
+            <div className="mb-3">
+              <div className="mb-1.5 text-xs font-medium uppercase text-faint">
+                {t("keymap.edit.bluetooth_command")}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {BLUETOOTH_COMMANDS.map((command) => (
+                  <button
+                    key={command.title}
+                    type="button"
+                    disabled={busy || command.value === null}
+                    onClick={() => {
+                      if (command.value !== null) {
+                        onSelect({ kind: "bluetooth", command: command.command, value: command.value });
+                      }
+                    }}
+                    title={command.title}
+                    className="rounded-md bg-background px-2.5 py-1.5 text-sm font-medium text-ink ring-1 ring-border hover:bg-plate disabled:opacity-50"
+                  >
+                    {command.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <div className="mb-1.5 text-xs font-medium uppercase text-faint">
+                {t("keymap.edit.output_command")}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {OUTPUT_COMMANDS.map((command) => (
+                  <button
+                    key={command.value}
+                    type="button"
+                    disabled={busy}
+                    onClick={() => onSelect({ kind: "output_selection", value: command.value })}
+                    title={command.title}
+                    className="rounded-md bg-background px-3 py-1.5 text-sm font-medium text-ink ring-1 ring-border hover:bg-plate disabled:opacity-50"
+                  >
+                    {command.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+        ) : (
+          <div className="mt-3 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+            <div>
+              <div className="mb-1.5 text-xs font-medium uppercase text-faint">
+                {t("keymap.edit.mouse")}
+              </div>
+              {renderCommandButtons([
+                ...MOUSE_BUTTON_COMMANDS.map((command) => ({
+                  ...command,
+                  behavior: { kind: "mouse_key_press", value: command.value } as EditBehavior,
+                })),
+                ...MOUSE_MOVE_COMMANDS.map((command) => ({
+                  ...command,
+                  behavior: { kind: "mouse_move", value: command.value } as EditBehavior,
+                })),
+                ...MOUSE_SCROLL_COMMANDS.map((command) => ({
+                  ...command,
+                  behavior: { kind: "mouse_scroll", value: command.value } as EditBehavior,
+                })),
+              ])}
+            </div>
+            <div>
+              <div className="mb-1.5 text-xs font-medium uppercase text-faint">
+                {t("keymap.edit.utility")}
+              </div>
+              {renderCommandButtons(UTILITY_COMMANDS)}
+            </div>
+            <div>
+              <div className="mb-1.5 text-xs font-medium uppercase text-faint">
+                {t("keymap.edit.system")}
+              </div>
+              {renderCommandButtons(SYSTEM_COMMANDS, true)}
+            </div>
+            <div>
+              <div className="mb-1.5 text-xs font-medium uppercase text-faint">
+                {t("keymap.edit.sticky_key")}
+              </div>
+              {renderCatalogButtons((entry) => onSelect({ kind: "sticky_key", hid_usage: entry.hid_usage }))}
+            </div>
+            <div>
+              <div className="mb-1.5 text-xs font-medium uppercase text-faint">
+                {t("keymap.edit.sticky_layer")}
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {layers.map((item) => {
+                  const active = selectedStickyLayerIndex === item.index;
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      disabled={busy}
+                      onClick={() => {
+                        setSelectedStickyLayerIndex(item.index);
+                        onSelect({ kind: "sticky_layer", target_layer_index: item.index });
+                      }}
+                      className={`inline-flex max-w-full items-center gap-1.5 rounded-md px-2.5 py-1.5 text-sm font-medium ring-1 disabled:opacity-50 ${
+                        active
+                          ? "bg-plate text-accent-deep ring-transparent shadow-neu-sel-in"
+                          : "bg-background text-ink ring-border hover:bg-plate"
+                      }`}
+                      title={`${item.name} (#${item.index})`}
+                    >
+                      <span className="font-mono text-[11px] text-faint">#{item.index}</span>
+                      <span className="truncate">{item.name}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              {layers.length === 0 && (
+                <div className="py-4 text-center text-sm text-faint">
                   {t("keymap.edit.no_layers")}
                 </div>
               )}

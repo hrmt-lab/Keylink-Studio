@@ -376,7 +376,22 @@ export type EditBehavior =
   | { kind: "none" }
   | { kind: "momentary_layer"; target_layer_index: number }
   | { kind: "toggle_layer"; target_layer_index: number }
-  | { kind: "to_layer"; target_layer_index: number };
+  | { kind: "to_layer"; target_layer_index: number }
+  | { kind: "mod_tap"; hold_hid_usage: number; tap_hid_usage: number }
+  | { kind: "layer_tap"; target_layer_index: number; tap_hid_usage: number }
+  | { kind: "sticky_key"; hid_usage: number }
+  | { kind: "sticky_layer"; target_layer_index: number }
+  | { kind: "bluetooth"; command: number; value: number }
+  | { kind: "output_selection"; value: number }
+  | { kind: "mouse_key_press"; value: number }
+  | { kind: "mouse_move"; value: number }
+  | { kind: "mouse_scroll"; value: number }
+  | { kind: "caps_word" }
+  | { kind: "key_repeat" }
+  | { kind: "reset" }
+  | { kind: "bootloader" }
+  | { kind: "studio_unlock" }
+  | { kind: "grave_escape" };
 
 export interface EditState {
   mode: "viewing" | "editing";

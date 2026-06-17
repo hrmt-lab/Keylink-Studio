@@ -378,12 +378,56 @@ pub async fn read_studio_keymap(
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum EditBehaviorDto {
-    KeyPress { hid_usage: u32 },
+    KeyPress {
+        hid_usage: u32,
+    },
     Transparent,
     None,
-    MomentaryLayer { target_layer_index: u32 },
-    ToggleLayer { target_layer_index: u32 },
-    ToLayer { target_layer_index: u32 },
+    MomentaryLayer {
+        target_layer_index: u32,
+    },
+    ToggleLayer {
+        target_layer_index: u32,
+    },
+    ToLayer {
+        target_layer_index: u32,
+    },
+    ModTap {
+        hold_hid_usage: u32,
+        tap_hid_usage: u32,
+    },
+    LayerTap {
+        target_layer_index: u32,
+        tap_hid_usage: u32,
+    },
+    StickyKey {
+        hid_usage: u32,
+    },
+    StickyLayer {
+        target_layer_index: u32,
+    },
+    Bluetooth {
+        command: u32,
+        value: u32,
+    },
+    OutputSelection {
+        value: u32,
+    },
+    MouseKeyPress {
+        value: u32,
+    },
+    MouseMove {
+        value: u32,
+    },
+    MouseScroll {
+        value: u32,
+    },
+    CapsWord,
+    KeyRepeat,
+    Reset,
+    Bootloader,
+    StudioUnlock,
+    GraveEscape,
 }
 
 impl From<EditBehaviorDto> for EditBehavior {
@@ -401,6 +445,37 @@ impl From<EditBehaviorDto> for EditBehavior {
             EditBehaviorDto::ToLayer { target_layer_index } => {
                 EditBehavior::ToLayer(target_layer_index)
             }
+            EditBehaviorDto::ModTap {
+                hold_hid_usage,
+                tap_hid_usage,
+            } => EditBehavior::ModTap {
+                hold: hold_hid_usage,
+                tap: tap_hid_usage,
+            },
+            EditBehaviorDto::LayerTap {
+                target_layer_index,
+                tap_hid_usage,
+            } => EditBehavior::LayerTap {
+                target_layer_index,
+                tap: tap_hid_usage,
+            },
+            EditBehaviorDto::StickyKey { hid_usage } => EditBehavior::StickyKey(hid_usage),
+            EditBehaviorDto::StickyLayer { target_layer_index } => {
+                EditBehavior::StickyLayer(target_layer_index)
+            }
+            EditBehaviorDto::Bluetooth { command, value } => {
+                EditBehavior::Bluetooth { command, value }
+            }
+            EditBehaviorDto::OutputSelection { value } => EditBehavior::OutputSelection(value),
+            EditBehaviorDto::MouseKeyPress { value } => EditBehavior::MouseKeyPress(value),
+            EditBehaviorDto::MouseMove { value } => EditBehavior::MouseMove(value),
+            EditBehaviorDto::MouseScroll { value } => EditBehavior::MouseScroll(value),
+            EditBehaviorDto::CapsWord => EditBehavior::CapsWord,
+            EditBehaviorDto::KeyRepeat => EditBehavior::KeyRepeat,
+            EditBehaviorDto::Reset => EditBehavior::Reset,
+            EditBehaviorDto::Bootloader => EditBehavior::Bootloader,
+            EditBehaviorDto::StudioUnlock => EditBehavior::StudioUnlock,
+            EditBehaviorDto::GraveEscape => EditBehavior::GraveEscape,
         }
     }
 }
@@ -470,6 +545,72 @@ pub async fn studio_set_key(
     })
     .await
     .map_err(|_| "studio_set_key_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_add_layer(
+    device_id: String,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<StudioKeymapSnapshot, String> {
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = edit.lock().unwrap();
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+        if session.device_id != device_id {
+            return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+        }
+        session.add_layer(name).map_err(studio_error_code)
+    })
+    .await
+    .map_err(|_| "studio_add_layer_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_rename_layer(
+    device_id: String,
+    layer_id: u32,
+    name: String,
+    state: State<'_, AppState>,
+) -> Result<StudioKeymapSnapshot, String> {
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = edit.lock().unwrap();
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+        if session.device_id != device_id {
+            return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+        }
+        session
+            .rename_layer(layer_id, name)
+            .map_err(studio_error_code)
+    })
+    .await
+    .map_err(|_| "studio_rename_layer_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_remove_layer(
+    device_id: String,
+    layer_index: u32,
+    state: State<'_, AppState>,
+) -> Result<StudioKeymapSnapshot, String> {
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = edit.lock().unwrap();
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+        if session.device_id != device_id {
+            return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+        }
+        session.remove_layer(layer_index).map_err(studio_error_code)
+    })
+    .await
+    .map_err(|_| "studio_remove_layer_failed".to_string())?
 }
 
 #[tauri::command]
@@ -577,6 +718,11 @@ fn studio_error_code(error: StudioError) -> String {
         StudioError::UnsavedChangesExist => "unsaved_changes_exist",
         StudioError::SessionDeviceMismatch => "session_device_mismatch",
         StudioError::PortBusy => "port_busy",
+        StudioError::AddLayerFailed => "add_layer_failed",
+        StudioError::AddLayerNoSpace => "add_layer_no_space",
+        StudioError::RemoveLayerFailed => "remove_layer_failed",
+        StudioError::InvalidLayer => "invalid_layer",
+        StudioError::RenameLayerFailed => "rename_layer_failed",
         StudioError::RpcFailed => "rpc_failed",
     }
     .to_string()

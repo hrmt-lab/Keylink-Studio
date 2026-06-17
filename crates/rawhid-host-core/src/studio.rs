@@ -161,6 +161,21 @@ pub enum EditBehavior {
     MomentaryLayer(u32),
     ToggleLayer(u32),
     ToLayer(u32),
+    ModTap { hold: u32, tap: u32 },
+    LayerTap { target_layer_index: u32, tap: u32 },
+    StickyKey(u32),
+    StickyLayer(u32),
+    Bluetooth { command: u32, value: u32 },
+    OutputSelection(u32),
+    MouseKeyPress(u32),
+    MouseMove(u32),
+    MouseScroll(u32),
+    CapsWord,
+    KeyRepeat,
+    Reset,
+    Bootloader,
+    StudioUnlock,
+    GraveEscape,
 }
 
 #[derive(Debug, Error)]
@@ -199,6 +214,16 @@ pub enum StudioError {
     SessionDeviceMismatch,
     #[error("studio port is busy")]
     PortBusy,
+    #[error("add layer failed")]
+    AddLayerFailed,
+    #[error("no space left for layer")]
+    AddLayerNoSpace,
+    #[error("remove layer failed")]
+    RemoveLayerFailed,
+    #[error("invalid layer")]
+    InvalidLayer,
+    #[error("rename layer failed")]
+    RenameLayerFailed,
     #[error("RPC failed")]
     RpcFailed,
 }
@@ -312,6 +337,8 @@ impl StudioEditSession {
             .client
             .get_keymap()
             .map_err(map_client_to_studio_error)?;
+        self.behavior_names
+            .extend(behavior_names_for_keymap(&mut self.client, &keymap));
         Ok(snapshot_from_parts(
             self.device_id.clone(),
             self.fallback_name.clone(),
@@ -348,6 +375,36 @@ impl StudioEditSession {
     pub fn discard(&mut self) -> Result<StudioKeymapSnapshot, StudioError> {
         self.client
             .discard_changes()
+            .map_err(map_client_to_studio_error)?;
+        self.snapshot()
+    }
+
+    pub fn add_layer(&mut self, name: String) -> Result<StudioKeymapSnapshot, StudioError> {
+        let details = self
+            .client
+            .add_layer()
+            .map_err(map_client_to_studio_error)?;
+        let layer = details.layer.ok_or(StudioError::RpcFailed)?;
+        self.client
+            .set_layer_props(layer.id, name)
+            .map_err(map_client_to_studio_error)?;
+        self.snapshot()
+    }
+
+    pub fn rename_layer(
+        &mut self,
+        layer_id: u32,
+        name: String,
+    ) -> Result<StudioKeymapSnapshot, StudioError> {
+        self.client
+            .set_layer_props(layer_id, name)
+            .map_err(map_client_to_studio_error)?;
+        self.snapshot()
+    }
+
+    pub fn remove_layer(&mut self, layer_index: u32) -> Result<StudioKeymapSnapshot, StudioError> {
+        self.client
+            .remove_layer(layer_index)
             .map_err(map_client_to_studio_error)?;
         self.snapshot()
     }
@@ -725,20 +782,28 @@ fn binding_labels(behavior: &str, param1: u32, param2: u32) -> BindingLabels {
             key_label(param1),
             format!("&kt {}", key_label(param1)),
         )),
-        "sticky key" => Some((
-            "&sk".to_string(),
-            key_label(param1),
-            format!("&sk {}", key_label(param1)),
+        "sticky key" | "sk" => Some((
+            format!("sk {}", behavior_key_display_label(param1, false)),
+            String::new(),
+            format!("&sk {}", behavior_key_display_label(param1, true)),
         )),
         "layer-tap" => Some((
-            format!("&lt {}", param1),
-            key_label(param2),
-            format!("&lt {} {}", param1, key_label(param2)),
+            format!("lt {} {}", param1, display_key_label(param2)),
+            String::new(),
+            format!("&lt {} {}", param1, zmk_key_label(param2)),
         )),
         "mod-tap" => Some((
-            format!("&mt {}", key_label(param1)),
-            key_label(param2),
-            format!("&mt {} {}", key_label(param1), key_label(param2)),
+            format!(
+                "mt {} {}",
+                modifier_combo_label(param1, false),
+                display_key_label(param2)
+            ),
+            String::new(),
+            format!(
+                "&mt {} {}",
+                modifier_combo_label(param1, true),
+                zmk_key_label(param2)
+            ),
         )),
         "momentary layer" => Some((
             format!("mo {}", param1),
@@ -755,34 +820,44 @@ fn binding_labels(behavior: &str, param1: u32, param2: u32) -> BindingLabels {
             String::new(),
             format!("&to {}", param1),
         )),
-        "sticky layer" => Some((
-            "&sl".to_string(),
-            param1.to_string(),
+        "sticky layer" | "sl" => Some((
+            format!("sl {}", param1),
+            String::new(),
             format!("&sl {}", param1),
         )),
+        "bluetooth" | "bt" => Some(bluetooth_labels(param1, param2)),
+        "output selection" | "output" | "out" => Some(output_labels(param1)),
+        "mouse key press" | "mouse_key_press" | "mkp" => Some(mouse_button_labels(param1)),
+        "mouse move" | "mouse_move" | "mmv" => Some(mouse_move_labels(param1)),
+        "mouse scroll" | "mouse_scroll" | "msc" => Some(mouse_scroll_labels(param1)),
         "transparent" => Some(("&trans".to_string(), String::new(), "&trans".to_string())),
         "none" => Some((String::new(), String::new(), "&none".to_string())),
-        "caps word" => Some((
-            "&caps_word".to_string(),
+        "caps word" | "caps_word" => Some((
+            "caps word".to_string(),
             String::new(),
             "&caps_word".to_string(),
         )),
-        "key repeat" => Some((
-            "&key_repeat".to_string(),
+        "key repeat" | "key_repeat" => Some((
+            "key repeat".to_string(),
             String::new(),
             "&key_repeat".to_string(),
         )),
-        "studio unlock" => Some((
-            "&studio_unlock".to_string(),
+        "studio unlock" | "studio_unlock" => Some((
+            "studio unlock".to_string(),
             String::new(),
             "&studio_unlock".to_string(),
         )),
         "bootloader" => Some((
-            "&bootloader".to_string(),
+            "bootloader".to_string(),
             String::new(),
             "&bootloader".to_string(),
         )),
-        "reset" => Some(("&reset".to_string(), String::new(), "&reset".to_string())),
+        "reset" => Some(("reset".to_string(), String::new(), "&reset".to_string())),
+        "grave/escape" | "grave escape" | "grave_escape" | "gresc" => Some((
+            "grave escape".to_string(),
+            String::new(),
+            "&gresc".to_string(),
+        )),
         _ => None,
     };
 
@@ -802,6 +877,171 @@ fn binding_labels(behavior: &str, param1: u32, param2: u32) -> BindingLabels {
     }
 }
 
+fn mouse_button_labels(value: u32) -> (String, String, String) {
+    match value {
+        0x01 => (
+            "Left Click".to_string(),
+            String::new(),
+            "&mkp LCLK".to_string(),
+        ),
+        0x02 => (
+            "Right Click".to_string(),
+            String::new(),
+            "&mkp RCLK".to_string(),
+        ),
+        0x04 => (
+            "Middle Click".to_string(),
+            String::new(),
+            "&mkp MCLK".to_string(),
+        ),
+        0x08 => (
+            "Button 4".to_string(),
+            String::new(),
+            "&mkp MB4".to_string(),
+        ),
+        0x10 => (
+            "Button 5".to_string(),
+            String::new(),
+            "&mkp MB5".to_string(),
+        ),
+        _ => (
+            format!("Mouse Button {}", value),
+            String::new(),
+            format!("&mkp {}", value),
+        ),
+    }
+}
+
+fn mouse_move_labels(value: u32) -> (String, String, String) {
+    match value {
+        0x0000_FDA8 => (
+            "Move Up".to_string(),
+            String::new(),
+            "&mmv MOVE_UP".to_string(),
+        ),
+        0x0000_0258 => (
+            "Move Down".to_string(),
+            String::new(),
+            "&mmv MOVE_DOWN".to_string(),
+        ),
+        0xFDA8_0000 => (
+            "Move Left".to_string(),
+            String::new(),
+            "&mmv MOVE_LEFT".to_string(),
+        ),
+        0x0258_0000 => (
+            "Move Right".to_string(),
+            String::new(),
+            "&mmv MOVE_RIGHT".to_string(),
+        ),
+        _ => (
+            format!("Move {}", value),
+            String::new(),
+            format!("&mmv {}", value),
+        ),
+    }
+}
+
+fn mouse_scroll_labels(value: u32) -> (String, String, String) {
+    match value {
+        0x0000_000A => (
+            "Scroll Up".to_string(),
+            String::new(),
+            "&msc SCRL_UP".to_string(),
+        ),
+        0x0000_FFF6 => (
+            "Scroll Down".to_string(),
+            String::new(),
+            "&msc SCRL_DOWN".to_string(),
+        ),
+        0xFFF6_0000 => (
+            "Scroll Left".to_string(),
+            String::new(),
+            "&msc SCRL_LEFT".to_string(),
+        ),
+        0x000A_0000 => (
+            "Scroll Right".to_string(),
+            String::new(),
+            "&msc SCRL_RIGHT".to_string(),
+        ),
+        _ => (
+            format!("Scroll {}", value),
+            String::new(),
+            format!("&msc {}", value),
+        ),
+    }
+}
+
+fn bluetooth_labels(command: u32, value: u32) -> (String, String, String) {
+    match command {
+        0 => (
+            "bt CLR".to_string(),
+            String::new(),
+            "&bt BT_CLR".to_string(),
+        ),
+        1 => (
+            "bt NEXT".to_string(),
+            String::new(),
+            "&bt BT_NXT".to_string(),
+        ),
+        2 => (
+            "bt PREV".to_string(),
+            String::new(),
+            "&bt BT_PRV".to_string(),
+        ),
+        3 => (
+            format!("bt {}", value),
+            String::new(),
+            format!("&bt BT_SEL {}", value),
+        ),
+        4 => (
+            "bt CLR ALL".to_string(),
+            String::new(),
+            "&bt BT_CLR_ALL".to_string(),
+        ),
+        5 => (
+            format!("bt DISC {}", value),
+            String::new(),
+            format!("&bt BT_DISC {}", value),
+        ),
+        _ => (
+            format!("bt {} {}", command, value),
+            String::new(),
+            format!("&bt {} {}", command, value),
+        ),
+    }
+}
+
+fn output_labels(value: u32) -> (String, String, String) {
+    match value {
+        0 => (
+            "out TOG".to_string(),
+            String::new(),
+            "&out OUT_TOG".to_string(),
+        ),
+        1 => (
+            "out USB".to_string(),
+            String::new(),
+            "&out OUT_USB".to_string(),
+        ),
+        2 => (
+            "out BLE".to_string(),
+            String::new(),
+            "&out OUT_BLE".to_string(),
+        ),
+        3 => (
+            "out NONE".to_string(),
+            String::new(),
+            "&out OUT_NONE".to_string(),
+        ),
+        _ => (
+            format!("out {}", value),
+            String::new(),
+            format!("&out {}", value),
+        ),
+    }
+}
+
 fn key_label(encoded: u32) -> String {
     let usage = HidUsage::from_encoded(encoded);
     let base = usage
@@ -815,6 +1055,110 @@ fn key_label(encoded: u32) -> String {
         .fold(base, |label, modifier| {
             format!("{}({})", modifier_label(modifier), label)
         })
+}
+
+fn display_key_label(encoded: u32) -> String {
+    let usage = HidUsage::from_encoded(encoded);
+    let base = usage
+        .known_base_keycode()
+        .map(|keycode| display_key_name(keycode.to_name()))
+        .unwrap_or_else(|| usage.base().to_string());
+    usage
+        .modifier_labels()
+        .into_iter()
+        .rev()
+        .fold(base, |label, modifier| {
+            format!("{}({})", modifier_label(modifier), label)
+        })
+}
+
+fn zmk_key_label(encoded: u32) -> String {
+    HidUsage::from_encoded(encoded)
+        .known_base_keycode()
+        .map(|keycode| zmk_key_name(keycode.to_name()))
+        .unwrap_or_else(|| HidUsage::from_encoded(encoded).base().to_string())
+}
+
+fn zmk_key_name(name: &str) -> String {
+    match normalize_key_name(name).as_str() {
+        "SPC" => "SPACE".to_string(),
+        normalized => normalized.to_string(),
+    }
+}
+
+fn behavior_key_display_label(encoded: u32, zmk_names: bool) -> String {
+    let usage = HidUsage::from_encoded(encoded);
+    let base_is_modifier = usage
+        .known_base_keycode()
+        .and_then(|keycode| modifier_name(&normalize_key_name(keycode.to_name()), zmk_names))
+        .is_some();
+    if base_is_modifier || !usage.modifier_labels().is_empty() {
+        return modifier_combo_label(encoded, zmk_names);
+    }
+    if zmk_names {
+        zmk_key_label(encoded)
+    } else {
+        display_key_label(encoded)
+    }
+}
+
+fn modifier_combo_label(encoded: u32, zmk_names: bool) -> String {
+    let usage = HidUsage::from_encoded(encoded);
+    let mut labels = Vec::new();
+    if let Some(keycode) = usage.known_base_keycode() {
+        let name = normalize_key_name(keycode.to_name());
+        if let Some(label) = modifier_name(&name, zmk_names) {
+            labels.push(label);
+        } else {
+            labels.push(if zmk_names {
+                name
+            } else {
+                display_key_name(&name)
+            });
+        }
+    }
+    for modifier in usage.modifier_labels() {
+        if let Some(label) = modifier_name(modifier, zmk_names) {
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+    }
+    if labels.is_empty() {
+        return key_label(encoded);
+    }
+    labels.join("+")
+}
+
+fn modifier_name(name: &str, zmk_names: bool) -> Option<String> {
+    let zmk = match name {
+        "LEFT_CONTROL" | "LCTL" | "LCTRL" => "LCTRL",
+        "LEFT_SHIFT" | "LSFT" | "LSHFT" | "LSHIFT" => "LSHIFT",
+        "LEFT_ALT" | "LALT" => "LALT",
+        "LEFT_GUI" | "LGUI" => "LGUI",
+        "RIGHT_CONTROL" | "RCTL" | "RCTRL" => "RCTRL",
+        "RIGHT_SHIFT" | "RSFT" | "RSHFT" | "RSHIFT" => "RSHIFT",
+        "RIGHT_ALT" | "RALT" => "RALT",
+        "RIGHT_GUI" | "RGUI" => "RGUI",
+        _ => return None,
+    };
+    if zmk_names {
+        return Some(zmk.to_string());
+    }
+    Some(
+        match zmk {
+            "LCTRL" => "LCtrl",
+            "LSHIFT" => "LShift",
+            "LALT" => "LAlt",
+            "LGUI" => "LGUI",
+            "RCTRL" => "RCtrl",
+            "RSHIFT" => "RShift",
+            "RALT" => "RAlt",
+            "RGUI" => "RGUI",
+            _ => zmk,
+        }
+        .to_string(),
+    )
 }
 
 fn normalize_key_name(name: &str) -> String {
@@ -871,6 +1215,30 @@ fn behavior_to_zmk(behavior: EditBehavior) -> Behavior {
         EditBehavior::MomentaryLayer(layer) => Behavior::MomentaryLayer { layer_id: layer },
         EditBehavior::ToggleLayer(layer) => Behavior::ToggleLayer { layer_id: layer },
         EditBehavior::ToLayer(layer) => Behavior::ToLayer { layer_id: layer },
+        EditBehavior::ModTap { hold, tap } => Behavior::ModTap {
+            hold: HidUsage::from_encoded(hold),
+            tap: HidUsage::from_encoded(tap),
+        },
+        EditBehavior::LayerTap {
+            target_layer_index,
+            tap,
+        } => Behavior::LayerTap {
+            layer_id: target_layer_index,
+            tap: HidUsage::from_encoded(tap),
+        },
+        EditBehavior::StickyKey(encoded) => Behavior::StickyKey(HidUsage::from_encoded(encoded)),
+        EditBehavior::StickyLayer(layer) => Behavior::StickyLayer { layer_id: layer },
+        EditBehavior::Bluetooth { command, value } => Behavior::Bluetooth { command, value },
+        EditBehavior::OutputSelection(value) => Behavior::OutputSelection { value },
+        EditBehavior::MouseKeyPress(value) => Behavior::MouseKeyPress { value },
+        EditBehavior::MouseMove(value) => Behavior::MouseMove { value },
+        EditBehavior::MouseScroll(value) => Behavior::MouseScroll { value },
+        EditBehavior::CapsWord => Behavior::CapsWord,
+        EditBehavior::KeyRepeat => Behavior::KeyRepeat,
+        EditBehavior::Reset => Behavior::Reset,
+        EditBehavior::Bootloader => Behavior::Bootloader,
+        EditBehavior::StudioUnlock => Behavior::StudioUnlock,
+        EditBehavior::GraveEscape => Behavior::GraveEscape,
     }
 }
 
@@ -900,6 +1268,22 @@ fn map_client_to_studio_error(error: ClientError) -> StudioError {
             }
             zmk::keymap::SaveChangesErrorCode::SaveChangesErrNoSpace => StudioError::SaveNoSpace,
             _ => StudioError::SaveFailed,
+        },
+        ClientError::AddLayerFailed(code) => match code {
+            zmk::keymap::AddLayerErrorCode::AddLayerErrNoSpace => StudioError::AddLayerNoSpace,
+            _ => StudioError::AddLayerFailed,
+        },
+        ClientError::RemoveLayerFailed(code) => match code {
+            zmk::keymap::RemoveLayerErrorCode::RemoveLayerErrInvalidIndex => {
+                StudioError::InvalidLayer
+            }
+            _ => StudioError::RemoveLayerFailed,
+        },
+        ClientError::SetLayerPropsFailed(code) => match code {
+            zmk::keymap::SetLayerPropsResponse::SetLayerPropsRespErrInvalidId => {
+                StudioError::InvalidLayer
+            }
+            _ => StudioError::RenameLayerFailed,
         },
         _ => StudioError::RpcFailed,
     }
@@ -1585,6 +1969,78 @@ mod tests {
             behavior_to_zmk(EditBehavior::ToLayer(0)),
             Behavior::ToLayer { layer_id: 0 }
         );
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::ModTap {
+                hold: 0x0207_00E0,
+                tap: 0x0007_0029,
+            }),
+            Behavior::ModTap {
+                hold: HidUsage::from_encoded(0x0207_00E0),
+                tap: HidUsage::from_encoded(0x0007_0029),
+            }
+        );
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::LayerTap {
+                target_layer_index: 1,
+                tap: 0x0007_002C,
+            }),
+            Behavior::LayerTap {
+                layer_id: 1,
+                tap: HidUsage::from_encoded(0x0007_002C),
+            }
+        );
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::StickyKey(0x0007_00E1)),
+            Behavior::StickyKey(HidUsage::from_encoded(0x0007_00E1))
+        );
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::StickyLayer(3)),
+            Behavior::StickyLayer { layer_id: 3 }
+        );
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::Bluetooth {
+                command: 3,
+                value: 1,
+            }),
+            Behavior::Bluetooth {
+                command: 3,
+                value: 1,
+            }
+        );
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::OutputSelection(2)),
+            Behavior::OutputSelection { value: 2 }
+        );
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::MouseKeyPress(0x01)),
+            Behavior::MouseKeyPress { value: 0x01 }
+        );
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::MouseMove(0x0000_FDA8)),
+            Behavior::MouseMove { value: 0x0000_FDA8 }
+        );
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::MouseScroll(0x0000_FFF6)),
+            Behavior::MouseScroll { value: 0x0000_FFF6 }
+        );
+        assert_eq!(behavior_to_zmk(EditBehavior::CapsWord), Behavior::CapsWord);
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::KeyRepeat),
+            Behavior::KeyRepeat
+        );
+        assert_eq!(behavior_to_zmk(EditBehavior::Reset), Behavior::Reset);
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::Bootloader),
+            Behavior::Bootloader
+        );
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::StudioUnlock),
+            Behavior::StudioUnlock
+        );
+        assert_eq!(
+            behavior_to_zmk(EditBehavior::GraveEscape),
+            Behavior::GraveEscape
+        );
     }
 
     #[test]
@@ -1632,6 +2088,235 @@ mod tests {
         assert_eq!(to.primary_label, "to 0");
         assert_eq!(to.secondary_label, "");
         assert_eq!(to.full_label, "&to 0");
+    }
+
+    #[test]
+    fn tap_hold_behaviors_use_compact_labels() {
+        let mut names = BTreeMap::new();
+        names.insert(13, "mod-tap".to_string());
+        names.insert(14, "layer-tap".to_string());
+
+        let mt = binding_to_view(
+            1,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 13,
+                param1: 0x0207_00E0,
+                param2: 0x0007_0029,
+            },
+            &names,
+        );
+        assert_eq!(mt.primary_label, "mt LCtrl+LShift Esc");
+        assert_eq!(mt.secondary_label, "");
+        assert_eq!(mt.full_label, "&mt LCTRL+LSHIFT ESC");
+
+        let lt = binding_to_view(
+            2,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 14,
+                param1: 1,
+                param2: 0x0007_002C,
+            },
+            &names,
+        );
+        assert_eq!(lt.primary_label, "lt 1 Space");
+        assert_eq!(lt.secondary_label, "");
+        assert_eq!(lt.full_label, "&lt 1 SPACE");
+    }
+
+    #[test]
+    fn advanced_behaviors_use_compact_labels() {
+        let mut names = BTreeMap::new();
+        names.insert(15, "sticky key".to_string());
+        names.insert(16, "sticky layer".to_string());
+        names.insert(17, "bluetooth".to_string());
+        names.insert(18, "output selection".to_string());
+
+        let sk = binding_to_view(
+            1,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 15,
+                param1: 0x0007_00E1,
+                param2: 0,
+            },
+            &names,
+        );
+        assert_eq!(sk.primary_label, "sk LShift");
+        assert_eq!(sk.secondary_label, "");
+        assert_eq!(sk.full_label, "&sk LSHIFT");
+
+        let sl = binding_to_view(
+            2,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 16,
+                param1: 1,
+                param2: 0,
+            },
+            &names,
+        );
+        assert_eq!(sl.primary_label, "sl 1");
+        assert_eq!(sl.secondary_label, "");
+        assert_eq!(sl.full_label, "&sl 1");
+
+        let bt = binding_to_view(
+            3,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 17,
+                param1: 3,
+                param2: 1,
+            },
+            &names,
+        );
+        assert_eq!(bt.primary_label, "bt 1");
+        assert_eq!(bt.secondary_label, "");
+        assert_eq!(bt.full_label, "&bt BT_SEL 1");
+
+        let out = binding_to_view(
+            4,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 18,
+                param1: 2,
+                param2: 0,
+            },
+            &names,
+        );
+        assert_eq!(out.primary_label, "out BLE");
+        assert_eq!(out.secondary_label, "");
+        assert_eq!(out.full_label, "&out OUT_BLE");
+
+        let out_alias = binding_to_view(
+            5,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 19,
+                param1: 1,
+                param2: 0,
+            },
+            &BTreeMap::from([(19, "out".to_string())]),
+        );
+        assert_eq!(out_alias.primary_label, "out USB");
+        assert_eq!(out_alias.full_label, "&out OUT_USB");
+    }
+
+    #[test]
+    fn mouse_and_system_behaviors_use_readable_labels() {
+        let names = BTreeMap::from([
+            (20, "mouse key press".to_string()),
+            (21, "mouse_move".to_string()),
+            (22, "mouse_scroll".to_string()),
+            (23, "caps word".to_string()),
+            (24, "key repeat".to_string()),
+            (25, "reset".to_string()),
+            (26, "bootloader".to_string()),
+            (27, "studio unlock".to_string()),
+            (28, "grave/escape".to_string()),
+        ]);
+
+        let mkp = binding_to_view(
+            1,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 20,
+                param1: 0x01,
+                param2: 0,
+            },
+            &names,
+        );
+        assert_eq!(mkp.primary_label, "Left Click");
+        assert_eq!(mkp.full_label, "&mkp LCLK");
+
+        let mmv = binding_to_view(
+            2,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 21,
+                param1: 0x0000_FDA8,
+                param2: 0,
+            },
+            &names,
+        );
+        assert_eq!(mmv.primary_label, "Move Up");
+        assert_eq!(mmv.full_label, "&mmv MOVE_UP");
+
+        let msc = binding_to_view(
+            3,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 22,
+                param1: 0x0000_FFF6,
+                param2: 0,
+            },
+            &names,
+        );
+        assert_eq!(msc.primary_label, "Scroll Down");
+        assert_eq!(msc.full_label, "&msc SCRL_DOWN");
+
+        let caps = binding_to_view(
+            4,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 23,
+                param1: 0,
+                param2: 0,
+            },
+            &names,
+        );
+        assert_eq!(caps.primary_label, "caps word");
+        assert_eq!(caps.full_label, "&caps_word");
+
+        let repeat = binding_to_view(
+            5,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 24,
+                param1: 0,
+                param2: 0,
+            },
+            &names,
+        );
+        assert_eq!(repeat.primary_label, "key repeat");
+        assert_eq!(repeat.full_label, "&key_repeat");
+
+        let reset = binding_to_view(
+            6,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 25,
+                param1: 0,
+                param2: 0,
+            },
+            &names,
+        );
+        assert_eq!(reset.primary_label, "reset");
+        assert_eq!(reset.full_label, "&reset");
+
+        let bootloader = binding_to_view(
+            7,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 26,
+                param1: 0,
+                param2: 0,
+            },
+            &names,
+        );
+        assert_eq!(bootloader.primary_label, "bootloader");
+        assert_eq!(bootloader.full_label, "&bootloader");
+
+        let studio_unlock = binding_to_view(
+            8,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 27,
+                param1: 0,
+                param2: 0,
+            },
+            &names,
+        );
+        assert_eq!(studio_unlock.primary_label, "studio unlock");
+        assert_eq!(studio_unlock.full_label, "&studio_unlock");
+
+        let grave_escape = binding_to_view(
+            9,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 28,
+                param1: 0,
+                param2: 0,
+            },
+            &names,
+        );
+        assert_eq!(grave_escape.primary_label, "grave escape");
+        assert_eq!(grave_escape.full_label, "&gresc");
     }
 
     #[test]

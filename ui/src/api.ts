@@ -76,6 +76,12 @@ export const studioSetKey = (
     position,
     behavior,
   });
+export const studioAddLayer = (deviceId: string, name: string) =>
+  invoke<StudioKeymapSnapshot>("studio_add_layer", { deviceId, name });
+export const studioRenameLayer = (deviceId: string, layerId: number, name: string) =>
+  invoke<StudioKeymapSnapshot>("studio_rename_layer", { deviceId, layerId, name });
+export const studioRemoveLayer = (deviceId: string, layerIndex: number) =>
+  invoke<StudioKeymapSnapshot>("studio_remove_layer", { deviceId, layerIndex });
 export const studioSaveChanges = (deviceId: string) =>
   invoke<void>("studio_save_changes", { deviceId });
 export const studioDiscardChanges = (deviceId: string) =>

@@ -1073,10 +1073,18 @@ fn display_key_label(encoded: u32) -> String {
 }
 
 fn zmk_key_label(encoded: u32) -> String {
-    HidUsage::from_encoded(encoded)
+    let usage = HidUsage::from_encoded(encoded);
+    let base = usage
         .known_base_keycode()
         .map(|keycode| zmk_key_name(keycode.to_name()))
-        .unwrap_or_else(|| HidUsage::from_encoded(encoded).base().to_string())
+        .unwrap_or_else(|| usage.base().to_string());
+    usage
+        .modifier_labels()
+        .into_iter()
+        .rev()
+        .fold(base, |label, modifier| {
+            format!("{}({})", modifier_label(modifier), label)
+        })
 }
 
 fn zmk_key_name(name: &str) -> String {
@@ -1092,7 +1100,11 @@ fn behavior_key_display_label(encoded: u32, zmk_names: bool) -> String {
         .known_base_keycode()
         .and_then(|keycode| modifier_name(&normalize_key_name(keycode.to_name()), zmk_names))
         .is_some();
-    if base_is_modifier || !usage.modifier_labels().is_empty() {
+    // A modifier keycode itself (e.g. &sk LSHIFT) is shown as a modifier combo
+    // ("LShift"). A normal key carrying implicit modifier bits (e.g. &sk LC(A))
+    // must use the nested LC(A) form instead, which zmk_/display_key_label
+    // already render.
+    if base_is_modifier {
         return modifier_combo_label(encoded, zmk_names);
     }
     if zmk_names {
@@ -2121,6 +2133,33 @@ mod tests {
         assert_eq!(lt.primary_label, "lt 1 Space");
         assert_eq!(lt.secondary_label, "");
         assert_eq!(lt.full_label, "&lt 1 SPACE");
+
+        // Mod-tap whose tap side carries implicit modifier bits: hold = LSHIFT,
+        // tap = LC(A). The tap modifier must survive into both labels.
+        let mt_mod = binding_to_view(
+            3,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 13,
+                param1: 0x0007_00E1,
+                param2: 0x0107_0004,
+            },
+            &names,
+        );
+        assert_eq!(mt_mod.primary_label, "mt LShift LC(A)");
+        assert_eq!(mt_mod.full_label, "&mt LSHIFT LC(A)");
+
+        // Layer-tap with a modified tap key: layer 1, tap = LC(A).
+        let lt_mod = binding_to_view(
+            4,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 14,
+                param1: 1,
+                param2: 0x0107_0004,
+            },
+            &names,
+        );
+        assert_eq!(lt_mod.primary_label, "lt 1 LC(A)");
+        assert_eq!(lt_mod.full_label, "&lt 1 LC(A)");
     }
 
     #[test]
@@ -2143,6 +2182,20 @@ mod tests {
         assert_eq!(sk.primary_label, "sk LShift");
         assert_eq!(sk.secondary_label, "");
         assert_eq!(sk.full_label, "&sk LSHIFT");
+
+        // Sticky key holding a modified normal key (LC(A)) must render nested,
+        // not the modifier-combo form "A+LCTRL".
+        let sk_mod = binding_to_view(
+            5,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 15,
+                param1: 0x0107_0004,
+                param2: 0,
+            },
+            &names,
+        );
+        assert_eq!(sk_mod.primary_label, "sk LC(A)");
+        assert_eq!(sk_mod.full_label, "&sk LC(A)");
 
         let sl = binding_to_view(
             2,

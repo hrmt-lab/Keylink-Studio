@@ -956,6 +956,59 @@ function holdUsageFromModifiers(selectedIds: string[]): number | null {
   return base.baseUsage | (modifierBits << 24);
 }
 
+/** Apply the selected modifiers as implicit modifier bits on a base key usage
+ *  (e.g. A + LShift -> LS(A)). Returns the base usage unchanged when no
+ *  modifier is selected, preserving plain &kp behavior. */
+function applyModifiers(baseUsage: number, selectedIds: string[]): number {
+  const bits = MODIFIER_OPTIONS
+    .filter((option) => selectedIds.includes(option.id))
+    .reduce((acc, option) => acc | option.modifierBit, 0);
+  return bits === 0 ? baseUsage : (baseUsage | (bits << 24)) >>> 0;
+}
+
+/** Toggle a modifier id within a string[] state setter. */
+function toggleIn(id: string, setter: Dispatch<SetStateAction<string[]>>) {
+  setter((current) =>
+    current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
+  );
+}
+
+/** A row of modifier toggle buttons (LCtrl..RGUI), shared by the key /
+ *  tap-key / sticky-key catalogs and the Mod-Tap hold-modifier picker. */
+function ModifierToggleRow({ label, selectedIds, onToggle, busy }: {
+  label: string;
+  selectedIds: string[];
+  onToggle: (id: string) => void;
+  busy: boolean;
+}) {
+  return (
+    <div>
+      <div className="mb-1.5 text-xs font-medium uppercase text-faint">{label}</div>
+      <div className="flex flex-wrap gap-1.5">
+        {MODIFIER_OPTIONS.map((option) => {
+          const active = selectedIds.includes(option.id);
+          return (
+            <button
+              key={option.id}
+              type="button"
+              disabled={busy}
+              onClick={() => onToggle(option.id)}
+              title={option.zmkName}
+              className={`rounded-md px-2.5 py-1.5 text-sm font-medium ring-1 disabled:opacity-50 ${
+                active
+                  ? "bg-plate text-accent-deep ring-transparent shadow-neu-sel-in"
+                  : "bg-background text-ink ring-border hover:bg-plate"
+              }`}
+            >
+              {option.label}
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
   catalog: KeyCatalogEntry[];
   layers: StudioLayer[];
@@ -969,6 +1022,9 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
   const [layerBehavior, setLayerBehavior] = useState<LayerBehaviorKind | null>(null);
   const [tapHoldBehavior, setTapHoldBehavior] = useState<TapHoldBehaviorKind | null>(null);
   const [selectedModifierIds, setSelectedModifierIds] = useState<string[]>([]);
+  const [selectedKeyModifierIds, setSelectedKeyModifierIds] = useState<string[]>([]);
+  const [selectedTapKeyModifierIds, setSelectedTapKeyModifierIds] = useState<string[]>([]);
+  const [selectedStickyKeyModifierIds, setSelectedStickyKeyModifierIds] = useState<string[]>([]);
   const [selectedTapLayerIndex, setSelectedTapLayerIndex] = useState<number | null>(null);
   const [selectedStickyLayerIndex, setSelectedStickyLayerIndex] = useState<number | null>(null);
   const [query, setQuery] = useState("");
@@ -1000,6 +1056,12 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
     () => holdUsageFromModifiers(selectedModifierIds),
     [selectedModifierIds]
   );
+  // Tap-key controls (modifier toggles + catalog) stay visible at all times but
+  // are disabled until a behavior and its hold side are chosen — mirroring how
+  // the catalog itself behaves.
+  const tapEntriesDisabled =
+    tapHoldBehavior === null ||
+    (tapHoldBehavior === "mod_tap" ? selectedHoldUsage === null : selectedTapLayerIndex === null);
 
   useEffect(() => {
     if (selectedTapLayerIndex !== null && !layers.some((item) => item.index === selectedTapLayerIndex)) {
@@ -1017,12 +1079,6 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
-
-  const toggleModifier = (id: string) => {
-    setSelectedModifierIds((current) =>
-      current.includes(id) ? current.filter((item) => item !== id) : [...current, id]
-    );
-  };
 
   const renderCatalogButtons = (
     onEntrySelect: (entry: KeyCatalogEntry) => void,
@@ -1129,6 +1185,7 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
               <button
                 disabled={busy}
                 onClick={() => onSelect({ kind: "transparent" })}
+                title="&trans"
                 className="flex-1 rounded-lg bg-background px-3 py-2 text-left text-sm ring-1 ring-border disabled:opacity-50"
               >
                 <div className="font-medium text-ink">{t("keymap.edit.transparent")}</div>
@@ -1137,13 +1194,24 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
               <button
                 disabled={busy}
                 onClick={() => onSelect({ kind: "none" })}
+                title="&none"
                 className="flex-1 rounded-lg bg-background px-3 py-2 text-left text-sm ring-1 ring-border disabled:opacity-50"
               >
                 <div className="font-medium text-ink">{t("keymap.edit.none")}</div>
                 <div className="mt-0.5 text-xs text-faint">{t("keymap.edit.none_desc")}</div>
               </button>
             </div>
-            {renderCatalogButtons((entry) => onSelect({ kind: "key_press", hid_usage: entry.hid_usage }))}
+            <div className="mt-3">
+              <ModifierToggleRow
+                label={t("keymap.edit.key_modifiers")}
+                selectedIds={selectedKeyModifierIds}
+                onToggle={(id) => toggleIn(id, setSelectedKeyModifierIds)}
+                busy={busy}
+              />
+            </div>
+            {renderCatalogButtons((entry) =>
+              onSelect({ kind: "key_press", hid_usage: applyModifiers(entry.hid_usage, selectedKeyModifierIds) })
+            )}
           </>
         ) : tab === "layer" ? (
           <div className="mt-3 min-h-0 flex-1 overflow-y-auto pr-1">
@@ -1234,30 +1302,12 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
               </div>
             ) : tapHoldBehavior === "mod_tap" ? (
               <div className="mb-3">
-                <div className="mb-1.5 text-xs font-medium uppercase text-faint">
-                  {t("keymap.edit.hold_modifier")}
-                </div>
-                <div className="flex flex-wrap gap-1.5">
-                  {MODIFIER_OPTIONS.map((option) => {
-                    const active = selectedModifierIds.includes(option.id);
-                    return (
-                      <button
-                        key={option.id}
-                        type="button"
-                        disabled={busy}
-                        onClick={() => toggleModifier(option.id)}
-                        title={option.zmkName}
-                        className={`rounded-md px-2.5 py-1.5 text-sm font-medium ring-1 disabled:opacity-50 ${
-                          active
-                            ? "bg-plate text-accent-deep ring-transparent shadow-neu-sel-in"
-                            : "bg-background text-ink ring-border hover:bg-plate"
-                        }`}
-                      >
-                        {option.label}
-                      </button>
-                    );
-                  })}
-                </div>
+                <ModifierToggleRow
+                  label={t("keymap.edit.hold_modifier")}
+                  selectedIds={selectedModifierIds}
+                  onToggle={(id) => toggleIn(id, setSelectedModifierIds)}
+                  busy={busy}
+                />
               </div>
             ) : (
               <div className="mb-3">
@@ -1296,21 +1346,30 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
             <div className="mb-1.5 text-xs font-medium uppercase text-faint">
               {t("keymap.edit.tap_key")}
             </div>
+            <div className="mb-3">
+              <ModifierToggleRow
+                label={t("keymap.edit.key_modifiers")}
+                selectedIds={selectedTapKeyModifierIds}
+                onToggle={(id) => toggleIn(id, setSelectedTapKeyModifierIds)}
+                busy={busy || tapEntriesDisabled}
+              />
+            </div>
             {renderCatalogButtons((entry) => {
+              const tapUsage = applyModifiers(entry.hid_usage, selectedTapKeyModifierIds);
               if (tapHoldBehavior === "mod_tap" && selectedHoldUsage !== null) {
                 onSelect({
                   kind: "mod_tap",
                   hold_hid_usage: selectedHoldUsage,
-                  tap_hid_usage: entry.hid_usage,
+                  tap_hid_usage: tapUsage,
                 });
               } else if (tapHoldBehavior === "layer_tap" && selectedTapLayerIndex !== null) {
                 onSelect({
                   kind: "layer_tap",
                   target_layer_index: selectedTapLayerIndex,
-                  tap_hid_usage: entry.hid_usage,
+                  tap_hid_usage: tapUsage,
                 });
               }
-            }, tapHoldBehavior === null || (tapHoldBehavior === "mod_tap" ? selectedHoldUsage === null : selectedTapLayerIndex === null))}
+            }, tapEntriesDisabled)}
           </div>
         ) : tab === "bt_out" ? (
           <div className="mt-3 min-h-0 flex flex-1 flex-col overflow-y-auto pr-1">
@@ -1429,7 +1488,17 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
               <div className="mb-1.5 text-xs font-medium uppercase text-faint">
                 {t("keymap.edit.sticky_key")}
               </div>
-              {renderCatalogButtons((entry) => onSelect({ kind: "sticky_key", hid_usage: entry.hid_usage }))}
+              <div className="mb-3">
+                <ModifierToggleRow
+                  label={t("keymap.edit.key_modifiers")}
+                  selectedIds={selectedStickyKeyModifierIds}
+                  onToggle={(id) => toggleIn(id, setSelectedStickyKeyModifierIds)}
+                  busy={busy}
+                />
+              </div>
+              {renderCatalogButtons((entry) =>
+                onSelect({ kind: "sticky_key", hid_usage: applyModifiers(entry.hid_usage, selectedStickyKeyModifierIds) })
+              )}
             </div>
           </div>
         )}

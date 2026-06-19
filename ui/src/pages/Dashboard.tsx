@@ -5,9 +5,13 @@ import {
   List,
   Clock,
   Activity,
+  Bluetooth,
+  ChartColumn,
   AlertCircle,
   Info,
   AlertTriangle,
+  Keyboard,
+  Usb,
 } from "lucide-react";
 import { startMonitoring, stopMonitoring, saveConfig } from "../api";
 import { Toggle } from "../components/Toggle";
@@ -22,6 +26,7 @@ import type {
   LogEntry,
   AiUsageProviderStatus,
   AiUsageStatusKind,
+  DeviceBatteryStatus,
   DeviceInfo,
 } from "../types";
 
@@ -50,6 +55,68 @@ function deviceDisplayName(device: DeviceInfo): string {
 
 function compareDeviceName(a: string, b: string): number {
   return a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
+}
+
+interface ConnectedDeviceGroup {
+  key: string;
+  name: string;
+  devices: DeviceInfo[];
+}
+
+function groupConnectedDevices(devices: DeviceInfo[]): ConnectedDeviceGroup[] {
+  const groups = new Map<string, ConnectedDeviceGroup>();
+  for (const device of devices) {
+    const key = device.device_uid_hash ?? `path:${device.path}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.devices.push(device);
+      existing.name = chooseGroupName(existing.name, deviceDisplayName(device));
+    } else {
+      groups.set(key, {
+        key,
+        name: deviceDisplayName(device),
+        devices: [device],
+      });
+    }
+  }
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      devices: [...group.devices].sort(compareDeviceTransport),
+    }))
+    .sort((a, b) => compareDeviceName(a.name, b.name));
+}
+
+function chooseGroupName(current: string, next: string): string {
+  if (current === "Unknown Device") return next;
+  return current;
+}
+
+function compareDeviceTransport(a: DeviceInfo, b: DeviceInfo): number {
+  return connectionTypeRank(a.connection_type) - connectionTypeRank(b.connection_type);
+}
+
+function connectionTypeRank(connectionType: DeviceInfo["connection_type"]): number {
+  if (connectionType === "usb") return 0;
+  if (connectionType === "bluetooth") return 1;
+  return 2;
+}
+
+function findBatteryForGroup(
+  batteries: DeviceBatteryStatus[],
+  devices: DeviceInfo[]
+): DeviceBatteryStatus | null {
+  for (const device of devices) {
+    const battery =
+      batteries.find(
+        (b) =>
+          (device.device_uid_hash !== null && b.device_key === device.device_uid_hash) ||
+          serialsMatch(b.serial_number, device.serial_number) ||
+          (b.product !== null && b.product === device.product)
+      ) ?? null;
+    if (battery) return battery;
+  }
+  return null;
 }
 
 export default function Dashboard({ config, setConfig, status, logs }: Props) {
@@ -119,14 +186,8 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
   const allDeviceRules = Object.values(config.layer_switch.devices ?? {}).flatMap(
     (device) => device.rules
   );
-  const connectedDevices = useMemo(
-    () =>
-      status.host_link_devices
-        .map((device) => ({
-          name: deviceDisplayName(device),
-          device,
-        }))
-        .sort((a, b) => compareDeviceName(a.name, b.name)),
+  const connectedDeviceGroups = useMemo(
+    () => groupConnectedDevices(status.host_link_devices),
     [status.host_link_devices]
   );
 
@@ -197,28 +258,20 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
               label={t("dashboard.devices.label")}
               value={
                 t("dashboard.devices.unit")
-                  ? status.connected_devices + " " + t("dashboard.devices.unit")
-                  : String(status.connected_devices)
+                  ? connectedDeviceGroups.length + " " + t("dashboard.devices.unit")
+                  : String(connectedDeviceGroups.length)
               }
               mono
             />
 
-            {connectedDevices.length > 0 ? (
+            {connectedDeviceGroups.length > 0 ? (
               <div className="space-y-1 border-t border-background pt-2.5">
-                {connectedDevices.slice(0, 2).map(({ name, device }) => {
-                  const battery = device
-                    ? status.device_battery.find(
-                        (b) =>
-                          (device.device_uid_hash !== null &&
-                            b.device_key === device.device_uid_hash) ||
-                          serialsMatch(b.serial_number, device.serial_number) ||
-                          (b.product !== null && b.product === device.product)
-                      ) ?? null
-                    : null;
+                {connectedDeviceGroups.slice(0, 2).map((group) => {
+                  const battery = findBatteryForGroup(status.device_battery, group.devices);
                   return (
-                    <div key={device?.device_uid_hash ?? device?.path ?? name} className="flex items-center gap-1.5 text-[11px] text-muted">
-                      <span className="h-1.5 w-1.5 flex-shrink-0 rounded-full bg-accent" />
-                      <span className="min-w-0 truncate">{name}</span>
+                    <div key={group.key} className="flex items-center gap-1.5 text-[11px] text-muted">
+                      <TransportIcons devices={group.devices} />
+                      <span className="min-w-0 truncate">{group.name}</span>
                       {battery && (
                         <span className="ml-auto flex flex-shrink-0 items-center gap-1.5">
                           {battery.sources.map((source) => (
@@ -235,9 +288,9 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
                     </div>
                   );
                 })}
-                {connectedDevices.length > 2 && (
+                {connectedDeviceGroups.length > 2 && (
                   <div className="text-[11px] text-disabled">
-                    {t("dashboard.feature.rules_others", { n: connectedDevices.length - 2 })}
+                    {t("dashboard.feature.rules_others", { n: connectedDeviceGroups.length - 2 })}
                   </div>
                 )}
               </div>
@@ -372,7 +425,7 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
               <div className={`flex h-7 w-7 items-center justify-center rounded-lg bg-plate ${
                 config.ai_usage.enabled ? "text-ink" : "text-disabled"
               }`}>
-                <Activity size={14} />
+                <ChartColumn size={14} />
               </div>
               <span className="text-sm font-medium text-ink">{t("dashboard.ai_usage")}</span>
             </div>
@@ -477,6 +530,39 @@ function AiUsageSummary({ provider }: { provider: AiUsageProviderStatus }) {
       </div>
     </div>
   );
+}
+
+function TransportIcons({ devices }: { devices: DeviceInfo[] }) {
+  const connectionTypes = Array.from(
+    new Set(devices.map((device) => device.connection_type))
+  ).sort((a, b) => connectionTypeRank(a) - connectionTypeRank(b));
+  const title = connectionTypes.map(connectionTypeLabel).join(" / ");
+
+  return (
+    <span
+      className="flex w-8 flex-shrink-0 items-center gap-0.5 text-accent"
+      title={title}
+      aria-label={title}
+    >
+      {connectionTypes.map((connectionType) => (
+        <span key={connectionType} className="inline-flex h-3.5 w-3.5 items-center justify-center">
+          {connectionTypeIcon(connectionType)}
+        </span>
+      ))}
+    </span>
+  );
+}
+
+function connectionTypeIcon(connectionType: DeviceInfo["connection_type"]) {
+  if (connectionType === "usb") return <Usb size={12} />;
+  if (connectionType === "bluetooth") return <Bluetooth size={12} />;
+  return <Keyboard size={12} />;
+}
+
+function connectionTypeLabel(connectionType: DeviceInfo["connection_type"]): string {
+  if (connectionType === "usb") return "USB";
+  if (connectionType === "bluetooth") return "Bluetooth";
+  return "Unknown";
 }
 
 function MiniUsage({ label, valid, bp }: { label: string; valid: boolean; bp: number | null }) {

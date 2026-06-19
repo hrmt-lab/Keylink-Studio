@@ -109,6 +109,8 @@ matching priority:
 
 Host Link は USB HID と BLE HOG のどちらも同じ HID candidate として扱います。`DeviceInfo.connection_type` は `hidapi::DeviceInfo::bus_type()` を一次情報として `usb` / `bluetooth` / `unknown` に分類します。`bus_type` が `Unknown` の場合のみ、Windows HID path に含まれる BLE HID Service UUID (`00001812-0000-1000-8000-00805f9b34fb`) や USB HID path 形式を補助判定に使います。この接続種別は UI 表示用で、runner の layer switch / time sync / uplink 処理は従来どおり capability と `device_uid_hash` に基づきます。
 
+UI では、Dashboard は `device_uid_hash` 単位のキーボード表示として扱います。同じ `device_uid_hash` の USB / BLE HOG endpoint が同時に見えている場合は 1 台に集約し、接続中の transport アイコンを並べて表示します。`device_uid_hash` が取得できない endpoint は誤結合を避けるため path 単位で個別に扱います。Devices 画面は診断性を優先し、transport 単位の詳細表示を維持します。
+
 BLE HOG では scan ごとの `HOST_HELLO` 応答が一時的に揺れることがあるため、既に verified 済みで、かつ candidate としては見えている device は、連続 2 回までの HELLO miss では verified list に残します。candidate から消えた device、または write/read error が出た device は verified list から外し、次回以降に再検出します。
 
 ## Uplink (device → host)

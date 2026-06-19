@@ -163,7 +163,7 @@ api_timeout_sec = 10
 
 ## GUI 画面
 
-- Dashboard: 監視開始 / 停止、接続状況、現在レイヤー、ログ、AI Usage 簡易サマリ
+- Dashboard: 監視開始 / 停止、接続状況、現在レイヤー、ログ、AI Usage 簡易サマリ。Host Link デバイスは `device_uid_hash` 単位で集約し、USB / Bluetooth の接続経路アイコンを表示
 - Layer Rules: アプリごとのレイヤールール編集。変更は自動保存です。
 - Actions: キーボードのキーから PC 側操作を実行する `HOST_ACTION` バインディング設定
 - Time Sync: `TIME_SYNC` の有効化、表示形式、同期間隔などの設定

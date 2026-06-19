@@ -47,6 +47,10 @@ export default function Devices({ studioDevices, studioScanning, studioError, re
   }, [scanHostLink, scanStudio]);
 
   const loading = hostLinkLoading || studioScanning;
+  const sortedResults = results === null ? null : [...results].sort(compareProbeResults);
+  const sortedStudioDevices = [...studioDevices].sort(compareStudioDevices);
+  const hostLinkOkCount = results?.filter((result) => result.verified).length ?? 0;
+  const studioOkCount = studioDevices.filter((device) => device.rpc_status === "ok").length;
 
   useEffect(() => { handleProbe(); }, [handleProbe]);
 
@@ -74,16 +78,16 @@ export default function Devices({ studioDevices, studioScanning, studioError, re
         </div>
       )}
 
-      <DeviceSection title={t("devices.host_link.section")} count={results?.length ?? 0}>
+      <DeviceSection title={t("devices.host_link.section")} count={hostLinkOkCount}>
         {results === null || hostLinkLoading ? (
           <LoadingCard text={t("devices.scanning.hint")} />
         ) : results.length === 0 ? (
           <EmptyCard title={t("devices.empty")} body={t("devices.empty.hint")} />
         ) : (
           <div className="space-y-3">
-            {results.map((result, idx) => (
+            {sortedResults!.map((result) => (
               <HostLinkDeviceCard
-                key={idx}
+                key={result.device.path}
                 result={result}
                 battery={findBatteryForDevice(status.device_battery, result.device)}
               />
@@ -92,13 +96,13 @@ export default function Devices({ studioDevices, studioScanning, studioError, re
         )}
       </DeviceSection>
 
-      <DeviceSection title={t("devices.studio.section")} count={studioDevices.length}>
+      <DeviceSection title={t("devices.studio.section")} count={studioOkCount}>
         {studioScanning ? (
           <LoadingCard text={t("devices.scanning.hint")} />
         ) : studioDevices.length === 0 ? (
           <EmptyCard title={t("devices.studio.empty")} body={t("devices.studio.empty.hint")} />
         ) : (
-          <div className="space-y-3">{studioDevices.map((device) => <StudioDeviceCard key={device.id} device={device} />)}</div>
+          <div className="space-y-3">{sortedStudioDevices.map((device) => <StudioDeviceCard key={device.id} device={device} />)}</div>
         )}
       </DeviceSection>
 
@@ -112,6 +116,45 @@ export default function Devices({ studioDevices, studioScanning, studioError, re
       )}
     </div>
   );
+}
+
+function compareProbeResults(a: ProbeResult, b: ProbeResult): number {
+  return (
+    Number(b.verified) - Number(a.verified) ||
+    compareConnectionType(a.device.connection_type, b.device.connection_type) ||
+    deviceDisplayName(a.device).localeCompare(deviceDisplayName(b.device)) ||
+    a.device.path.localeCompare(b.device.path)
+  );
+}
+
+function compareStudioDevices(a: StudioDeviceStatus, b: StudioDeviceStatus): number {
+  return (
+    Number(b.rpc_status === "ok") - Number(a.rpc_status === "ok") ||
+    studioViewerRank(a) - studioViewerRank(b) ||
+    a.display_name.localeCompare(b.display_name) ||
+    a.port_name.localeCompare(b.port_name)
+  );
+}
+
+function compareConnectionType(a: ProbeResult["device"]["connection_type"], b: ProbeResult["device"]["connection_type"]): number {
+  return connectionTypeRank(a) - connectionTypeRank(b);
+}
+
+function connectionTypeRank(connectionType: ProbeResult["device"]["connection_type"]): number {
+  if (connectionType === "usb") return 0;
+  if (connectionType === "bluetooth") return 1;
+  return 2;
+}
+
+function studioViewerRank(device: StudioDeviceStatus): number {
+  if (device.keymap_viewer_status === "available") return 0;
+  if (device.keymap_viewer_status === "locked") return 1;
+  if (device.keymap_viewer_status === "unsupported") return 2;
+  return 3;
+}
+
+function deviceDisplayName(device: ProbeResult["device"]): string {
+  return device.product ?? device.manufacturer ?? device.serial_number ?? device.device_uid_hash ?? "Unknown Device";
 }
 
 function findBatteryForDevice(

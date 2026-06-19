@@ -245,6 +245,7 @@ export interface DeviceInfo {
   product_id: number;
   usage_page: number;
   usage: number;
+  connection_type: "usb" | "bluetooth" | "unknown";
   manufacturer: string | null;
   product: string | null;
   serial_number: string | null;

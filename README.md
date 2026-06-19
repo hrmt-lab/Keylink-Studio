@@ -3,14 +3,15 @@
 RawHID Host は、Windows 上で動く ZMK キーボード向けのホストアプリです。
 前面アプリに応じたレイヤー切り替え、時刻同期、AI 使用量送信、キーボードから PC へのアクション実行、ZMK Studio RPC 経由のキーマップ閲覧・編集を扱います。
 
-このリポジトリに含まれるのは **PC 側のホストアプリのみ** です。Raw HID の Host Link 機能を使うには、ZMK firmware 側に `HL` packet protocol を受け取る実装が必要です。ZMK Studio キーマップ機能は Host Link とは別経路の USB serial / CDC ACM transport を使います。
+このリポジトリに含まれるのは **PC 側のホストアプリのみ** です。Host Link 機能を使うには、ZMK firmware 側に `HL` packet protocol を受け取る実装が必要です。Host Link は Windows / `hidapi` から HID device として見える USB 接続または BLE HOG 接続を扱います。ZMK Studio キーマップ機能は Host Link とは別経路の USB serial / CDC ACM transport を使います。
 
 ## 主な機能
 
 - Windows の前面アプリ / プロセス監視
 - `path` / `exe` / `title` によるアプリ判定
 - デバイス単位の ZMK レイヤールール
-- Raw HID デバイス検出と `HOST_HELLO` / `DEVICE_HELLO` 検証
+- Host Link HID デバイス検出と `HOST_HELLO` / `DEVICE_HELLO` 検証
+  - USB / Bluetooth 接続種別の表示
 - `APP_LAYER` / `TIME_SYNC` / `AI_USAGE` packet 送信
 - キーボードからの uplink 受信
   - バッテリー残量
@@ -89,7 +90,7 @@ uplink_interval_ms = 20
 [hid]
 usage_page = 65376 # 0xFF60
 usage = 97         # 0x61
-hello_timeout_ms = 200
+hello_timeout_ms = 750
 rescan_interval_sec = 5
 
 [studio]
@@ -168,7 +169,7 @@ api_timeout_sec = 10
 - Time Sync: `TIME_SYNC` の有効化、表示形式、同期間隔などの設定
 - AI Usage: Codex / Claude Code 使用量送信の設定、状態表示、手動更新
 - Keymap Viewer: ZMK Studio キーマップ表示、ヒートマップ、キーテスター、キーマップ編集
-- Devices: Raw HID / ZMK Studio の検出結果、capability、バッテリー状態表示
+- Devices: Host Link / ZMK Studio の検出結果、USB / Bluetooth 接続種別、capability、バッテリー状態表示
 - Settings: 外観、Polling、HID、起動設定
 
 UI は日本語 / 英語の切り替えに対応しています。外観のアクセント色は Settings から変更できます。
@@ -189,8 +190,8 @@ Keymap Viewer の編集モードでは、ZMK Studio RPC を使って実機上の
 
 - Studio が locked の場合は編集できません。キーボード側で `&studio_unlock` を実行してください。Host 側から unlock は行いません。
 - 編集中は USB serial / CDC ACM port を保持するため、Studio device の再スキャンや別デバイスの読み取りは `port_busy` で拒否されます。
-- ZMK Studio transport は Host Link Raw HID transport とは別経路です。
-- BLE transport は対象外です。
+- ZMK Studio transport は Host Link HID transport とは別経路です。
+- ZMK Studio の BLE transport は対象外です。BLE 対応は Host Link HID のみです。
 
 ## AI Usage について
 
@@ -243,6 +244,6 @@ Tauri 開発起動:
 
 ## English Summary
 
-RawHID Host is a Windows host application for ZMK keyboards. It monitors the foreground application, sends app-layer packets over Raw HID, synchronizes time for keyboard displays, optionally sends Codex / Claude Code usage snapshots, handles keyboard-initiated host actions, and provides ZMK Studio keymap viewing and editing.
+RawHID Host is a Windows host application for ZMK keyboards. It monitors the foreground application, sends app-layer packets over Host Link HID, synchronizes time for keyboard displays, optionally sends Codex / Claude Code usage snapshots, handles keyboard-initiated host actions, and provides ZMK Studio keymap viewing and editing.
 
-The repository contains the host-side app only. Host Link features require compatible ZMK firmware. ZMK Studio keymap features use USB serial / CDC ACM Studio RPC separately from Host Link Raw HID.
+The repository contains the host-side app only. Host Link features require compatible ZMK firmware and can use USB HID or BLE HOG when exposed through Windows HID APIs. ZMK Studio keymap features use USB serial / CDC ACM Studio RPC separately from Host Link HID.

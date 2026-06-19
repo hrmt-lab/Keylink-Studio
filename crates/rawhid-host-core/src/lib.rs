@@ -19,7 +19,7 @@ pub use config::{
     DeviceLayerSwitchConfig, HidConfig, LayerSwitchConfig, PollingConfig, RuleConfig, StudioConfig,
     TimeConfig, TimeFormatHint, UnmatchedAction,
 };
-pub use hid::{DeviceInfo, HidDeviceManager, HidTransport, ProbeResult};
+pub use hid::{DeviceConnectionType, DeviceInfo, HidDeviceManager, HidTransport, ProbeResult};
 pub use packet::{
     AiUsageErrorCode, AiUsageFlags, AiUsagePacket, AiUsageProvider, AppLayerAction, BatteryEntry,
     BatteryStatusPacket, DeviceHello, HostActionPacket, KeyStatsEntry, KeyStatsPacket,

@@ -1,12 +1,12 @@
 use std::{
     cell::RefCell,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     ffi::CString,
     fmt,
     time::{Duration, Instant},
 };
 
-use hidapi::HidApi;
+use hidapi::{BusType, HidApi};
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -19,12 +19,21 @@ use crate::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceConnectionType {
+    Usb,
+    Bluetooth,
+    Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct DeviceInfo {
     pub path: String,
     pub vendor_id: u16,
     pub product_id: u16,
     pub usage_page: u16,
     pub usage: u16,
+    pub connection_type: DeviceConnectionType,
     pub manufacturer: Option<String>,
     pub product: Option<String>,
     pub serial_number: Option<String>,
@@ -110,6 +119,25 @@ impl RealHidTransport {
     }
 }
 
+const BLE_HID_SERVICE_UUID: &str = "00001812-0000-1000-8000-00805f9b34fb";
+
+fn connection_type_from_hid(device: &hidapi::DeviceInfo) -> DeviceConnectionType {
+    match device.bus_type() {
+        BusType::Usb => DeviceConnectionType::Usb,
+        BusType::Bluetooth => DeviceConnectionType::Bluetooth,
+        _ => {
+            let path = device.path().to_string_lossy().to_ascii_lowercase();
+            if path.contains(BLE_HID_SERVICE_UUID) {
+                DeviceConnectionType::Bluetooth
+            } else if path.contains("hid#vid_") || path.contains("hid#vid&") {
+                DeviceConnectionType::Usb
+            } else {
+                DeviceConnectionType::Unknown
+            }
+        }
+    }
+}
+
 impl fmt::Debug for RealHidTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("RealHidTransport")
@@ -131,6 +159,7 @@ impl HidTransport for RealHidTransport {
                 product_id: device.product_id(),
                 usage_page: device.usage_page(),
                 usage: device.usage(),
+                connection_type: connection_type_from_hid(device),
                 manufacturer: device.manufacturer_string().map(ToString::to_string),
                 product: device.product_string().map(ToString::to_string),
                 serial_number: device.serial_number().map(ToString::to_string),
@@ -146,7 +175,18 @@ impl HidTransport for RealHidTransport {
         packet: Packet,
         timeout_ms: i32,
     ) -> Result<Option<DeviceHello>, HidError> {
-        let hid = self.open_device(&device.path)?;
+        {
+            let mut handles = self.handles.borrow_mut();
+            if !handles.contains_key(&device.path) {
+                let hid = self.open_device(&device.path)?;
+                handles.insert(device.path.clone(), hid);
+            }
+        }
+
+        let handles = self.handles.borrow();
+        let hid = handles
+            .get(&device.path)
+            .expect("handle inserted above is present");
         hid.write(&packet.encode_report()).map_err(HidError::Hid)?;
 
         // Devices may emit uplink packets at any time, so the HELLO response
@@ -162,7 +202,6 @@ impl HidTransport for RealHidTransport {
             if read == PACKET_SIZE {
                 match DeviceHello::decode_payload(&buffer) {
                     Ok(response) if response.seq == packet.seq => {
-                        self.handles.borrow_mut().insert(device.path.clone(), hid);
                         return Ok(Some(response));
                     }
                     Ok(_) => {} // stale HELLO from an earlier probe; keep waiting
@@ -241,6 +280,7 @@ pub struct HidDeviceManager<T = RealHidTransport> {
     transport: T,
     config: HidConfig,
     verified: Vec<DeviceInfo>,
+    missed_probe_counts: HashMap<String, u8>,
     seq: u8,
     generation: u64,
     last_probe_at: Option<Instant>,
@@ -258,6 +298,7 @@ impl<T: HidTransport> HidDeviceManager<T> {
             transport,
             config,
             verified: Vec::new(),
+            missed_probe_counts: HashMap::new(),
             seq: 0,
             generation: 0,
             last_probe_at: None,
@@ -280,6 +321,10 @@ impl<T: HidTransport> HidDeviceManager<T> {
         let candidates = self
             .transport
             .candidates(self.config.usage_page, self.config.usage)?;
+        let candidate_paths: HashSet<String> = candidates
+            .iter()
+            .map(|device| device.path.clone())
+            .collect();
         let mut results = Vec::with_capacity(candidates.len());
         let mut verified = Vec::new();
 
@@ -295,6 +340,7 @@ impl<T: HidTransport> HidDeviceManager<T> {
                     let mut verified_device = device.clone();
                     verified_device.capabilities = hello.capabilities;
                     verified_device.device_uid_hash = hello.device_uid_hash;
+                    self.missed_probe_counts.remove(&verified_device.path);
                     verified.push(verified_device.clone());
                     results.push(ProbeResult {
                         device: verified_device,
@@ -320,9 +366,33 @@ impl<T: HidTransport> HidDeviceManager<T> {
             }
         }
 
+        const MAX_TRANSIENT_HELLO_MISSES: u8 = 2;
+        for old_device in &self.verified {
+            if verified.iter().any(|device| device.path == old_device.path) {
+                continue;
+            }
+            if !candidate_paths.contains(&old_device.path) {
+                continue;
+            }
+
+            let misses = self
+                .missed_probe_counts
+                .entry(old_device.path.clone())
+                .and_modify(|count| *count = count.saturating_add(1))
+                .or_insert(1);
+            if *misses <= MAX_TRANSIENT_HELLO_MISSES {
+                debug!(
+                    "keeping previously verified Raw HID device {} after transient HELLO miss {}",
+                    old_device.path, misses
+                );
+                verified.push(old_device.clone());
+            }
+        }
+
         for old_device in &self.verified {
             if !verified.iter().any(|device| device.path == old_device.path) {
                 self.transport.forget_device(old_device);
+                self.missed_probe_counts.remove(&old_device.path);
             }
         }
 
@@ -550,6 +620,7 @@ mod tests {
             product_id: 2,
             usage_page: 0xFF60,
             usage: 0x61,
+            connection_type: DeviceConnectionType::Usb,
             manufacturer: None,
             product: None,
             serial_number: None,
@@ -571,6 +642,48 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         assert_eq!(manager.verified_devices(), &[device("b")]);
+    }
+
+    #[test]
+    fn probe_tolerates_transient_hello_misses_for_known_candidates() {
+        let transport = MockTransport {
+            candidates: RefCell::new(vec![device("a")]),
+            ..MockTransport::default()
+        };
+        transport.hello_paths.borrow_mut().insert("a".to_string());
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        manager.probe().unwrap();
+        let generation = manager.device_generation();
+
+        manager.transport.hello_paths.borrow_mut().clear();
+
+        manager.probe().unwrap();
+        assert_eq!(manager.verified_devices(), &[device("a")]);
+        assert_eq!(manager.device_generation(), generation);
+
+        manager.probe().unwrap();
+        assert_eq!(manager.verified_devices(), &[device("a")]);
+        assert_eq!(manager.device_generation(), generation);
+
+        manager.probe().unwrap();
+        assert!(manager.verified_devices().is_empty());
+        assert_ne!(manager.device_generation(), generation);
+    }
+
+    #[test]
+    fn probe_removes_missing_candidate_immediately() {
+        let transport = MockTransport {
+            candidates: RefCell::new(vec![device("a")]),
+            ..MockTransport::default()
+        };
+        transport.hello_paths.borrow_mut().insert("a".to_string());
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        manager.probe().unwrap();
+
+        manager.transport.candidates.borrow_mut().clear();
+        manager.probe().unwrap();
+
+        assert!(manager.verified_devices().is_empty());
     }
 
     #[test]

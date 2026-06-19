@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from "react";
-import { RefreshCw, CheckCircle2, XCircle, Usb, AlertCircle, BatteryMedium, Keyboard } from "lucide-react";
+import { RefreshCw, CheckCircle2, XCircle, Usb, AlertCircle, BatteryMedium, Keyboard, Bluetooth } from "lucide-react";
 import { probeDevices } from "../api";
 import { RollingNumber } from "../components/RollingNumber";
 import { friendlyError } from "../lib/errors";
@@ -85,13 +85,7 @@ export default function Devices({ studioDevices, studioScanning, studioError, re
               <HostLinkDeviceCard
                 key={idx}
                 result={result}
-                battery={
-                  result.device.device_uid_hash
-                    ? status.device_battery.find(
-                        (entry) => entry.device_key === result.device.device_uid_hash
-                      ) ?? null
-                    : null
-                }
+                battery={findBatteryForDevice(status.device_battery, result.device)}
               />
             ))}
           </div>
@@ -118,6 +112,25 @@ export default function Devices({ studioDevices, studioScanning, studioError, re
       )}
     </div>
   );
+}
+
+function findBatteryForDevice(
+  batteries: DeviceBatteryStatus[],
+  device: ProbeResult["device"]
+): DeviceBatteryStatus | null {
+  return (
+    batteries.find(
+      (entry) =>
+        (device.device_uid_hash !== null && entry.device_key === device.device_uid_hash) ||
+        serialsMatch(entry.serial_number, device.serial_number) ||
+        (entry.product !== null && entry.product === device.product)
+    ) ?? null
+  );
+}
+
+function serialsMatch(a: string | null, b: string | null): boolean {
+  if (!a || !b) return false;
+  return a.trim().toLowerCase() === b.trim().toLowerCase();
 }
 
 function DeviceSection({ title, count, children }: { title: string; count: number; children: React.ReactNode }) {
@@ -155,11 +168,12 @@ function HostLinkDeviceCard({ result, battery }: { result: ProbeResult; battery:
   const { t } = useLang();
   const { device, verified, error } = result;
   const name = device.product ?? device.manufacturer ?? "Unknown Device";
+  const connectionLabel = hostLinkConnectionLabel(device.connection_type);
 
   return (
     <div className="rounded-card bg-surface">
       <div className="flex items-start gap-4 px-5 py-4">
-        <IconBox ok={verified} icon={<Usb size={18} />} />
+        <IconBox ok={verified} icon={hostLinkConnectionIcon(device.connection_type)} title={connectionLabel} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <span className="font-medium text-ink text-sm">{name}</span>
@@ -257,8 +271,20 @@ function StudioDeviceCard({ device }: { device: StudioDeviceStatus }) {
   );
 }
 
-function IconBox({ ok, icon }: { ok: boolean; icon: React.ReactNode }) {
-  return <div className={`mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg ${ok ? "bg-accent-soft text-accent-deep" : "bg-plate text-disabled"}`}>{icon}</div>;
+function hostLinkConnectionIcon(connectionType: ProbeResult["device"]["connection_type"]) {
+  if (connectionType === "bluetooth") return <Bluetooth size={18} />;
+  if (connectionType === "usb") return <Usb size={18} />;
+  return <Keyboard size={18} />;
+}
+
+function hostLinkConnectionLabel(connectionType: ProbeResult["device"]["connection_type"]) {
+  if (connectionType === "bluetooth") return "Bluetooth";
+  if (connectionType === "usb") return "USB";
+  return "Unknown";
+}
+
+function IconBox({ ok, icon, title }: { ok: boolean; icon: React.ReactNode; title?: string }) {
+  return <div title={title} aria-label={title} className={`mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg ${ok ? "bg-accent-soft text-accent-deep" : "bg-plate text-disabled"}`}>{icon}</div>;
 }
 
 function StatusPill({ ok, label }: { ok: boolean; label: string }) {

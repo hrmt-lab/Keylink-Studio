@@ -1414,6 +1414,7 @@ pub fn debug_inject_uplink(
             product_id: 0,
             usage_page: 0,
             usage: 0,
+            connection_type: rawhid_host_core::hid::DeviceConnectionType::Unknown,
             manufacturer: None,
             product: Some("debug".to_string()),
             serial_number: None,

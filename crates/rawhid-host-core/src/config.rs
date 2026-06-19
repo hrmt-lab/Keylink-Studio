@@ -172,7 +172,7 @@ impl Default for HidConfig {
         Self {
             usage_page: 0xFF60,
             usage: 0x61,
-            hello_timeout_ms: 200,
+            hello_timeout_ms: 750,
             rescan_interval_sec: 5,
         }
     }
@@ -502,7 +502,7 @@ uplink_interval_ms = 20
 [hid]
 usage_page = 65376 # 0xFF60
 usage = 97         # 0x61
-hello_timeout_ms = 200
+hello_timeout_ms = 750
 rescan_interval_sec = 5
 
 [studio]

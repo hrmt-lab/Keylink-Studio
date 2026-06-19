@@ -138,7 +138,7 @@ function AppInner() {
   return (
     <div className="flex h-full overflow-hidden bg-background">
       <Sidebar currentPage={page} onNavigate={setPage} status={status} />
-      <main className="flex-1 overflow-y-auto">
+      <main className="app-main-scroll flex-1 overflow-y-auto">
         {page === "dashboard" && (
           <Dashboard
             config={config}

@@ -10,7 +10,7 @@ interval_ms = 500
 [hid]
 usage_page = 65376 # 0xFF60
 usage = 97         # 0x61
-hello_timeout_ms = 200
+hello_timeout_ms = 750
 
 [layer_switch]
 enabled = true

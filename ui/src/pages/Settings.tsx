@@ -238,6 +238,7 @@ export default function Settings({ config, setConfig }: Props) {
               type="number"
               min={50}
               max={5000}
+              step={50}
               value={draft.hid.hello_timeout_ms}
               onChange={(e) =>
                 setDraft({

@@ -22,6 +22,7 @@ import type {
   LogEntry,
   AiUsageProviderStatus,
   AiUsageStatusKind,
+  DeviceInfo,
 } from "../types";
 
 interface Props {
@@ -35,6 +36,16 @@ interface Props {
 function serialsMatch(a: string | null, b: string | null): boolean {
   if (!a || !b) return false;
   return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+function deviceDisplayName(device: DeviceInfo): string {
+  return (
+    device.product ??
+    device.manufacturer ??
+    device.serial_number ??
+    device.device_uid_hash ??
+    "Unknown Device"
+  );
 }
 
 function compareDeviceName(a: string, b: string): number {
@@ -110,13 +121,13 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
   );
   const connectedDevices = useMemo(
     () =>
-      status.connected_device_names
-        .map((name, index) => ({
-          name,
-          device: status.host_link_devices[index] ?? null,
+      status.host_link_devices
+        .map((device) => ({
+          name: deviceDisplayName(device),
+          device,
         }))
         .sort((a, b) => compareDeviceName(a.name, b.name)),
-    [status.connected_device_names, status.host_link_devices]
+    [status.host_link_devices]
   );
 
   return (
@@ -198,6 +209,8 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
                   const battery = device
                     ? status.device_battery.find(
                         (b) =>
+                          (device.device_uid_hash !== null &&
+                            b.device_key === device.device_uid_hash) ||
                           serialsMatch(b.serial_number, device.serial_number) ||
                           (b.product !== null && b.product === device.product)
                       ) ?? null

@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -19,9 +20,12 @@ use rawhid_host_core::{
     runner::{uplink_device_key, RunEvent, Runner},
     stats::{KeyStatsSummary, SharedKeyStatsStore, StatsPeriod},
     studio::{
-        key_catalog, probe_studio_devices as probe_all_studio_devices, read_keymap_for_device,
-        resolve_behavior_labels_for_device, EditBehavior, KeyCatalogEntry, StudioBindingLabelPatch,
-        StudioDeviceStatus, StudioEditSession, StudioError, StudioKeymapSnapshot, StudioRawBinding,
+        key_catalog, keymap_backup_from_snapshot, parse_keymap_backup,
+        probe_studio_devices as probe_all_studio_devices, read_keymap_for_device,
+        resolve_behavior_labels_for_device, serialize_keymap_backup, EditBehavior, KeyCatalogEntry,
+        KeymapFileError, RestoreReport, StudioBindingLabelPatch, StudioDeviceStatus,
+        StudioEditSession, StudioError, StudioKeymapSnapshot, StudioRawBinding,
+        KEYMAP_BACKUP_MAX_BYTES,
     },
 };
 use tauri::{AppHandle, Emitter, State};
@@ -376,6 +380,157 @@ pub async fn read_studio_keymap(
     })
     .await
     .map_err(|_| "studio_read_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_export_keymap(
+    device_id: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let edit = Arc::clone(&state.studio_edit);
+    let studio_config = state.config.lock().unwrap().studio.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let snapshot = {
+            let mut guard = edit.lock().unwrap();
+            if let Some(session) = guard.as_mut() {
+                if session.device_id == device_id {
+                    session.snapshot().map_err(studio_error_code)?
+                } else {
+                    return Err(studio_error_code(StudioError::PortBusy));
+                }
+            } else {
+                read_keymap_for_device(&device_id, &studio_config).map_err(studio_error_code)?
+            }
+        };
+        let backup =
+            keymap_backup_from_snapshot(&snapshot, Default::default(), env!("CARGO_PKG_VERSION"));
+        let text = serialize_keymap_backup(&backup).map_err(keymap_file_error_code)?;
+        write_keymap_backup_file(&PathBuf::from(path), &text)
+    })
+    .await
+    .map_err(|_| "keymap_export_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_preview_keymap_restore(
+    device_id: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<RestoreReport, String> {
+    let edit = Arc::clone(&state.studio_edit);
+    let studio_config = state.config.lock().unwrap().studio.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let backup = read_keymap_backup_file(&PathBuf::from(path))?;
+        let mut guard = edit.lock().unwrap();
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+        if session.device_id != device_id {
+            return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+        }
+        let snapshot = session.snapshot().map_err(studio_error_code)?;
+        let ids = backup_behavior_ids(&backup);
+        let target_names = session
+            .resolve_behavior_names(
+                &ids,
+                Duration::from_millis(studio_config.keymap_read_timeout_ms.max(1)),
+            )
+            .map_err(studio_error_code)?;
+        Ok(
+            rawhid_host_core::studio::plan_keymap_restore(
+                &snapshot,
+                target_names.as_ref(),
+                &backup,
+            )
+            .report,
+        )
+    })
+    .await
+    .map_err(|_| "keymap_restore_preview_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_apply_keymap_restore(
+    device_id: String,
+    path: String,
+    state: State<'_, AppState>,
+) -> Result<(StudioKeymapSnapshot, RestoreReport), String> {
+    let edit = Arc::clone(&state.studio_edit);
+    let studio_config = state.config.lock().unwrap().studio.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let backup = read_keymap_backup_file(&PathBuf::from(path))?;
+        let mut guard = edit.lock().unwrap();
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+        if session.device_id != device_id {
+            return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+        }
+        let snapshot = session.snapshot().map_err(studio_error_code)?;
+        let ids = backup_behavior_ids(&backup);
+        let target_names = session
+            .resolve_behavior_names(
+                &ids,
+                Duration::from_millis(studio_config.keymap_read_timeout_ms.max(1)),
+            )
+            .map_err(studio_error_code)?;
+        let plan = rawhid_host_core::studio::plan_keymap_restore(
+            &snapshot,
+            target_names.as_ref(),
+            &backup,
+        );
+        if !plan.report.can_apply {
+            return Err("restore_structure_mismatch".to_string());
+        }
+        let next = session
+            .apply_raw_writes(&plan.writes)
+            .map_err(studio_error_code)?;
+        Ok((next, plan.report))
+    })
+    .await
+    .map_err(|_| "keymap_restore_apply_failed".to_string())?
+}
+
+fn backup_behavior_ids(backup: &rawhid_host_core::studio::KeymapBackup) -> BTreeSet<i32> {
+    backup
+        .layers
+        .iter()
+        .flat_map(|layer| layer.bindings.iter().map(|binding| binding.behavior_id))
+        .collect()
+}
+
+fn read_keymap_backup_file(
+    path: &std::path::Path,
+) -> Result<rawhid_host_core::studio::KeymapBackup, String> {
+    let metadata = std::fs::metadata(path).map_err(|_| "keymap_invalid_path".to_string())?;
+    if !metadata.is_file() {
+        return Err("keymap_invalid_path".to_string());
+    }
+    if metadata.len() > KEYMAP_BACKUP_MAX_BYTES as u64 {
+        return Err("keymap_file_too_large".to_string());
+    }
+    let text = std::fs::read_to_string(path).map_err(|_| "keymap_invalid_file".to_string())?;
+    parse_keymap_backup(&text).map_err(keymap_file_error_code)
+}
+
+fn write_keymap_backup_file(path: &std::path::Path, text: &str) -> Result<(), String> {
+    let Some(parent) = path.parent() else {
+        return Err("keymap_invalid_path".to_string());
+    };
+    if !parent.is_dir() {
+        return Err("keymap_invalid_path".to_string());
+    }
+    std::fs::write(path, text).map_err(|_| "keymap_invalid_path".to_string())
+}
+
+fn keymap_file_error_code(error: KeymapFileError) -> String {
+    match error {
+        KeymapFileError::InvalidFile => "keymap_invalid_file",
+        KeymapFileError::UnsupportedVersion => "keymap_unsupported_version",
+        KeymapFileError::FileTooLarge => "keymap_file_too_large",
+    }
+    .to_string()
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

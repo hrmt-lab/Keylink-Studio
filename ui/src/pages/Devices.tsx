@@ -79,9 +79,9 @@ export default function Devices({ studioDevices, studioScanning, studioError, re
       )}
 
       <DeviceSection title={t("devices.host_link.section")} count={hostLinkOkCount}>
-        {results === null || hostLinkLoading ? (
+        {hostLinkLoading || (results === null && !error) ? (
           <LoadingCard text={t("devices.scanning.hint")} />
-        ) : results.length === 0 ? (
+        ) : results === null || results.length === 0 ? (
           <EmptyCard title={t("devices.empty")} body={t("devices.empty.hint")} />
         ) : (
           <div className="space-y-3">

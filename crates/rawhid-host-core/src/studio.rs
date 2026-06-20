@@ -145,6 +145,113 @@ pub struct StudioRawBinding {
     pub param2: u32,
 }
 
+pub const KEYMAP_BACKUP_SCHEMA: &str = "rawhid-host.keymap-backup";
+pub const KEYMAP_BACKUP_SCHEMA_VERSION: u32 = 1;
+pub const KEYMAP_BACKUP_MAX_BYTES: usize = 1024 * 1024;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct KeymapBackup {
+    pub schema: String,
+    pub schema_version: u32,
+    pub app_version: String,
+    pub exported_at_ms: u64,
+    pub device: BackupDevice,
+    pub layout: BackupLayout,
+    pub behavior_catalog: BTreeMap<i32, String>,
+    pub layers: Vec<BackupLayer>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupDevice {
+    pub name: String,
+    pub connection_type: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupLayout {
+    pub selected_physical_layout_name: Option<String>,
+    pub positions: Vec<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupLayer {
+    pub index: usize,
+    pub id: u32,
+    pub name: String,
+    pub bindings: Vec<BackupBinding>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupBinding {
+    pub position: usize,
+    pub behavior_id: i32,
+    pub param1: u32,
+    pub param2: u32,
+    pub behavior: String,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RestorePlan {
+    pub report: RestoreReport,
+    pub writes: Vec<RawBindingWrite>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RestoreReport {
+    pub can_apply: bool,
+    pub behavior_verification: BehaviorVerification,
+    pub source_device_name: String,
+    pub exported_at_ms: u64,
+    pub will_write: usize,
+    pub unchanged_skipped: usize,
+    pub blocked: usize,
+    pub changed_keys: Vec<RestoreChangedKey>,
+    pub warnings: Vec<RestoreIssue>,
+    pub errors: Vec<RestoreIssue>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RestoreChangedKey {
+    pub layer_index: usize,
+    pub position: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BehaviorVerification {
+    Done,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RestoreIssue {
+    pub code: String,
+    pub layer_index: Option<usize>,
+    pub position: Option<usize>,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RawBindingWrite {
+    pub layer_index: usize,
+    pub layer_id: u32,
+    pub position: i32,
+    pub behavior_id: i32,
+    pub param1: u32,
+    pub param2: u32,
+}
+
+#[derive(Debug, Error)]
+pub enum KeymapFileError {
+    #[error("keymap_invalid_file")]
+    InvalidFile,
+    #[error("keymap_unsupported_version")]
+    UnsupportedVersion,
+    #[error("keymap_file_too_large")]
+    FileTooLarge,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StudioBindingLabelPatch {
     pub behavior_id: i32,
@@ -439,6 +546,250 @@ pub fn resolve_behavior_labels_for_device(
     ))
 }
 
+pub fn keymap_backup_from_snapshot(
+    snapshot: &StudioKeymapSnapshot,
+    behavior_catalog: BTreeMap<i32, String>,
+    app_version: &str,
+) -> KeymapBackup {
+    let positions = snapshot
+        .selected_layout_keys
+        .iter()
+        .map(|key| key.position)
+        .collect();
+    let mut catalog = behavior_catalog;
+    for layer in &snapshot.layers {
+        for binding in &layer.bindings {
+            if !binding.behavior.starts_with("behavior ") {
+                catalog
+                    .entry(binding.raw.behavior_id)
+                    .or_insert_with(|| binding.behavior.clone());
+            }
+        }
+    }
+
+    KeymapBackup {
+        schema: KEYMAP_BACKUP_SCHEMA.to_string(),
+        schema_version: KEYMAP_BACKUP_SCHEMA_VERSION,
+        app_version: app_version.to_string(),
+        exported_at_ms: now_ms(),
+        device: BackupDevice {
+            name: snapshot.device_name.clone(),
+            connection_type: snapshot.connection_type.clone(),
+        },
+        layout: BackupLayout {
+            selected_physical_layout_name: snapshot.selected_physical_layout_name.clone(),
+            positions,
+        },
+        behavior_catalog: catalog,
+        layers: snapshot
+            .layers
+            .iter()
+            .map(|layer| BackupLayer {
+                index: layer.index,
+                id: layer.id,
+                name: layer.name.clone(),
+                bindings: layer
+                    .bindings
+                    .iter()
+                    .map(|binding| BackupBinding {
+                        position: binding.position,
+                        behavior_id: binding.raw.behavior_id,
+                        param1: binding.raw.param1,
+                        param2: binding.raw.param2,
+                        behavior: binding.behavior.clone(),
+                        label: binding.full_label.clone(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
+}
+
+pub fn serialize_keymap_backup(backup: &KeymapBackup) -> Result<String, KeymapFileError> {
+    serde_json::to_string_pretty(backup).map_err(|_| KeymapFileError::InvalidFile)
+}
+
+pub fn parse_keymap_backup(text: &str) -> Result<KeymapBackup, KeymapFileError> {
+    if text.len() > KEYMAP_BACKUP_MAX_BYTES {
+        return Err(KeymapFileError::FileTooLarge);
+    }
+    let backup: KeymapBackup =
+        serde_json::from_str(text).map_err(|_| KeymapFileError::InvalidFile)?;
+    if backup.schema != KEYMAP_BACKUP_SCHEMA {
+        return Err(KeymapFileError::InvalidFile);
+    }
+    if backup.schema_version != KEYMAP_BACKUP_SCHEMA_VERSION {
+        return Err(KeymapFileError::UnsupportedVersion);
+    }
+    Ok(backup)
+}
+
+pub fn plan_keymap_restore(
+    current: &StudioKeymapSnapshot,
+    target_behavior_names: Option<&BTreeMap<i32, String>>,
+    backup: &KeymapBackup,
+) -> RestorePlan {
+    let mut warnings = Vec::new();
+    let errors = Vec::new();
+    let mut writes = Vec::new();
+    let mut unchanged_skipped = 0usize;
+    let mut blocked = 0usize;
+
+    let placeholder_only = backup.behavior_catalog.is_empty()
+        || backup
+            .layers
+            .iter()
+            .flat_map(|layer| layer.bindings.iter())
+            .all(|binding| is_placeholder_behavior_name(&binding.behavior));
+    let behavior_verification = if target_behavior_names.is_some() && !placeholder_only {
+        BehaviorVerification::Done
+    } else {
+        BehaviorVerification::Skipped
+    };
+
+    for (layer_index, backup_layer) in backup.layers.iter().enumerate() {
+        let Some(current_layer) = current.layers.get(layer_index) else {
+            continue;
+        };
+        let current_by_position: BTreeMap<usize, &StudioBinding> = current_layer
+            .bindings
+            .iter()
+            .map(|binding| (binding.position, binding))
+            .collect();
+        for backup_binding in &backup_layer.bindings {
+            let Some(current_binding) = current_by_position.get(&backup_binding.position) else {
+                continue;
+            };
+            if same_raw(&current_binding.raw, backup_binding) {
+                unchanged_skipped += 1;
+                continue;
+            }
+            if behavior_verification == BehaviorVerification::Done {
+                let target_names = target_behavior_names.expect("checked above");
+                let backup_name = backup
+                    .behavior_catalog
+                    .get(&backup_binding.behavior_id)
+                    .or_else(|| {
+                        if is_placeholder_behavior_name(&backup_binding.behavior) {
+                            None
+                        } else {
+                            Some(&backup_binding.behavior)
+                        }
+                    });
+                match (backup_name, target_names.get(&backup_binding.behavior_id)) {
+                    (_, None) => {
+                        blocked += 1;
+                        warnings.push(issue(
+                            "behavior_missing",
+                            Some(layer_index),
+                            Some(backup_binding.position),
+                            "target behavior id was not found",
+                        ));
+                        continue;
+                    }
+                    (None, Some(_)) => {
+                        blocked += 1;
+                        warnings.push(issue(
+                            "behavior_unverified",
+                            Some(layer_index),
+                            Some(backup_binding.position),
+                            "backup behavior name is unresolved",
+                        ));
+                        continue;
+                    }
+                    (Some(source), Some(target))
+                        if normalize_behavior_name(source) != normalize_behavior_name(target) =>
+                    {
+                        blocked += 1;
+                        warnings.push(issue(
+                            "behavior_conflict",
+                            Some(layer_index),
+                            Some(backup_binding.position),
+                            "behavior name differs for the same id",
+                        ));
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+            writes.push(RawBindingWrite {
+                layer_index,
+                layer_id: current_layer.id,
+                position: backup_binding.position as i32,
+                behavior_id: backup_binding.behavior_id,
+                param1: backup_binding.param1,
+                param2: backup_binding.param2,
+            });
+        }
+    }
+
+    let can_apply = errors.is_empty();
+    let changed_keys = writes
+        .iter()
+        .map(|write| RestoreChangedKey {
+            layer_index: write.layer_index,
+            position: write.position as usize,
+        })
+        .collect();
+    RestorePlan {
+        report: RestoreReport {
+            can_apply,
+            behavior_verification,
+            source_device_name: backup.device.name.clone(),
+            exported_at_ms: backup.exported_at_ms,
+            will_write: writes.len(),
+            unchanged_skipped,
+            blocked,
+            changed_keys,
+            warnings,
+            errors,
+        },
+        writes,
+    }
+}
+
+fn same_raw(current: &StudioRawBinding, backup: &BackupBinding) -> bool {
+    current.behavior_id == backup.behavior_id
+        && current.param1 == backup.param1
+        && current.param2 == backup.param2
+}
+
+fn is_placeholder_behavior_name(name: &str) -> bool {
+    let Some(rest) = name.trim().strip_prefix("behavior ") else {
+        return false;
+    };
+    !rest.is_empty() && rest.chars().all(|ch| ch.is_ascii_digit() || ch == '-')
+}
+
+fn normalize_behavior_name(name: &str) -> String {
+    name.trim()
+        .to_ascii_lowercase()
+        .chars()
+        .map(|ch| match ch {
+            '_' | '-' => ' ',
+            ch if ch.is_ascii_whitespace() => ' ',
+            ch => ch,
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn issue(
+    code: &str,
+    layer_index: Option<usize>,
+    position: Option<usize>,
+    message: &str,
+) -> RestoreIssue {
+    RestoreIssue {
+        code: code.to_string(),
+        layer_index,
+        position,
+        message: message.to_string(),
+    }
+}
+
 pub struct StudioEditSession {
     client: StudioClient<StudioTransport>,
     pub device_id: String,
@@ -550,6 +901,41 @@ impl StudioEditSession {
         ))
     }
 
+    pub fn resolve_behavior_names(
+        &mut self,
+        behavior_ids: &BTreeSet<i32>,
+        timeout: Duration,
+    ) -> Result<Option<BTreeMap<i32, String>>, StudioError> {
+        let deadline = Instant::now() + timeout;
+        let mut names = BTreeMap::new();
+        for id in behavior_ids {
+            let Ok(id_u32) = u32::try_from(*id) else {
+                continue;
+            };
+            if Instant::now() >= deadline {
+                break;
+            }
+            match self.client.get_behavior_details(id_u32) {
+                Ok(details) => {
+                    names.insert(*id, details.display_name);
+                }
+                Err(error) => {
+                    tracing::debug!(
+                        behavior_id = id_u32,
+                        error = %error,
+                        "failed to verify Studio behavior details"
+                    );
+                }
+            }
+        }
+        if names.is_empty() {
+            Ok(None)
+        } else {
+            self.behavior_names.extend(names.clone());
+            Ok(Some(names))
+        }
+    }
+
     pub fn set_binding(
         &mut self,
         layer_id: u32,
@@ -559,6 +945,26 @@ impl StudioEditSession {
         self.client
             .set_key_at(layer_id, position, behavior_to_zmk(behavior))
             .map_err(map_client_to_studio_error)?;
+        self.snapshot()
+    }
+
+    pub fn apply_raw_writes(
+        &mut self,
+        writes: &[RawBindingWrite],
+    ) -> Result<StudioKeymapSnapshot, StudioError> {
+        for write in writes {
+            self.client
+                .set_key_at(
+                    write.layer_id,
+                    write.position,
+                    Behavior::Unknown {
+                        behavior_id: write.behavior_id,
+                        param1: write.param1,
+                        param2: write.param2,
+                    },
+                )
+                .map_err(map_client_to_studio_error)?;
+        }
         self.snapshot()
     }
 
@@ -2421,6 +2827,239 @@ mod tests {
         assert_eq!(view.primary_label, "behavior 7");
         assert_eq!(view.full_label, "behavior 7(458756, 0)");
         assert_eq!(view.raw.behavior_id, 7);
+    }
+
+    fn test_snapshot() -> StudioKeymapSnapshot {
+        StudioKeymapSnapshot {
+            device_id: "serial:test".to_string(),
+            device_name: "Test Keyboard".to_string(),
+            connection_type: "usb_serial".to_string(),
+            lock_state: StudioLockState::Unlocked,
+            physical_layouts: Vec::new(),
+            selected_physical_layout_index: None,
+            selected_physical_layout_name: Some("Default".to_string()),
+            layout_source: StudioLayoutSource::GridFallback,
+            selected_layout_keys: vec![
+                StudioPhysicalKey {
+                    position: 0,
+                    x: 0,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                    r: 0,
+                    rx: 0,
+                    ry: 0,
+                },
+                StudioPhysicalKey {
+                    position: 1,
+                    x: 100,
+                    y: 0,
+                    width: 100,
+                    height: 100,
+                    r: 0,
+                    rx: 0,
+                    ry: 0,
+                },
+            ],
+            layers: vec![StudioLayer {
+                index: 0,
+                id: 10,
+                name: "Base".to_string(),
+                bindings: vec![
+                    StudioBinding {
+                        position: 0,
+                        binding_label: "&kp A".to_string(),
+                        primary_label: "A".to_string(),
+                        secondary_label: String::new(),
+                        full_label: "&kp A".to_string(),
+                        behavior: "key press".to_string(),
+                        params: vec![0x0007_0004, 0],
+                        raw: StudioRawBinding {
+                            behavior_id: 1,
+                            param1: 0x0007_0004,
+                            param2: 0,
+                        },
+                    },
+                    StudioBinding {
+                        position: 1,
+                        binding_label: "&mt LSHIFT ESC".to_string(),
+                        primary_label: "mt LShift Esc".to_string(),
+                        secondary_label: String::new(),
+                        full_label: "&mt LSHIFT ESC".to_string(),
+                        behavior: "mod-tap".to_string(),
+                        params: vec![0x0007_00e1, 0x0007_0029],
+                        raw: StudioRawBinding {
+                            behavior_id: 2,
+                            param1: 0x0007_00e1,
+                            param2: 0x0007_0029,
+                        },
+                    },
+                ],
+            }],
+            updated_ms: 1,
+        }
+    }
+
+    #[test]
+    fn keymap_backup_round_trips_raw_bindings() {
+        let snapshot = test_snapshot();
+        let backup = keymap_backup_from_snapshot(&snapshot, BTreeMap::new(), "0.0.0-test");
+        let text = serialize_keymap_backup(&backup).unwrap();
+        let parsed = parse_keymap_backup(&text).unwrap();
+
+        assert_eq!(parsed.schema, KEYMAP_BACKUP_SCHEMA);
+        assert_eq!(parsed.layers[0].bindings[1].behavior_id, 2);
+        assert_eq!(parsed.layers[0].bindings[1].param1, 0x0007_00e1);
+        assert_eq!(parsed.layers[0].bindings[1].param2, 0x0007_0029);
+    }
+
+    #[test]
+    fn keymap_restore_plans_one_changed_raw_write_and_skips_unchanged() {
+        let current = test_snapshot();
+        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test");
+        backup.layers[0].bindings[0].param1 = 0x0007_0005;
+        let target_names =
+            BTreeMap::from([(1, "key press".to_string()), (2, "mod_tap".to_string())]);
+        let plan = plan_keymap_restore(&current, Some(&target_names), &backup);
+
+        assert!(plan.report.can_apply);
+        assert_eq!(
+            plan.report.behavior_verification,
+            BehaviorVerification::Done
+        );
+        assert_eq!(plan.report.will_write, 1);
+        assert_eq!(plan.report.unchanged_skipped, 1);
+        assert_eq!(plan.report.changed_keys.len(), 1);
+        assert_eq!(plan.report.changed_keys[0].layer_index, 0);
+        assert_eq!(plan.report.changed_keys[0].position, 0);
+        assert_eq!(plan.writes[0].layer_id, 10);
+        assert_eq!(plan.writes[0].behavior_id, 1);
+        assert_eq!(plan.writes[0].param1, 0x0007_0005);
+    }
+
+    #[test]
+    fn keymap_restore_placeholder_catalog_skips_behavior_verification_but_writes_raw() {
+        let current = test_snapshot();
+        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test");
+        backup.behavior_catalog.clear();
+        backup.layers[0].bindings[0].behavior = "behavior 1".to_string();
+        backup.layers[0].bindings[1].behavior = "behavior 2".to_string();
+        backup.layers[0].bindings[0].param1 = 0x0007_0005;
+
+        let plan = plan_keymap_restore(&current, None, &backup);
+
+        assert_eq!(
+            plan.report.behavior_verification,
+            BehaviorVerification::Skipped
+        );
+        assert_eq!(plan.report.blocked, 0);
+        assert_eq!(plan.report.will_write, 1);
+    }
+
+    #[test]
+    fn keymap_restore_uses_common_positions_for_structure_mismatch() {
+        let current = test_snapshot();
+        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test");
+        backup.layers.push(backup.layers[0].clone());
+        backup.layers[1].index = 1;
+        backup.layers[0].bindings.pop();
+        backup.layers[0].bindings[0].param1 = 0x0007_0005;
+        backup.layers[0].bindings.push(BackupBinding {
+            position: 99,
+            behavior_id: 1,
+            param1: 0x0007_0006,
+            param2: 0,
+            behavior: "key press".to_string(),
+            label: "&kp B".to_string(),
+        });
+
+        let plan = plan_keymap_restore(&current, None, &backup);
+
+        assert!(plan.report.can_apply);
+        assert!(plan.report.errors.is_empty());
+        assert!(plan.report.warnings.is_empty());
+        assert_eq!(plan.report.will_write, 1);
+        assert_eq!(plan.report.changed_keys[0].position, 0);
+        assert_eq!(plan.writes[0].position, 0);
+    }
+
+    #[test]
+    fn keymap_restore_ignores_target_metadata_mismatch_warnings() {
+        let mut current = test_snapshot();
+        current.layers.push(current.layers[0].clone());
+        current.layers[1].index = 1;
+        current.layers[1].id = 11;
+        current.layers[1].name = "Fn".to_string();
+        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test");
+        backup.device.name = "Other".to_string();
+        backup.device.connection_type = "ble_studio".to_string();
+        backup.layout.selected_physical_layout_name = Some("Other layout".to_string());
+        backup.layers.swap(0, 1);
+        backup.layers[0].id = 999;
+
+        let plan = plan_keymap_restore(&current, None, &backup);
+
+        assert!(plan.report.can_apply);
+        assert!(plan.report.warnings.is_empty());
+    }
+
+    #[test]
+    fn keymap_file_errors_cover_version_schema_json_and_size() {
+        assert!(matches!(
+            parse_keymap_backup("{"),
+            Err(KeymapFileError::InvalidFile)
+        ));
+        assert!(matches!(
+            parse_keymap_backup(&" ".repeat(KEYMAP_BACKUP_MAX_BYTES + 1)),
+            Err(KeymapFileError::FileTooLarge)
+        ));
+        let mut backup =
+            keymap_backup_from_snapshot(&test_snapshot(), BTreeMap::new(), "0.0.0-test");
+        backup.schema_version = 999;
+        let text = serialize_keymap_backup(&backup).unwrap();
+        assert!(matches!(
+            parse_keymap_backup(&text),
+            Err(KeymapFileError::UnsupportedVersion)
+        ));
+        backup.schema_version = KEYMAP_BACKUP_SCHEMA_VERSION;
+        backup.schema = "other".to_string();
+        let text = serialize_keymap_backup(&backup).unwrap();
+        assert!(matches!(
+            parse_keymap_backup(&text),
+            Err(KeymapFileError::InvalidFile)
+        ));
+    }
+
+    #[test]
+    fn behavior_name_normalization_treats_common_separators_as_equal() {
+        assert_eq!(
+            normalize_behavior_name("mod-tap"),
+            normalize_behavior_name("MOD_TAP")
+        );
+        assert_eq!(
+            normalize_behavior_name("mod tap"),
+            normalize_behavior_name("mod-tap")
+        );
+    }
+
+    #[test]
+    fn verified_behavior_conflicts_are_blocked() {
+        let current = test_snapshot();
+        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test");
+        backup.layers[0].bindings[0].param1 = 0x0007_0005;
+        let target_names =
+            BTreeMap::from([(1, "sticky key".to_string()), (2, "mod-tap".to_string())]);
+
+        let plan = plan_keymap_restore(&current, Some(&target_names), &backup);
+
+        assert_eq!(plan.report.will_write, 0);
+        assert_eq!(plan.report.blocked, 1);
+        assert!(plan.report.changed_keys.is_empty());
+        assert!(plan
+            .report
+            .warnings
+            .iter()
+            .any(|issue| issue.code == "behavior_conflict"));
     }
 
     #[test]

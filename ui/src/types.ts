@@ -355,6 +355,33 @@ export interface StudioRawBinding {
   param2: number;
 }
 
+export type BehaviorVerification = "done" | "skipped";
+
+export interface RestoreIssue {
+  code: string;
+  layer_index: number | null;
+  position: number | null;
+  message: string;
+}
+
+export interface RestoreChangedKey {
+  layer_index: number;
+  position: number;
+}
+
+export interface RestoreReport {
+  can_apply: boolean;
+  behavior_verification: BehaviorVerification;
+  source_device_name: string;
+  exported_at_ms: number;
+  will_write: number;
+  unchanged_skipped: number;
+  blocked: number;
+  changed_keys: RestoreChangedKey[];
+  warnings: RestoreIssue[];
+  errors: RestoreIssue[];
+}
+
 export type KeyCatalogCategory =
   | "letters"
   | "numbers"

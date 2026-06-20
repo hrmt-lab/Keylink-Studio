@@ -130,6 +130,12 @@ access token、credentials JSON、API response、raw error は画面に表示し
 - タイピング統計ヒートマップ
 - キーテスター
 
+`Export` は、現在デバイス上にある ZMK Studio/NVS のキーマップ状態を `.rawhid-keymap.json` として保存します。これは firmware の `.keymap` ソースを書き換えるものではありません。firmware をフルイレース、または settings reset 付きで焼き直す前の運用バックアップとして使います。
+
+`Restore` は、バックアップ JSON を読み込み、現在キーボードにも存在する layer index と key position の raw binding だけを復元します。backup にしかない layer / position は書き込まず、現在キーボードにしかない layer / position は変更しません。復元対象の差分がない場合は、画面上にその旨を表示し、未保存変更は作りません。復元は即保存ではなく、編集モードの未保存変更として反映されます。永続化するには下部バーの `保存` を押してください。取り消す場合は `変更を破棄` を押します。
+
+レイヤー名、レイヤー数、レイヤー順、物理レイアウト選択は復元対象外です。behavior 名を検証できない場合は強い警告を表示します。この場合は同一 firmware / 近い構成への復元を前提にしてください。BLE Studio 由来のバックアップも raw 復元対象ですが、検証できない場合は USB より安全確認が弱くなります。復元または手動編集で変更したキーは、編集セッション中に色付きで表示されます。
+
 Studio が locked の場合は、キーマップを読み取らず、キーボード側で unlock が必要であることを表示します。Host 側から unlock は実行しません。キーボード側で `&studio_unlock` を実行してから更新してください。
 
 キー右下の `#0`、`#1` などは key position です。ZMK の keymap 上で、そのキーが何番目の position かを表します。

@@ -64,6 +64,16 @@ ZMK Studio 表示・編集は Host Link protocol ではなく、`zmk-studio-api`
 
 編集できる behavior はアプリ側の UI に段階的に追加されています。対応していない behavior や firmware 側に role がない behavior は、`missing_behavior_role` などのエラーになります。
 
+## キーマップバックアップ / 復元の互換性
+
+Keymap backup / restore は Host Link protocol ではなく、ZMK Studio RPC 上の keymap snapshot と edit session を使います。Host Link firmware 側の packet protocol 変更は不要ですが、対象キーボードは ZMK Studio RPC に対応し、Studio が unlocked である必要があります。
+
+バックアップ JSON は firmware の `.keymap` ソースではなく、ZMK Studio が device settings / NVS に持つ現在の key binding 状態を保存します。firmware のフルイレースや settings reset 後の運用復旧を目的とし、`.keymap` 生成・ソース反映は対象外です。
+
+復元は backup と現在キーボードで共通する layer index と key position だけを書き戻します。backup にしかない layer / position は書き込まず、現在キーボードにしかない layer / position は変更しません。device 名、layout 名、layer 名、layer id の違いは復元可否には使いません。共通位置に書き込む差分がない場合は対象なしとして表示し、未保存変更は作りません。
+
+USB serial / CDC ACM と BLE Studio のどちらでも raw binding の復元対象になります。対象 device から behavior 名を取得できる場合は behavior id の意味不一致を検出して該当キーを書き込みません。取得できない場合は強警告を表示し、同一 firmware / 同一構成への復元を前提にします。BLE Studio では behavior 名検証が USB より弱くなる場合があります。
+
 ## 補足
 
 - Host Link `v1` は `DEVICE_HELLO` の capability bits を使って機能ごとの送受信可否を判断します。

@@ -14,6 +14,7 @@ import type {
   StudioBindingLabelPatch,
   StudioKeymapSnapshot,
   StudioRawBinding,
+  RestoreReport,
 } from "./types";
 
 export interface ConfigLocationResult {
@@ -62,6 +63,12 @@ export const probeDevices = () => invoke<ProbeResult[]>("probe_devices");
 export const probeStudioDevices = () => invoke<StudioDeviceStatus[]>("probe_studio_devices");
 export const readStudioKeymap = (deviceId: string) =>
   invoke<StudioKeymapSnapshot>("read_studio_keymap", { deviceId });
+export const studioExportKeymap = (deviceId: string, path: string) =>
+  invoke<void>("studio_export_keymap", { deviceId, path });
+export const studioPreviewKeymapRestore = (deviceId: string, path: string) =>
+  invoke<RestoreReport>("studio_preview_keymap_restore", { deviceId, path });
+export const studioApplyKeymapRestore = (deviceId: string, path: string) =>
+  invoke<[StudioKeymapSnapshot, RestoreReport]>("studio_apply_keymap_restore", { deviceId, path });
 export const studioKeyCatalog = () =>
   invoke<KeyCatalogEntry[]>("studio_key_catalog");
 export const resolveStudioBehaviorLabels = (deviceId: string, rawBindings: StudioRawBinding[]) =>

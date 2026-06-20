@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type Dispatch, type SetStateAction } from "react";
-import { Crosshair, AlertCircle, BarChart3, Keyboard, Lock, RefreshCw, XCircle, Pencil, Save, Trash2, LogOut, Search, Plus, Usb, Bluetooth } from "lucide-react";
+import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { Crosshair, AlertCircle, BarChart3, Keyboard, Lock, RefreshCw, XCircle, Pencil, Save, Trash2, LogOut, Search, Plus, Usb, Bluetooth, Download, Upload } from "lucide-react";
 import {
   getKeyStats,
   onKeyPressEvent,
@@ -8,11 +9,14 @@ import {
   resolveStudioBehaviorLabels,
   studioAddLayer,
   studioAbortEdit,
+  studioApplyKeymapRestore,
   studioBeginEdit,
   studioDiscardChanges,
   studioEndEdit,
+  studioExportKeymap,
   studioHasUnsaved,
   studioKeyCatalog,
+  studioPreviewKeymapRestore,
   studioRemoveLayer,
   studioRenameLayer,
   studioSaveChanges,
@@ -30,6 +34,7 @@ import type {
   KeyCatalogEntry,
   KeyStatsSummary,
   MonitorStatus,
+  RestoreReport,
   StatsPeriod,
   StudioBinding,
   StudioBindingLabelPatch,
@@ -52,10 +57,15 @@ interface KeymapViewerProps {
 
 interface PendingKeyWrite {
   deviceId: string;
+  layerIndex: number;
   layerId: number;
   position: number;
   behavior: EditBehavior;
   previousSnapshot: StudioKeymapSnapshot | null;
+}
+
+function changedKeyId(layerIndex: number, position: number): string {
+  return `${layerIndex}:${position}`;
 }
 
 /** Case-insensitive serial match between a Studio device and Host Link data. */
@@ -450,6 +460,10 @@ export default function KeymapViewer({
     problem: null,
   });
   const [editNotice, setEditNotice] = useState<"saved" | "discarded" | null>(null);
+  const [keymapFileBusy, setKeymapFileBusy] = useState<"export" | "restore" | null>(null);
+  const [restoreReport, setRestoreReport] = useState<RestoreReport | null>(null);
+  const [restoreNotice, setRestoreNotice] = useState<"no_targets" | null>(null);
+  const [changedKeys, setChangedKeys] = useState<Set<string>>(() => new Set());
   const [catalog, setCatalog] = useState<KeyCatalogEntry[]>([]);
   const [pendingKeyWrites, setPendingKeyWrites] = useState(0);
   const [keyWriteErrorCode, setKeyWriteErrorCode] = useState<string | null>(null);
@@ -475,6 +489,13 @@ export default function KeymapViewer({
   );
   const snapshot = selectedId ? snapshotsByDeviceId[selectedId] ?? null : null;
   const layer = snapshot?.layers[activeLayer] ?? null;
+  const changedKeyStyle = useCallback((key: StudioPhysicalKey): CSSProperties | undefined => {
+    if (!changedKeys.has(changedKeyId(activeLayer, key.position))) return undefined;
+    return {
+      backgroundColor: "rgb(var(--accent-rgb) / 0.18)",
+      boxShadow: "inset 0 0 0 2px rgb(var(--accent-rgb) / 0.72)",
+    };
+  }, [activeLayer, changedKeys]);
 
   // Prefer the firmware UID contract: Studio serial_number is the 16-char UID
   // hex, while Host Link exposes the same value as uid:<hex>. Keep older
@@ -521,6 +542,9 @@ export default function KeymapViewer({
   const readDevice = useCallback(async (device: StudioDeviceStatus, clearBeforeRead = false) => {
     setReading(true);
     setError(null);
+    setRestoreReport(null);
+    setRestoreNotice(null);
+    setChangedKeys(new Set());
     if (clearBeforeRead) {
       setSnapshotsByDeviceId((current) => {
         if (!(device.id in current)) return current;
@@ -583,6 +607,9 @@ export default function KeymapViewer({
       return;
     }
     setError(null);
+    setRestoreReport(null);
+    setRestoreNotice(null);
+    setChangedKeys(new Set());
     try {
       const refreshed = await refreshStudioDevices();
       const nextAvailable = refreshed
@@ -606,6 +633,9 @@ export default function KeymapViewer({
     if (!selected || pendingKeyWrites > 0) return;
     setError(null);
     setKeyWriteErrorCode(null);
+    setRestoreReport(null);
+    setRestoreNotice(null);
+    setChangedKeys(new Set());
     keyWriteQueueRef.current = [];
     latestKeyWriteSnapshotRef.current = null;
     setEditNotice(null);
@@ -638,6 +668,11 @@ export default function KeymapViewer({
         try {
           const result = await studioSetKey(job.deviceId, job.layerId, job.position, job.behavior);
           latestKeyWriteSnapshotRef.current = result;
+          setChangedKeys((current) => {
+            const next = new Set(current);
+            next.add(changedKeyId(job.layerIndex, job.position));
+            return next;
+          });
           setPendingKeyWrites((current) => {
             const next = Math.max(0, current - 1);
             if (next === 0 && latestKeyWriteSnapshotRef.current) {
@@ -673,6 +708,9 @@ export default function KeymapViewer({
     setError(null);
     setEditNotice(null);
     setKeyWriteErrorCode(null);
+    setRestoreReport(null);
+    setRestoreNotice(null);
+    if (forceDiscard) setChangedKeys(new Set());
     setPicker(null);
     setEditState((current) => ({ ...current, operation: "setting", problem: null }));
     try {
@@ -723,6 +761,9 @@ export default function KeymapViewer({
     try {
       await studioSaveChanges(selected.id);
       setEditState((current) => ({ ...current, dirty: false, operation: "idle", problem: null }));
+      setRestoreReport(null);
+      setRestoreNotice(null);
+      setChangedKeys(new Set());
       setEditNotice("saved");
     } catch (e) {
       const code = String(e);
@@ -742,6 +783,9 @@ export default function KeymapViewer({
       setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
       setPicker(null);
       setEditState((current) => ({ ...current, dirty: false, operation: "idle", problem: null }));
+      setRestoreReport(null);
+      setRestoreNotice(null);
+      setChangedKeys(new Set());
       setEditNotice("discarded");
       return true;
     } catch (e) {
@@ -766,6 +810,9 @@ export default function KeymapViewer({
     try {
       await studioEndEdit(selected.id);
       setPicker(null);
+      setRestoreReport(null);
+      setRestoreNotice(null);
+      setChangedKeys(new Set());
       setEditState({ mode: "viewing", dirty: false, operation: "idle", problem: null });
     } catch (e) {
       const code = String(e);
@@ -774,11 +821,109 @@ export default function KeymapViewer({
     }
   }, [discardEdit, editState.dirty, selected, t]);
 
+  const exportKeymap = useCallback(async () => {
+    if (!selected || keymapFileBusy || pendingKeyWrites > 0 || editState.operation !== "idle") return;
+    setError(null);
+    setRestoreReport(null);
+    setRestoreNotice(null);
+    setChangedKeys(new Set());
+    const defaultName = `${selected.display_name.replace(/[\\/:*?"<>|]+/g, "-")}.rawhid-keymap.json`;
+    const path = await saveDialog({
+      defaultPath: defaultName,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (!path) return;
+    setKeymapFileBusy("export");
+    try {
+      await studioExportKeymap(selected.id, path);
+      setEditNotice(null);
+      window.alert(t("keymap.export.done"));
+    } catch (e) {
+      setError(errorLabel(String(e), t));
+    } finally {
+      setKeymapFileBusy(null);
+    }
+  }, [editState.operation, keymapFileBusy, pendingKeyWrites, selected, t]);
+
+  const ensureRestoreEditSession = useCallback(async (): Promise<boolean> => {
+    if (!selected) return false;
+    const labelPatches = snapshot ? resolvedLabelPatchesFromSnapshot(snapshot) : [];
+    const hasDirty =
+      editState.mode === "editing" &&
+      (editState.dirty || (await studioHasUnsaved(selected.id).catch(() => editState.dirty)));
+    if (hasDirty) {
+      const discard = window.confirm(t("keymap.restore.discard_confirm"));
+      if (!discard) return false;
+    }
+    setEditState((current) => ({ ...current, operation: "setting", problem: null }));
+    try {
+      const result = applyBehaviorLabelPatches(
+        await studioBeginEdit(selected.id, hasDirty, labelPatches),
+        labelPatches,
+      );
+      setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
+      if (hasDirty) setChangedKeys(new Set());
+      if (catalog.length === 0) setCatalog(await studioKeyCatalog());
+      setEditState({ mode: "editing", dirty: false, operation: "idle", problem: null });
+      return true;
+    } catch (e) {
+      const code = String(e);
+      setEditState((current) => ({ ...current, operation: "idle", problem: mapEditProblem(code) }));
+      setError(errorLabel(code, t));
+      return false;
+    }
+  }, [catalog.length, editState.dirty, editState.mode, mapEditProblem, selected, setSnapshotsByDeviceId, snapshot, t]);
+
+  const restoreKeymap = useCallback(async () => {
+    if (!selected || keymapFileBusy || pendingKeyWrites > 0 || editState.operation !== "idle") return;
+    setError(null);
+    setRestoreReport(null);
+    setRestoreNotice(null);
+    setChangedKeys(new Set());
+    const selectedPath = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (!selectedPath || Array.isArray(selectedPath)) return;
+    setKeymapFileBusy("restore");
+    try {
+      const ready = await ensureRestoreEditSession();
+      if (!ready) return;
+      const preview = await studioPreviewKeymapRestore(selected.id, selectedPath);
+      if (preview.can_apply && preview.will_write === 0 && preview.blocked === 0) {
+        setRestoreReport(preview);
+        setRestoreNotice("no_targets");
+        setEditState({ mode: "editing", dirty: false, operation: "idle", problem: null });
+        return;
+      }
+      const confirmText = restoreConfirmText(preview, t);
+      if (!preview.can_apply || !window.confirm(confirmText)) {
+        setRestoreReport(preview);
+        return;
+      }
+      const [nextSnapshot, report] = await studioApplyKeymapRestore(selected.id, selectedPath);
+      setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: nextSnapshot }));
+      setRestoreReport(report);
+      setChangedKeys(new Set(report.changed_keys.map((key) => changedKeyId(key.layer_index, key.position))));
+      setEditState({ mode: "editing", dirty: report.will_write > 0, operation: "idle", problem: null });
+      window.alert(t("keymap.restore.done"));
+    } catch (e) {
+      const code = String(e);
+      setError(errorLabel(code, t));
+    } finally {
+      setKeymapFileBusy(null);
+      setEditState((current) => ({ ...current, operation: "idle" }));
+    }
+  }, [editState.operation, ensureRestoreEditSession, keymapFileBusy, pendingKeyWrites, selected, setSnapshotsByDeviceId, t]);
+
   const setKey = useCallback((key: StudioPhysicalKey, targetLayer: StudioLayer, behavior: EditBehavior) => {
     if (!selected || editState.operation === "saving" || editState.operation === "discarding" || editState.operation === "ending") return;
     const previousSnapshot = snapshot;
     setEditNotice(null);
     setKeyWriteErrorCode(null);
+    setRestoreReport(null);
+    setRestoreNotice(null);
     setPicker(null);
     setPendingKeyWrites((current) => current + 1);
     setEditState((current) => ({ ...current, problem: null }));
@@ -794,6 +939,7 @@ export default function KeymapViewer({
     }
     keyWriteQueueRef.current.push({
       deviceId: selected.id,
+      layerIndex: snapshot?.layers.findIndex((item) => item.id === targetLayer.id) ?? targetLayer.index,
       layerId: targetLayer.id,
       position: key.position,
       behavior,
@@ -813,6 +959,8 @@ export default function KeymapViewer({
       setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
       const addedIndex = result.layers.findIndex((item) => !previousLayerIds.has(item.id));
       setActiveLayer(addedIndex >= 0 ? addedIndex : Math.max(0, result.layers.length - 1));
+      setRestoreReport(null);
+      setRestoreNotice(null);
       setPicker(null);
       setEditState((current) => ({ ...current, dirty: true, operation: "idle", problem: null }));
       return result;
@@ -835,6 +983,8 @@ export default function KeymapViewer({
       setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
       const nextIndex = result.layers.findIndex((item) => item.id === targetLayer.id);
       if (nextIndex >= 0) setActiveLayer(nextIndex);
+      setRestoreReport(null);
+      setRestoreNotice(null);
       setPicker(null);
       setEditState((current) => ({ ...current, dirty: true, operation: "idle", problem: null }));
       return result;
@@ -856,6 +1006,8 @@ export default function KeymapViewer({
       const result = await studioRemoveLayer(selected.id, targetLayer.index);
       setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
       setActiveLayer((current) => Math.min(current, Math.max(0, result.layers.length - 1)));
+      setRestoreReport(null);
+      setRestoreNotice(null);
       setPicker(null);
       setEditState((current) => ({ ...current, dirty: true, operation: "idle", problem: null }));
       return result;
@@ -871,6 +1023,12 @@ export default function KeymapViewer({
   useEffect(() => {
     setPicker(null);
   }, [selectedId, viewMode, activeLayer]);
+
+  useEffect(() => {
+    setRestoreReport(null);
+    setRestoreNotice(null);
+    setChangedKeys(new Set());
+  }, [selectedId]);
 
   useEffect(() => {
     if (!editNotice) return undefined;
@@ -890,6 +1048,9 @@ export default function KeymapViewer({
   const structuralEditBusy = busy || keyWritesPending || editState.operation !== "idle";
   const viewerAvailable = selected?.keymap_viewer_status === "available";
   const selectedLocked = selected?.keymap_viewer_status === "locked" || selected?.lock_state === "locked";
+  const fileOperationBusy = keymapFileBusy !== null || keyWritesPending || editState.operation !== "idle";
+  const canExport = !!selected && !!snapshot && !busy && !fileOperationBusy;
+  const canRestore = !!selected && viewerAvailable && !selectedLocked && !busy && !fileOperationBusy;
 
   return (
     <div className="p-6 w-full space-y-5">
@@ -899,6 +1060,24 @@ export default function KeymapViewer({
           <p className="mt-0.5 text-sm text-muted">{t("keymap.subtitle")}</p>
         </div>
         <div className="flex items-center gap-2">
+          <button
+            onClick={() => void exportKeymap()}
+            disabled={!canExport}
+            title={t("keymap.export")}
+            className="btn-neu flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium text-ink disabled:opacity-60"
+          >
+            <Download size={15} />
+            {keymapFileBusy === "export" ? t("keymap.exporting") : t("keymap.export")}
+          </button>
+          <button
+            onClick={() => void restoreKeymap()}
+            disabled={!canRestore}
+            title={t("keymap.restore")}
+            className="btn-neu flex items-center gap-2 rounded-full px-4 py-2.5 text-sm font-medium text-ink disabled:opacity-60"
+          >
+            <Upload size={15} />
+            {keymapFileBusy === "restore" ? t("keymap.restoring") : t("keymap.restore")}
+          </button>
           <button
             onClick={refresh}
             disabled={busy || editing}
@@ -911,6 +1090,12 @@ export default function KeymapViewer({
       </div>
 
       {(error || studioError) && <Notice>{error ?? friendlyError(studioError, t)}</Notice>}
+      {restoreNotice === "no_targets" && (
+        <InfoNotice>{t("keymap.restore.no_targets")}</InfoNotice>
+      )}
+      {restoreReport && restoreReportNotice(restoreReport, t) && (
+        <WarnNotice>{restoreReportNotice(restoreReport, t)}</WarnNotice>
+      )}
 
       <div className="space-y-5">
         <section className="rounded-card bg-surface p-4 space-y-3">
@@ -993,7 +1178,9 @@ export default function KeymapViewer({
                   setActiveLayer={setActiveLayer}
                   layer={layer}
                   reportedLayerIndex={reportedLayerIndex}
+                  keyStyle={changedKeyStyle}
                   editing={editing}
+                  hasChangedKeys={changedKeys.size > 0}
                   editBusy={structuralEditBusy}
                   editAvailable={viewerAvailable && !selectedLocked}
                   onToggleEdit={() => editing ? void endEdit() : void beginEdit(false)}
@@ -1085,6 +1272,7 @@ function KeymapContent({
   marquee,
   onKeyClick,
   editing = false,
+  hasChangedKeys = false,
   editBusy = false,
   editAvailable = false,
   onToggleEdit,
@@ -1103,6 +1291,7 @@ function KeymapContent({
   /** Optional element shown to the right of the layer tabs (tester typed-char marquee). */
   marquee?: ReactNode;
   editing?: boolean;
+  hasChangedKeys?: boolean;
   editBusy?: boolean;
   editAvailable?: boolean;
   onToggleEdit?: () => void;
@@ -1258,6 +1447,12 @@ function KeymapContent({
           })}
           </div>
         </div>
+        {editing && hasChangedKeys && (
+          <div className="flex shrink-0 items-center gap-1.5 pt-2 text-xs font-medium text-muted">
+            <span className="h-3 w-3 rounded-sm bg-accent-soft ring-1 ring-accent/70" aria-hidden="true" />
+            <span>{t("keymap.changed_key_legend")}</span>
+          </div>
+        )}
         {editAvailable && onToggleEdit && (
           /* pt-2 matches the layer-tab scroller above so this control row stays
              vertically aligned with the tabs (parent is items-start). */
@@ -2447,6 +2642,75 @@ function Notice({ children }: { children: ReactNode }) {
       <span>{children}</span>
     </div>
   );
+}
+
+function WarnNotice({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex items-start gap-2.5 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-800 ring-1 ring-amber-200">
+      <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
+      <span>{children}</span>
+    </div>
+  );
+}
+
+function InfoNotice({ children }: { children: ReactNode }) {
+  return (
+    <div className="flex items-start gap-2.5 rounded-lg bg-accent-soft px-4 py-3 text-sm text-accent-deep ring-1 ring-accent/25">
+      <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
+      <span>{children}</span>
+    </div>
+  );
+}
+
+function restoreConfirmText(
+  report: RestoreReport,
+  t: (key: TranslationKey, vars?: Record<string, string | number>) => string,
+): string {
+  const exportedAt = new Date(report.exported_at_ms).toLocaleString();
+  const lines = [
+    t("keymap.restore.summary", {
+      device: report.source_device_name,
+      date: exportedAt,
+      write: report.will_write,
+      unchanged: report.unchanged_skipped,
+      blocked: report.blocked,
+    }),
+  ];
+  if (report.behavior_verification === "skipped") lines.push(t("keymap.restore.verify_skipped"));
+  for (const issue of report.errors) {
+    lines.push(restoreIssueLabel(issue.code, t));
+  }
+  return lines.join("\n\n");
+}
+
+function restoreReportNotice(
+  report: RestoreReport,
+  t: (key: TranslationKey, vars?: Record<string, string | number>) => string,
+): string | null {
+  if (report.will_write === 0 && report.blocked === 0 && report.errors.length === 0) return null;
+  const parts: string[] = [];
+  if (report.behavior_verification === "skipped" && report.will_write > 0) {
+    parts.push(t("keymap.restore.verify_skipped"));
+  }
+  if (report.blocked > 0) parts.push(t("keymap.restore.partial", { count: report.blocked }));
+  for (const issue of report.errors) parts.push(restoreIssueLabel(issue.code, t));
+  return parts.length > 0 ? parts.join(" ") : null;
+}
+
+function restoreIssueLabel(
+  code: string,
+  t: (key: TranslationKey, vars?: Record<string, string | number>) => string,
+): string {
+  switch (code) {
+    case "layer_count":
+      return t("keymap.restore.abort.layer_count");
+    case "position_count":
+      return t("keymap.restore.abort.position_count");
+    case "position_set":
+      return t("keymap.restore.abort.position_set");
+    default:
+      return code;
+  }
 }
 
 function errorLabel(code: string, t: (key: TranslationKey, vars?: Record<string, string | number>) => string) {

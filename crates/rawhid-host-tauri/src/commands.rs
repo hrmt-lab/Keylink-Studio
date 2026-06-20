@@ -19,8 +19,9 @@ use rawhid_host_core::{
     runner::{uplink_device_key, RunEvent, Runner},
     stats::{KeyStatsSummary, SharedKeyStatsStore, StatsPeriod},
     studio::{
-        key_catalog, probe_usb_serial_devices, read_keymap_for_device, EditBehavior,
-        KeyCatalogEntry, StudioDeviceStatus, StudioEditSession, StudioError, StudioKeymapSnapshot,
+        key_catalog, probe_studio_devices as probe_all_studio_devices, read_keymap_for_device,
+        resolve_behavior_labels_for_device, EditBehavior, KeyCatalogEntry, StudioBindingLabelPatch,
+        StudioDeviceStatus, StudioEditSession, StudioError, StudioKeymapSnapshot, StudioRawBinding,
     },
 };
 use tauri::{AppHandle, Emitter, State};
@@ -349,7 +350,7 @@ pub async fn probe_studio_devices(
         return Err("port_busy".to_string());
     }
     let studio_config = state.config.lock().unwrap().studio.clone();
-    tauri::async_runtime::spawn_blocking(move || probe_usb_serial_devices(&studio_config))
+    tauri::async_runtime::spawn_blocking(move || probe_all_studio_devices(&studio_config))
         .await
         .map_err(|_| "studio_probe_failed".to_string())
 }
@@ -362,12 +363,14 @@ pub async fn read_studio_keymap(
     let edit = Arc::clone(&state.studio_edit);
     let studio_config = state.config.lock().unwrap().studio.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let mut guard = edit.lock().unwrap();
-        if let Some(session) = guard.as_mut() {
-            if session.device_id == device_id {
-                return session.snapshot().map_err(studio_error_code);
+        {
+            let mut guard = edit.lock().unwrap();
+            if let Some(session) = guard.as_mut() {
+                if session.device_id == device_id {
+                    return session.snapshot().map_err(studio_error_code);
+                }
+                return Err("port_busy".to_string());
             }
-            return Err("port_busy".to_string());
         }
         read_keymap_for_device(&device_id, &studio_config).map_err(studio_error_code)
     })
@@ -486,9 +489,40 @@ pub fn studio_key_catalog() -> Vec<KeyCatalogEntry> {
 }
 
 #[tauri::command]
+pub async fn resolve_studio_behavior_labels(
+    device_id: String,
+    raw_bindings: Vec<StudioRawBinding>,
+    state: State<'_, AppState>,
+) -> Result<Vec<StudioBindingLabelPatch>, String> {
+    let studio_config = state.config.lock().unwrap().studio.clone();
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        {
+            let mut guard = edit.lock().unwrap();
+            if let Some(session) = guard.as_mut() {
+                if session.device_id == device_id {
+                    return session
+                        .resolve_behavior_labels(
+                            raw_bindings,
+                            Duration::from_millis(studio_config.keymap_read_timeout_ms.max(1)),
+                        )
+                        .map_err(studio_error_code);
+                }
+                return Err(studio_error_code(StudioError::PortBusy));
+            }
+        }
+        resolve_behavior_labels_for_device(&device_id, raw_bindings, &studio_config)
+            .map_err(studio_error_code)
+    })
+    .await
+    .map_err(|_| "studio_behavior_resolve_failed".to_string())?
+}
+
+#[tauri::command]
 pub async fn studio_begin_edit(
     device_id: String,
     force_discard: bool,
+    label_patches: Vec<StudioBindingLabelPatch>,
     state: State<'_, AppState>,
 ) -> Result<StudioKeymapSnapshot, String> {
     let studio_config = state.config.lock().unwrap().studio.clone();
@@ -497,6 +531,7 @@ pub async fn studio_begin_edit(
         let mut guard = edit.lock().unwrap();
         if let Some(session) = guard.as_mut() {
             if session.device_id == device_id {
+                session.seed_behavior_labels(&label_patches);
                 if force_discard {
                     return session.discard().map_err(studio_error_code);
                 }
@@ -512,9 +547,10 @@ pub async fn studio_begin_edit(
             }
         }
 
-        let mut session =
-            StudioEditSession::open(&device_id, &studio_config).map_err(studio_error_code)?;
-        let snapshot = session.snapshot().map_err(studio_error_code)?;
+        let (session, snapshot) = StudioEditSession::open_with_snapshot(&device_id, &studio_config)
+            .map_err(studio_error_code)?;
+        let mut session = session;
+        session.seed_behavior_labels(&label_patches);
         *guard = Some(session);
         Ok(snapshot)
     })
@@ -699,6 +735,32 @@ pub async fn studio_end_edit(device_id: String, state: State<'_, AppState>) -> R
     .map_err(|_| "studio_end_edit_failed".to_string())?
 }
 
+#[tauri::command]
+pub async fn studio_abort_edit(
+    device_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = edit.lock().unwrap();
+        let Some(session) = guard.as_ref() else {
+            return Ok(());
+        };
+        if session.device_id != device_id {
+            tracing::debug!(
+                requested_device_id = %device_id,
+                active_device_id = %session.device_id,
+                "ignored stale studio edit abort"
+            );
+            return Ok(());
+        }
+        *guard = None;
+        Ok(())
+    })
+    .await
+    .map_err(|_| "studio_abort_edit_failed".to_string())?
+}
+
 fn studio_error_code(error: StudioError) -> String {
     match error {
         StudioError::DeviceNotFound => "device_not_found",
@@ -718,6 +780,7 @@ fn studio_error_code(error: StudioError) -> String {
         StudioError::UnsavedChangesExist => "unsaved_changes_exist",
         StudioError::SessionDeviceMismatch => "session_device_mismatch",
         StudioError::PortBusy => "port_busy",
+        StudioError::EditingUnsupportedForBle => "editing_unsupported_for_ble",
         StudioError::AddLayerFailed => "add_layer_failed",
         StudioError::AddLayerNoSpace => "add_layer_no_space",
         StudioError::RemoveLayerFailed => "remove_layer_failed",

@@ -268,9 +268,11 @@ export type StudioErrorCode =
   | "device_not_found"
   | "keymap_read_failed";
 
+export type StudioConnectionType = "usb_serial" | "ble_studio" | string;
+
 export interface StudioDeviceStatus {
   id: string;
-  connection_type: string;
+  connection_type: StudioConnectionType;
   port_name: string;
   display_name: string;
   vid: number | null;
@@ -290,7 +292,7 @@ export type StudioLayoutSource = "studio_physical_layout" | "grid_fallback";
 export interface StudioKeymapSnapshot {
   device_id: string;
   device_name: string;
-  connection_type: string;
+  connection_type: StudioConnectionType;
   lock_state: StudioLockState;
   physical_layouts: StudioPhysicalLayout[];
   selected_physical_layout_index: number | null;
@@ -334,6 +336,17 @@ export interface StudioBinding {
   behavior: string;
   params: number[];
   raw: StudioRawBinding;
+}
+
+export interface StudioBindingLabelPatch {
+  behavior_id: number;
+  param1: number;
+  param2: number;
+  behavior: string;
+  binding_label: string;
+  primary_label: string;
+  secondary_label: string;
+  full_label: string;
 }
 
 export interface StudioRawBinding {

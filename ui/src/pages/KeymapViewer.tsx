@@ -1,11 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type Dispatch, type SetStateAction } from "react";
-import { Crosshair, AlertCircle, BarChart3, Keyboard, Lock, RefreshCw, XCircle, Pencil, Save, Trash2, LogOut, Search, Plus } from "lucide-react";
+import { Crosshair, AlertCircle, BarChart3, Keyboard, Lock, RefreshCw, XCircle, Pencil, Save, Trash2, LogOut, Search, Plus, Usb, Bluetooth } from "lucide-react";
 import {
   getKeyStats,
   onKeyPressEvent,
   onKeyStatsUpdated,
   readStudioKeymap,
+  resolveStudioBehaviorLabels,
   studioAddLayer,
+  studioAbortEdit,
   studioBeginEdit,
   studioDiscardChanges,
   studioEndEdit,
@@ -28,10 +30,12 @@ import type {
   MonitorStatus,
   StatsPeriod,
   StudioBinding,
+  StudioBindingLabelPatch,
   StudioDeviceStatus,
   StudioKeymapSnapshot,
   StudioLayer,
   StudioPhysicalKey,
+  StudioRawBinding,
 } from "../types";
 
 interface KeymapViewerProps {
@@ -44,6 +48,14 @@ interface KeymapViewerProps {
   status: MonitorStatus;
 }
 
+interface PendingKeyWrite {
+  deviceId: string;
+  layerId: number;
+  position: number;
+  behavior: EditBehavior;
+  previousSnapshot: StudioKeymapSnapshot | null;
+}
+
 /** Case-insensitive serial match between a Studio device and Host Link data. */
 function serialsMatch(a: string | null, b: string | null): boolean {
   if (!a || !b) return false;
@@ -52,6 +64,290 @@ function serialsMatch(a: string | null, b: string | null): boolean {
 
 function compareDeviceName(a: string, b: string): number {
   return a.localeCompare(b, undefined, { sensitivity: "base", numeric: true });
+}
+
+function rawBindingKey(binding: StudioRawBinding): string {
+  return `${binding.behavior_id}:${binding.param1}:${binding.param2}`;
+}
+
+function unresolvedRawBindings(snapshot: StudioKeymapSnapshot): StudioRawBinding[] {
+  const seen = new Set<string>();
+  const bindings: StudioRawBinding[] = [];
+  for (const layer of snapshot.layers) {
+    for (const binding of layer.bindings) {
+      if (!binding.behavior.startsWith("behavior ")) continue;
+      const key = rawBindingKey(binding.raw);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      bindings.push(binding.raw);
+    }
+  }
+  return bindings;
+}
+
+function resolvedLabelPatchesFromSnapshot(snapshot: StudioKeymapSnapshot): StudioBindingLabelPatch[] {
+  const seen = new Set<string>();
+  const patches: StudioBindingLabelPatch[] = [];
+  for (const layer of snapshot.layers) {
+    for (const binding of layer.bindings) {
+      if (binding.behavior.startsWith("behavior ")) continue;
+      const key = rawBindingKey(binding.raw);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      patches.push({
+        behavior_id: binding.raw.behavior_id,
+        param1: binding.raw.param1,
+        param2: binding.raw.param2,
+        behavior: binding.behavior,
+        binding_label: binding.binding_label,
+        primary_label: binding.primary_label,
+        secondary_label: binding.secondary_label,
+        full_label: binding.full_label,
+      });
+    }
+  }
+  return patches;
+}
+
+function applyBehaviorLabelPatches(
+  snapshot: StudioKeymapSnapshot,
+  patches: StudioBindingLabelPatch[],
+): StudioKeymapSnapshot {
+  if (patches.length === 0) return snapshot;
+  const patchByRaw = new Map(patches.map((patch) => [
+    rawBindingKey(patch),
+    patch,
+  ]));
+  return {
+    ...snapshot,
+    layers: snapshot.layers.map((layer) => ({
+      ...layer,
+      bindings: layer.bindings.map((binding) => {
+        const patch = patchByRaw.get(rawBindingKey(binding.raw));
+        if (!patch) return binding;
+        return {
+          ...binding,
+          behavior: patch.behavior,
+          binding_label: patch.binding_label,
+          primary_label: patch.primary_label,
+          secondary_label: patch.secondary_label,
+          full_label: patch.full_label,
+        };
+      }),
+    })),
+  };
+}
+
+function optimisticSnapshotForSetKey(
+  snapshot: StudioKeymapSnapshot,
+  layerId: number,
+  position: number,
+  behavior: EditBehavior,
+  catalog: KeyCatalogEntry[],
+): StudioKeymapSnapshot {
+  const labels = optimisticLabelsForBehavior(behavior, catalog);
+  return {
+    ...snapshot,
+    layers: snapshot.layers.map((layer) => {
+      if (layer.id !== layerId) return layer;
+      return {
+        ...layer,
+        bindings: layer.bindings.map((binding) => {
+          if (binding.position !== position) return binding;
+          return {
+            ...binding,
+            behavior: labels.behavior,
+            binding_label: labels.full_label,
+            primary_label: labels.primary_label,
+            secondary_label: labels.secondary_label,
+            full_label: labels.full_label,
+            params: labels.params,
+          };
+        }),
+      };
+    }),
+    updated_ms: Date.now(),
+  };
+}
+
+function optimisticLabelsForBehavior(
+  behavior: EditBehavior,
+  catalog: KeyCatalogEntry[],
+): {
+  behavior: string;
+  primary_label: string;
+  secondary_label: string;
+  full_label: string;
+  params: number[];
+} {
+  switch (behavior.kind) {
+    case "key_press": {
+      const label = keyUsageDisplayLabel(behavior.hid_usage, catalog);
+      return {
+        behavior: "key press",
+        primary_label: label,
+        secondary_label: "",
+        full_label: `&kp ${label}`,
+        params: [behavior.hid_usage, 0],
+      };
+    }
+    case "transparent":
+      return {
+        behavior: "transparent",
+        primary_label: "&trans",
+        secondary_label: "",
+        full_label: "&trans",
+        params: [0, 0],
+      };
+    case "none":
+      return {
+        behavior: "none",
+        primary_label: "",
+        secondary_label: "",
+        full_label: "&none",
+        params: [0, 0],
+      };
+    case "momentary_layer":
+      return layerLabel("momentary layer", "mo", behavior.target_layer_index);
+    case "toggle_layer":
+      return layerLabel("toggle layer", "tog", behavior.target_layer_index);
+    case "to_layer":
+      return layerLabel("to layer", "to", behavior.target_layer_index);
+    case "mod_tap": {
+      const hold = modifierUsageDisplayLabel(behavior.hold_hid_usage);
+      const tap = keyUsageDisplayLabel(behavior.tap_hid_usage, catalog);
+      return {
+        behavior: "mod-tap",
+        primary_label: `mt ${hold} ${tap}`,
+        secondary_label: "",
+        full_label: `&mt ${hold} ${tap}`,
+        params: [behavior.hold_hid_usage, behavior.tap_hid_usage],
+      };
+    }
+    case "layer_tap": {
+      const tap = keyUsageDisplayLabel(behavior.tap_hid_usage, catalog);
+      return {
+        behavior: "layer-tap",
+        primary_label: `lt ${behavior.target_layer_index} ${tap}`,
+        secondary_label: "",
+        full_label: `&lt ${behavior.target_layer_index} ${tap}`,
+        params: [behavior.target_layer_index, behavior.tap_hid_usage],
+      };
+    }
+    case "sticky_key": {
+      const label = keyUsageDisplayLabel(behavior.hid_usage, catalog);
+      return {
+        behavior: "sticky key",
+        primary_label: `sk ${label}`,
+        secondary_label: "",
+        full_label: `&sk ${label}`,
+        params: [behavior.hid_usage, 0],
+      };
+    }
+    case "sticky_layer":
+      return layerLabel("sticky layer", "sl", behavior.target_layer_index);
+    case "bluetooth":
+      return commandLabel("bluetooth", `&bt ${behavior.command} ${behavior.value}`, [behavior.command, behavior.value]);
+    case "output_selection":
+      return commandLabel("output selection", outputCommandLabel(behavior.value), [behavior.value, 0]);
+    case "mouse_key_press":
+      return commandLabel("mouse key press", mouseCommandLabel(MOUSE_BUTTON_COMMANDS, behavior.value, "&mkp"), [behavior.value, 0]);
+    case "mouse_move":
+      return commandLabel("mouse move", mouseCommandLabel(MOUSE_MOVE_COMMANDS, behavior.value, "&mmv"), [behavior.value, 0]);
+    case "mouse_scroll":
+      return commandLabel("mouse scroll", mouseCommandLabel(MOUSE_SCROLL_COMMANDS, behavior.value, "&msc"), [behavior.value, 0]);
+    case "caps_word":
+      return commandLabel("caps word", "&caps_word", [0, 0]);
+    case "key_repeat":
+      return commandLabel("key repeat", "&key_repeat", [0, 0]);
+    case "reset":
+      return commandLabel("reset", "&reset", [0, 0]);
+    case "bootloader":
+      return commandLabel("bootloader", "&bootloader", [0, 0]);
+    case "studio_unlock":
+      return commandLabel("studio unlock", "&studio_unlock", [0, 0]);
+    case "grave_escape":
+      return commandLabel("grave/escape", "&gresc", [0, 0]);
+  }
+}
+
+function layerLabel(behavior: string, prefix: string, layerIndex: number) {
+  return {
+    behavior,
+    primary_label: `${prefix} ${layerIndex}`,
+    secondary_label: "",
+    full_label: `&${prefix} ${layerIndex}`,
+    params: [layerIndex, 0],
+  };
+}
+
+function commandLabel(behavior: string, fullLabel: string, params: number[]) {
+  return {
+    behavior,
+    primary_label: fullLabel,
+    secondary_label: "",
+    full_label: fullLabel,
+    params,
+  };
+}
+
+function keyUsageDisplayLabel(usage: number, catalog: KeyCatalogEntry[]): string {
+  const modifierBits = (usage >>> 24) & 0xff;
+  const baseUsage = usage & 0x00ff_ffff;
+  const baseLabel = catalog.find((entry) => entry.hid_usage === baseUsage)?.display
+    ?? `0x${baseUsage.toString(16)}`;
+  if (modifierBits === 0) return baseLabel;
+  const mods = MODIFIER_OPTIONS
+    .filter((option) => (modifierBits & option.modifierBit) !== 0)
+    .map((option) => modifierShortLabel(option.zmkName));
+  return mods.reduceRight((label, mod) => `${mod}(${label})`, baseLabel);
+}
+
+function modifierUsageDisplayLabel(usage: number): string {
+  const modifierBits = (usage >>> 24) & 0xff;
+  const baseUsage = usage & 0x00ff_ffff;
+  const base = MODIFIER_OPTIONS.find((option) => option.baseUsage === baseUsage);
+  const baseLabel = base ? modifierShortLabel(base.zmkName) : `0x${baseUsage.toString(16)}`;
+  if (modifierBits === 0) return baseLabel;
+  return MODIFIER_OPTIONS
+    .filter((option) => (modifierBits & option.modifierBit) !== 0)
+    .map((option) => modifierShortLabel(option.zmkName))
+    .reduce((label, mod) => `${label}(${mod})`, baseLabel);
+}
+
+function modifierShortLabel(label: string): string {
+  switch (label) {
+    case "LCTRL":
+      return "LC";
+    case "LSHIFT":
+      return "LS";
+    case "LALT":
+      return "LA";
+    case "LGUI":
+      return "LG";
+    case "RCTRL":
+      return "RC";
+    case "RSHIFT":
+      return "RS";
+    case "RALT":
+      return "RA";
+    case "RGUI":
+      return "RG";
+    default:
+      return label;
+  }
+}
+
+function outputCommandLabel(value: number): string {
+  return OUTPUT_COMMANDS.find((command) => command.value === value)?.title ?? `&out ${value}`;
+}
+
+function mouseCommandLabel(
+  commands: Array<{ title: string; value: number }>,
+  value: number,
+  fallbackPrefix: string,
+): string {
+  return commands.find((command) => command.value === value)?.title ?? `${fallbackPrefix} ${value}`;
 }
 
 export default function KeymapViewer({
@@ -77,11 +373,17 @@ export default function KeymapViewer({
   });
   const [editNotice, setEditNotice] = useState<"saved" | "discarded" | null>(null);
   const [catalog, setCatalog] = useState<KeyCatalogEntry[]>([]);
+  const [pendingKeyWrites, setPendingKeyWrites] = useState(0);
+  const [keyWriteErrorCode, setKeyWriteErrorCode] = useState<string | null>(null);
   const [picker, setPicker] = useState<{
     key: StudioPhysicalKey;
     layer: StudioLayer;
     rect: { left: number; top: number; width: number; height: number };
   } | null>(null);
+  const behaviorResolveKeysRef = useRef<Set<string>>(new Set());
+  const latestKeyWriteSnapshotRef = useRef<StudioKeymapSnapshot | null>(null);
+  const keyWriteQueueRef = useRef<PendingKeyWrite[]>([]);
+  const keyWriteActiveRef = useRef(false);
 
   const devices = useMemo(
     () => studioDevices
@@ -121,7 +423,13 @@ export default function KeymapViewer({
     setSelectedId((current) => current && ids.has(current) ? current : devices[0]?.id ?? "");
   }, [devices]);
 
-  useEffect(() => { setActiveLayer(0); }, [selectedId]);
+  useEffect(() => {
+    setActiveLayer(0);
+    setKeyWriteErrorCode(null);
+    keyWriteQueueRef.current = [];
+    latestKeyWriteSnapshotRef.current = null;
+    setPendingKeyWrites(0);
+  }, [selectedId]);
 
   // Follow keyboard-side layer changes (LAYER_STATE uplink): switch the
   // displayed layer too, not just the live ring. Manual tab clicks still
@@ -134,9 +442,17 @@ export default function KeymapViewer({
     if (index >= 0) setActiveLayer(index);
   }, [editState.mode, reportedLayerIndex, snapshot]);
 
-  const readDevice = useCallback(async (device: StudioDeviceStatus) => {
+  const readDevice = useCallback(async (device: StudioDeviceStatus, clearBeforeRead = false) => {
     setReading(true);
     setError(null);
+    if (clearBeforeRead) {
+      setSnapshotsByDeviceId((current) => {
+        if (!(device.id in current)) return current;
+        const next = { ...current };
+        delete next[device.id];
+        return next;
+      });
+    }
     try {
       const result = await readStudioKeymap(device.id);
       setSnapshotsByDeviceId((current) => ({ ...current, [device.id]: result }));
@@ -147,6 +463,38 @@ export default function KeymapViewer({
       setReading(false);
     }
   }, [setSnapshotsByDeviceId, t]);
+
+  useEffect(() => {
+    if (!selected || !snapshot || selected.connection_type !== "ble_studio") return;
+    const unresolved = unresolvedRawBindings(snapshot);
+    if (unresolved.length === 0) return;
+    const resolveKey = `${selected.id}:${snapshot.updated_ms}:${unresolved
+      .map((binding) => `${binding.behavior_id}/${binding.param1}/${binding.param2}`)
+      .join("|")}`;
+    if (behaviorResolveKeysRef.current.has(resolveKey)) return;
+    behaviorResolveKeysRef.current.add(resolveKey);
+
+    let disposed = false;
+    void resolveStudioBehaviorLabels(selected.id, unresolved)
+      .then((patches) => {
+        if (disposed || patches.length === 0) return;
+        setSnapshotsByDeviceId((current) => {
+          const currentSnapshot = current[selected.id];
+          if (!currentSnapshot || currentSnapshot.updated_ms !== snapshot.updated_ms) return current;
+          return {
+            ...current,
+            [selected.id]: applyBehaviorLabelPatches(currentSnapshot, patches),
+          };
+        });
+      })
+      .catch((error) => {
+        console.debug("failed to resolve Studio behavior labels", error);
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [selected, setSnapshotsByDeviceId, snapshot]);
 
   useEffect(() => {
     if (!selected || snapshot || studioScanning || reading || selected.keymap_viewer_status !== "available") return;
@@ -178,6 +526,22 @@ export default function KeymapViewer({
     }
   }, [editState.mode, readDevice, refreshStudioDevices, selectedId, t]);
 
+  const reloadSelectedKeymap = useCallback(async () => {
+    if (!selected || pendingKeyWrites > 0) return;
+    setError(null);
+    setKeyWriteErrorCode(null);
+    keyWriteQueueRef.current = [];
+    latestKeyWriteSnapshotRef.current = null;
+    setEditNotice(null);
+    try {
+      await studioAbortEdit(selected.id);
+      setEditState({ mode: "viewing", dirty: false, operation: "idle", problem: null });
+      await readDevice(selected, true);
+    } catch (e) {
+      setError(errorLabel(String(e), t));
+    }
+  }, [pendingKeyWrites, readDevice, selected, t]);
+
   const mapEditProblem = useCallback((code: string): EditState["problem"] => {
     if (code === "save_result_unknown") return "save_unknown";
     if (code === "save_failed" || code === "save_not_supported" || code === "save_no_space") return "save_failed";
@@ -186,14 +550,60 @@ export default function KeymapViewer({
     return null;
   }, []);
 
+  const processKeyWriteQueue = useCallback(async () => {
+    if (keyWriteActiveRef.current) return;
+    keyWriteActiveRef.current = true;
+
+    try {
+      while (keyWriteQueueRef.current.length > 0) {
+        const job = keyWriteQueueRef.current.shift();
+        if (!job) break;
+
+        try {
+          const result = await studioSetKey(job.deviceId, job.layerId, job.position, job.behavior);
+          latestKeyWriteSnapshotRef.current = result;
+          setPendingKeyWrites((current) => {
+            const next = Math.max(0, current - 1);
+            if (next === 0 && latestKeyWriteSnapshotRef.current) {
+              const latest = latestKeyWriteSnapshotRef.current;
+              latestKeyWriteSnapshotRef.current = null;
+              setSnapshotsByDeviceId((snapshots) => ({ ...snapshots, [job.deviceId]: latest }));
+            }
+            return next;
+          });
+          setEditState((current) => ({ ...current, dirty: true, problem: null }));
+        } catch (e) {
+          const code = String(e);
+          const problem = mapEditProblem(code);
+          keyWriteQueueRef.current = [];
+          latestKeyWriteSnapshotRef.current = null;
+          setPendingKeyWrites(0);
+          if (job.previousSnapshot) {
+            setSnapshotsByDeviceId((current) => ({ ...current, [job.deviceId]: job.previousSnapshot! }));
+          }
+          setEditState((current) => ({ ...current, problem }));
+          setKeyWriteErrorCode(code);
+          break;
+        }
+      }
+    } finally {
+      keyWriteActiveRef.current = false;
+    }
+  }, [mapEditProblem, setSnapshotsByDeviceId]);
+
   const beginEdit = useCallback(async (forceDiscard = false) => {
     if (!selected) return;
+    const labelPatches = snapshot ? resolvedLabelPatchesFromSnapshot(snapshot) : [];
     setError(null);
     setEditNotice(null);
+    setKeyWriteErrorCode(null);
     setPicker(null);
     setEditState((current) => ({ ...current, operation: "setting", problem: null }));
     try {
-      const result = await studioBeginEdit(selected.id, forceDiscard);
+      const result = applyBehaviorLabelPatches(
+        await studioBeginEdit(selected.id, forceDiscard, labelPatches),
+        labelPatches,
+      );
       setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
       if (catalog.length === 0) setCatalog(await studioKeyCatalog());
       const dirty = await studioHasUnsaved(selected.id).catch(() => false);
@@ -204,7 +614,10 @@ export default function KeymapViewer({
         const discard = window.confirm(t("keymap.edit.confirm_discard_switch"));
         if (discard) {
           try {
-            const result = await studioBeginEdit(selected.id, true);
+            const result = applyBehaviorLabelPatches(
+              await studioBeginEdit(selected.id, true, labelPatches),
+              labelPatches,
+            );
             setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
             if (catalog.length === 0) setCatalog(await studioKeyCatalog());
             const dirty = await studioHasUnsaved(selected.id).catch(() => false);
@@ -224,11 +637,12 @@ export default function KeymapViewer({
       }
       setEditState((current) => ({ ...current, operation: "idle" }));
     }
-  }, [catalog.length, mapEditProblem, selected, setSnapshotsByDeviceId, t]);
+  }, [catalog.length, mapEditProblem, selected, setSnapshotsByDeviceId, snapshot, t]);
 
   const saveEdit = useCallback(async () => {
     if (!selected) return;
     setEditNotice(null);
+    setKeyWriteErrorCode(null);
     setEditState((current) => ({ ...current, operation: "saving", problem: null }));
     try {
       await studioSaveChanges(selected.id);
@@ -245,6 +659,7 @@ export default function KeymapViewer({
   const discardEdit = useCallback(async () => {
     if (!selected) return false;
     setEditNotice(null);
+    setKeyWriteErrorCode(null);
     setEditState((current) => ({ ...current, operation: "discarding", problem: null }));
     try {
       const result = await studioDiscardChanges(selected.id);
@@ -283,27 +698,39 @@ export default function KeymapViewer({
     }
   }, [discardEdit, editState.dirty, selected, t]);
 
-  const setKey = useCallback(async (key: StudioPhysicalKey, targetLayer: StudioLayer, behavior: EditBehavior) => {
-    if (!selected || editState.operation !== "idle") return;
+  const setKey = useCallback((key: StudioPhysicalKey, targetLayer: StudioLayer, behavior: EditBehavior) => {
+    if (!selected || editState.operation === "saving" || editState.operation === "discarding" || editState.operation === "ending") return;
+    const previousSnapshot = snapshot;
     setEditNotice(null);
-    setEditState((current) => ({ ...current, operation: "setting", problem: null }));
-    try {
-      const result = await studioSetKey(selected.id, targetLayer.id, key.position, behavior);
-      setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
-      setPicker(null);
-      setEditState((current) => ({ ...current, dirty: true, operation: "idle", problem: null }));
-    } catch (e) {
-      const code = String(e);
-      const problem = mapEditProblem(code);
-      setEditState((current) => ({ ...current, operation: "idle", problem }));
-      setError(errorLabel(code, t));
+    setKeyWriteErrorCode(null);
+    setPicker(null);
+    setPendingKeyWrites((current) => current + 1);
+    setEditState((current) => ({ ...current, problem: null }));
+    if (previousSnapshot) {
+      const optimistic = optimisticSnapshotForSetKey(
+        previousSnapshot,
+        targetLayer.id,
+        key.position,
+        behavior,
+        catalog,
+      );
+      setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: optimistic }));
     }
-  }, [editState.operation, mapEditProblem, selected, setSnapshotsByDeviceId, t]);
+    keyWriteQueueRef.current.push({
+      deviceId: selected.id,
+      layerId: targetLayer.id,
+      position: key.position,
+      behavior,
+      previousSnapshot,
+    });
+    void processKeyWriteQueue();
+  }, [catalog, editState.operation, processKeyWriteQueue, selected, setSnapshotsByDeviceId, snapshot]);
 
   const addLayer = useCallback(async (name: string) => {
     if (!selected || editState.operation !== "idle") return null;
     const previousLayerIds = new Set(snapshot?.layers.map((item) => item.id) ?? []);
     setEditNotice(null);
+    setKeyWriteErrorCode(null);
     setEditState((current) => ({ ...current, operation: "setting", problem: null }));
     try {
       const result = await studioAddLayer(selected.id, name);
@@ -325,6 +752,7 @@ export default function KeymapViewer({
   const renameLayer = useCallback(async (targetLayer: StudioLayer, name: string) => {
     if (!selected || editState.operation !== "idle") return null;
     setEditNotice(null);
+    setKeyWriteErrorCode(null);
     setEditState((current) => ({ ...current, operation: "setting", problem: null }));
     try {
       const result = await studioRenameLayer(selected.id, targetLayer.id, name);
@@ -346,6 +774,7 @@ export default function KeymapViewer({
   const removeLayer = useCallback(async (targetLayer: StudioLayer) => {
     if (!selected || editState.operation !== "idle") return null;
     setEditNotice(null);
+    setKeyWriteErrorCode(null);
     setEditState((current) => ({ ...current, operation: "setting", problem: null }));
     try {
       const result = await studioRemoveLayer(selected.id, targetLayer.index);
@@ -381,6 +810,8 @@ export default function KeymapViewer({
 
   const busy = studioScanning || reading;
   const editing = editState.mode === "editing";
+  const keyWritesPending = pendingKeyWrites > 0;
+  const structuralEditBusy = busy || keyWritesPending || editState.operation !== "idle";
   const viewerAvailable = selected?.keymap_viewer_status === "available";
   const selectedLocked = selected?.keymap_viewer_status === "locked" || selected?.lock_state === "locked";
 
@@ -422,18 +853,26 @@ export default function KeymapViewer({
                 <button
                   key={device.id}
                   onClick={() => setSelectedId(device.id)}
-                  className={`min-w-64 max-w-72 rounded-pill px-3 py-3 text-left transition-colors ${
+                  className={`min-h-[4.75rem] min-w-64 max-w-72 rounded-pill px-3 py-3 text-left transition-colors ${
                     selectedId === device.id
                       ? "bg-plate shadow-neu-sel-in"
                       : "bg-surface ring-1 ring-border hover:ring-disabled"
-                  }`}
+                  } relative`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <span className={`truncate text-sm font-medium ${selectedId === device.id ? "text-accent-deep" : "text-ink"}`}>{device.display_name}</span>
-                    <StudioStatusBadge device={device} />
+                    <span className={`flex min-w-0 items-center gap-1.5 text-sm font-medium ${selectedId === device.id ? "text-accent-deep" : "text-ink"}`}>
+                      <span className="truncate">{device.display_name}</span>
+                    </span>
+                    <span className="flex shrink-0 items-center gap-1.5">
+                      <StudioConnectionBadge device={device} />
+                      <StudioStatusBadge device={device} />
+                    </span>
                   </div>
-                  <div className="mt-1 truncate font-mono text-[11px] text-muted">{device.port_name}</div>
-                  <div className="mt-1 text-[11px] text-faint">{t("keymap.connection_usb_serial")}</div>
+                  {device.connection_type === "ble_studio" ? (
+                    <div className="mt-1 h-4" aria-hidden="true" />
+                  ) : (
+                    <div className="mt-1 truncate font-mono text-[11px] text-muted">{device.port_name}</div>
+                  )}
                 </button>
               ))}
             </div>
@@ -479,14 +918,14 @@ export default function KeymapViewer({
                   layer={layer}
                   reportedLayerIndex={reportedLayerIndex}
                   editing={editing}
-                  editBusy={busy || editState.operation !== "idle"}
+                  editBusy={structuralEditBusy}
                   editAvailable={viewerAvailable && !selectedLocked}
                   onToggleEdit={() => editing ? void endEdit() : void beginEdit(false)}
                   onAddLayer={addLayer}
                   onRenameLayer={renameLayer}
                   onRemoveLayer={removeLayer}
                   onKeyClick={editing ? (key, element) => {
-                    if (!layer || editState.operation !== "idle") return;
+                    if (!layer || editState.operation === "saving" || editState.operation === "discarding" || editState.operation === "ending") return;
                     const rect = element.getBoundingClientRect();
                     setPicker({
                       key,
@@ -517,8 +956,11 @@ export default function KeymapViewer({
         <EditBar
           dirty={editState.dirty}
           operation={editState.operation}
+          pendingCount={pendingKeyWrites}
           problem={editState.problem}
+          keyWriteError={keyWriteErrorCode ? errorLabel(keyWriteErrorCode, t) : null}
           notice={editNotice}
+          onReload={reloadSelectedKeymap}
           onSave={saveEdit}
           onDiscard={discardEdit}
           onEnd={endEdit}
@@ -529,7 +971,7 @@ export default function KeymapViewer({
           catalog={catalog}
           layers={snapshot?.layers ?? []}
           rect={picker.rect}
-          busy={editState.operation === "setting"}
+          busy={editState.operation === "saving" || editState.operation === "discarding" || editState.operation === "ending"}
           onClose={() => setPicker(null)}
           onSelect={(behavior) => void setKey(picker.key, picker.layer, behavior)}
         />
@@ -800,18 +1242,24 @@ function KeymapContent({
   );
 }
 
-function EditBar({ dirty, operation, problem, notice, onSave, onDiscard, onEnd }: {
+function EditBar({ dirty, operation, pendingCount, problem, keyWriteError, notice, onReload, onSave, onDiscard, onEnd }: {
   dirty: boolean;
   operation: EditState["operation"];
+  pendingCount: number;
   problem: EditState["problem"];
+  keyWriteError: string | null;
   notice: "saved" | "discarded" | null;
+  onReload: () => void;
   onSave: () => void;
   onDiscard: () => void;
   onEnd: () => void;
 }) {
   const { t } = useLang();
-  const busy = operation !== "idle";
-  const message = problem
+  const pending = pendingCount > 0;
+  const busy = operation !== "idle" || pending;
+  const message = keyWriteError
+    ? t("keymap.edit.key_write_failed")
+    : problem
     ? t(`keymap.edit.problem.${problem}` as TranslationKey)
     : notice
       ? t(`keymap.edit.${notice}` as TranslationKey)
@@ -820,8 +1268,26 @@ function EditBar({ dirty, operation, problem, notice, onSave, onDiscard, onEnd }
       : "";
   return (
     <div className="fixed bottom-4 left-1/2 z-40 flex w-[min(720px,calc(100vw-32px))] -translate-x-1/2 flex-wrap items-center justify-between gap-3 rounded-card bg-surface px-4 py-3 shadow-neu-up ring-1 ring-border">
-      <div className={`min-h-5 text-sm font-medium ${problem ? "text-red-700" : "text-muted"}`}>
-        {message}
+      <div className={`flex min-h-5 min-w-0 flex-1 flex-wrap items-center gap-2 text-sm font-medium ${problem || keyWriteError ? "text-red-700" : "text-muted"}`}>
+        {message && <span>{message}</span>}
+        {keyWriteError && (
+          <>
+            <span className="text-xs font-normal text-red-600">{keyWriteError}</span>
+            <button
+              onClick={onReload}
+              disabled={pending}
+              className="flex items-center gap-1 rounded-pill bg-red-50 px-2 py-1 text-xs font-medium text-red-700 ring-1 ring-red-100 disabled:opacity-50"
+            >
+              <RefreshCw size={12} />
+              {t("keymap.edit.reload")}
+            </button>
+          </>
+        )}
+        {pending && (
+          <span className="rounded-pill bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-deep">
+            {t("keymap.edit.pending_writes", { count: pendingCount })}
+          </span>
+        )}
       </div>
       <div className="flex flex-wrap items-center gap-2">
         <button
@@ -1850,14 +2316,28 @@ function heatColor(ratio: number): string {
 
 function StudioStatusBadge({ device }: { device: StudioDeviceStatus }) {
   const { t } = useLang();
+  const className = studioStatusBadgeClass(device);
+  return <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${className}`}>{t(`keymap.viewer.${device.keymap_viewer_status}` as TranslationKey)}</span>;
+}
+
+function studioStatusBadgeClass(device: StudioDeviceStatus): string {
   const ok = device.keymap_viewer_status === "available";
   const locked = device.keymap_viewer_status === "locked";
-  const className = ok
+  return ok
     ? "bg-accent-soft text-accent-deep"
     : locked
       ? "bg-amber-100 text-amber-700"
       : "bg-plate text-muted";
-  return <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${className}`}>{t(`keymap.viewer.${device.keymap_viewer_status}` as TranslationKey)}</span>;
+}
+
+function StudioConnectionBadge({ device }: { device: StudioDeviceStatus }) {
+  const title = device.connection_type === "ble_studio" ? "BLE" : "USB";
+  const Icon = device.connection_type === "ble_studio" ? Bluetooth : Usb;
+  return (
+    <span className={`inline-flex items-center rounded-full px-2 py-0.5 ${studioStatusBadgeClass(device)}`} title={title}>
+      <Icon size={12} className="shrink-0" aria-label={title} />
+    </span>
+  );
 }
 
 function EmptyState({ icon, title, body }: { icon: ReactNode; title: string; body?: string }) {

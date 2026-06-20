@@ -11,7 +11,9 @@ import type {
   ProbeResult,
   StatsPeriod,
   StudioDeviceStatus,
+  StudioBindingLabelPatch,
   StudioKeymapSnapshot,
+  StudioRawBinding,
 } from "./types";
 
 export interface ConfigLocationResult {
@@ -62,8 +64,14 @@ export const readStudioKeymap = (deviceId: string) =>
   invoke<StudioKeymapSnapshot>("read_studio_keymap", { deviceId });
 export const studioKeyCatalog = () =>
   invoke<KeyCatalogEntry[]>("studio_key_catalog");
-export const studioBeginEdit = (deviceId: string, forceDiscard: boolean) =>
-  invoke<StudioKeymapSnapshot>("studio_begin_edit", { deviceId, forceDiscard });
+export const resolveStudioBehaviorLabels = (deviceId: string, rawBindings: StudioRawBinding[]) =>
+  invoke<StudioBindingLabelPatch[]>("resolve_studio_behavior_labels", { deviceId, rawBindings });
+export const studioBeginEdit = (
+  deviceId: string,
+  forceDiscard: boolean,
+  labelPatches: StudioBindingLabelPatch[] = []
+) =>
+  invoke<StudioKeymapSnapshot>("studio_begin_edit", { deviceId, forceDiscard, labelPatches });
 export const studioSetKey = (
   deviceId: string,
   layerId: number,
@@ -90,6 +98,8 @@ export const studioHasUnsaved = (deviceId: string) =>
   invoke<boolean>("studio_has_unsaved", { deviceId });
 export const studioEndEdit = (deviceId: string) =>
   invoke<void>("studio_end_edit", { deviceId });
+export const studioAbortEdit = (deviceId: string) =>
+  invoke<void>("studio_abort_edit", { deviceId });
 
 // ─── Monitoring ───────────────────────────────────────────────────────────────
 

@@ -1,17 +1,19 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    io::{Read, Write},
     sync::mpsc,
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use strum::IntoEnumIterator;
 use thiserror::Error;
 use zmk_studio_api::{
     proto::zmk::{self, core::LockState},
     transport::serial::SerialTransport,
     transport::serial::SerialTransportError,
+    transport::PlatformBleTransport,
     Behavior, ClientError, HidUsage, Keycode, StudioClient,
 };
 
@@ -136,11 +138,23 @@ pub struct StudioBinding {
     pub raw: StudioRawBinding,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct StudioRawBinding {
     pub behavior_id: i32,
     pub param1: u32,
     pub param2: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StudioBindingLabelPatch {
+    pub behavior_id: i32,
+    pub param1: u32,
+    pub param2: u32,
+    pub behavior: String,
+    pub binding_label: String,
+    pub primary_label: String,
+    pub secondary_label: String,
+    pub full_label: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -214,6 +228,8 @@ pub enum StudioError {
     SessionDeviceMismatch,
     #[error("studio port is busy")]
     PortBusy,
+    #[error("BLE Studio editing is not supported yet")]
+    EditingUnsupportedForBle,
     #[error("add layer failed")]
     AddLayerFailed,
     #[error("no space left for layer")]
@@ -240,6 +256,18 @@ struct StudioPortCandidate {
 
 impl StudioPortCandidate {
     fn id(&self) -> String {
+        format!(
+            "serial:{}",
+            stable_device_id(
+                &self.port_name,
+                self.vid,
+                self.pid,
+                self.serial_number.as_deref(),
+            )
+        )
+    }
+
+    fn legacy_id(&self) -> String {
         stable_device_id(
             &self.port_name,
             self.vid,
@@ -256,56 +284,184 @@ impl StudioPortCandidate {
     }
 }
 
-pub fn probe_usb_serial_devices(config: &StudioConfig) -> Vec<StudioDeviceStatus> {
+#[derive(Debug, Clone)]
+struct StudioBleCandidate {
+    device_id_json: String,
+    local_name: Option<String>,
+}
+
+impl StudioBleCandidate {
+    fn id(&self) -> String {
+        format!("ble:{}", hex_encode(self.device_id_json.as_bytes()))
+    }
+
+    fn endpoint_label(&self) -> String {
+        self.local_name
+            .clone()
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| "BLE Studio".to_string())
+    }
+}
+
+#[derive(Debug, Clone)]
+enum StudioDeviceCandidate {
+    Serial(StudioPortCandidate),
+    Ble(StudioBleCandidate),
+}
+
+impl StudioDeviceCandidate {
+    fn id(&self) -> String {
+        match self {
+            Self::Serial(candidate) => candidate.id(),
+            Self::Ble(candidate) => candidate.id(),
+        }
+    }
+
+    fn display_name(&self) -> String {
+        match self {
+            Self::Serial(candidate) => candidate.display_name(),
+            Self::Ble(candidate) => candidate.endpoint_label(),
+        }
+    }
+
+    fn connection_type(&self) -> &'static str {
+        match self {
+            Self::Serial(_) => "usb_serial",
+            Self::Ble(_) => "ble_studio",
+        }
+    }
+}
+
+enum StudioDeviceRef {
+    Serial(String),
+    Ble(String),
+}
+
+impl StudioDeviceRef {
+    fn parse(device_id: &str) -> Result<Self, StudioError> {
+        if let Some(encoded) = device_id.strip_prefix("ble:") {
+            let bytes = hex_decode(encoded).ok_or(StudioError::DeviceNotFound)?;
+            let json = String::from_utf8(bytes).map_err(|_| StudioError::DeviceNotFound)?;
+            return Ok(Self::Ble(json));
+        }
+        if let Some(id) = device_id.strip_prefix("serial:") {
+            return Ok(Self::Serial(id.to_string()));
+        }
+        Ok(Self::Serial(device_id.to_string()))
+    }
+}
+
+enum StudioTransport {
+    Serial(SerialTransport),
+    Ble(PlatformBleTransport),
+}
+
+impl Read for StudioTransport {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Serial(inner) => inner.read(buf),
+            Self::Ble(inner) => inner.read(buf),
+        }
+    }
+}
+
+impl Write for StudioTransport {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Self::Serial(inner) => inner.write(buf),
+            Self::Ble(inner) => inner.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Serial(inner) => inner.flush(),
+            Self::Ble(inner) => inner.flush(),
+        }
+    }
+}
+
+pub fn probe_studio_devices(config: &StudioConfig) -> Vec<StudioDeviceStatus> {
     let candidates = match serial_candidates() {
         Ok(candidates) => candidates,
         Err(_) => Vec::new(),
     };
 
-    candidates
+    let mut devices: Vec<_> = candidates
         .into_iter()
         .map(|candidate| probe_candidate(candidate, config.probe_timeout_ms))
-        .collect()
+        .collect();
+
+    match ble_candidates() {
+        Ok(candidates) => {
+            devices.extend(
+                candidates
+                    .into_iter()
+                    .map(|candidate| probe_ble_candidate(candidate, config.probe_timeout_ms)),
+            );
+        }
+        Err(error) => {
+            tracing::warn!(error = %error, "failed to list ZMK Studio BLE devices");
+        }
+    }
+
+    devices
 }
 
 pub fn read_keymap_for_device(
     device_id: &str,
     config: &StudioConfig,
 ) -> Result<StudioKeymapSnapshot, StudioError> {
-    let candidates = serial_candidates().map_err(|_| StudioError::DeviceNotFound)?;
-    let Some(candidate) = candidates
-        .into_iter()
-        .find(|candidate| candidate.id() == device_id)
-    else {
-        return Err(StudioError::DeviceNotFound);
-    };
+    let device_ref = StudioDeviceRef::parse(device_id)?;
 
     run_with_timeout(config.keymap_read_timeout_ms, move || {
-        read_keymap(candidate)
+        read_keymap(device_ref)
     })
     .unwrap_or(Err(StudioError::Timeout))
 }
 
+pub fn resolve_behavior_labels_for_device(
+    device_id: &str,
+    raw_bindings: Vec<StudioRawBinding>,
+    config: &StudioConfig,
+) -> Result<Vec<StudioBindingLabelPatch>, StudioError> {
+    let device_ref = StudioDeviceRef::parse(device_id)?;
+    let candidate = resolve_device_candidate(device_ref)?;
+    let mut client = open_studio_client(&candidate).map_err(|_| StudioError::RpcFailed)?;
+    let behavior_names = behavior_names_for_raw_bindings(
+        &mut client,
+        &raw_bindings,
+        Duration::from_millis(config.keymap_read_timeout_ms.max(1)),
+    );
+    Ok(label_patches_for_raw_bindings(
+        raw_bindings,
+        &behavior_names,
+    ))
+}
+
 pub struct StudioEditSession {
-    client: StudioClient<SerialTransport>,
+    client: StudioClient<StudioTransport>,
     pub device_id: String,
     fallback_name: String,
+    connection_type: String,
     layout_selection: LayoutSelection,
     behavior_names: BTreeMap<i32, String>,
+    snapshot_mode: StudioSnapshotMode,
 }
 
 impl StudioEditSession {
-    pub fn open(device_id: &str, _config: &StudioConfig) -> Result<Self, StudioError> {
-        let candidates = serial_candidates().map_err(|_| StudioError::DeviceNotFound)?;
-        let Some(candidate) = candidates
-            .into_iter()
-            .find(|candidate| candidate.id() == device_id)
-        else {
-            return Err(StudioError::DeviceNotFound);
-        };
+    pub fn open(device_id: &str, config: &StudioConfig) -> Result<Self, StudioError> {
+        Self::open_with_snapshot(device_id, config).map(|(session, _)| session)
+    }
 
-        let mut client = StudioClient::open_serial(&candidate.port_name)
-            .map_err(|_| StudioError::Disconnected)?;
+    pub fn open_with_snapshot(
+        device_id: &str,
+        _config: &StudioConfig,
+    ) -> Result<(Self, StudioKeymapSnapshot), StudioError> {
+        let device_ref = StudioDeviceRef::parse(device_id)?;
+        let candidate = resolve_device_candidate(device_ref)?;
+        let snapshot_mode = snapshot_mode_for_candidate(&candidate);
+        let mut client = open_studio_client(&candidate).map_err(|_| StudioError::Disconnected)?;
         let lock_state = client
             .get_lock_state()
             .map_err(map_client_to_studio_error)?;
@@ -313,17 +469,33 @@ impl StudioEditSession {
             return Err(StudioError::Locked);
         }
 
-        let keymap = client.get_keymap().map_err(map_client_to_studio_error)?;
-        let layout_selection = select_layout(client.get_physical_layouts().ok(), &keymap);
-        let behavior_names = behavior_names_for_keymap(&mut client, &keymap);
+        let (keymap, layout_selection, behavior_names) =
+            fetch_snapshot_data(&mut client, snapshot_mode)?;
+        let device_id = candidate.id();
+        let fallback_name = candidate.display_name();
+        let connection_type = candidate.connection_type().to_string();
+        let snapshot = snapshot_from_parts(
+            device_id.clone(),
+            fallback_name.clone(),
+            connection_type.clone(),
+            StudioLockState::Unlocked,
+            keymap,
+            layout_selection.clone(),
+            behavior_names.clone(),
+        );
 
-        Ok(Self {
-            client,
-            device_id: candidate.id(),
-            fallback_name: candidate.display_name(),
-            layout_selection,
-            behavior_names,
-        })
+        Ok((
+            Self {
+                client,
+                device_id,
+                fallback_name,
+                connection_type,
+                layout_selection,
+                behavior_names,
+                snapshot_mode,
+            },
+            snapshot,
+        ))
     }
 
     pub fn has_unsaved(&mut self) -> Result<bool, StudioError> {
@@ -337,15 +509,44 @@ impl StudioEditSession {
             .client
             .get_keymap()
             .map_err(map_client_to_studio_error)?;
-        self.behavior_names
-            .extend(behavior_names_for_keymap(&mut self.client, &keymap));
+        if self.snapshot_mode == StudioSnapshotMode::Full {
+            self.behavior_names
+                .extend(behavior_names_for_keymap(&mut self.client, &keymap));
+        }
         Ok(snapshot_from_parts(
             self.device_id.clone(),
             self.fallback_name.clone(),
+            self.connection_type.clone(),
             StudioLockState::Unlocked,
             keymap,
             self.layout_selection.clone(),
             self.behavior_names.clone(),
+        ))
+    }
+
+    pub fn seed_behavior_labels(&mut self, patches: &[StudioBindingLabelPatch]) {
+        for patch in patches {
+            if patch.behavior.starts_with("behavior ") {
+                continue;
+            }
+            self.behavior_names
+                .insert(patch.behavior_id, patch.behavior.clone());
+        }
+    }
+
+    pub fn resolve_behavior_labels(
+        &mut self,
+        raw_bindings: Vec<StudioRawBinding>,
+        timeout: Duration,
+    ) -> Result<Vec<StudioBindingLabelPatch>, StudioError> {
+        let mut behavior_names = self.behavior_names.clone();
+        let resolved_names =
+            behavior_names_for_raw_bindings(&mut self.client, &raw_bindings, timeout);
+        behavior_names.extend(resolved_names);
+        self.behavior_names = behavior_names.clone();
+        Ok(label_patches_for_raw_bindings(
+            raw_bindings,
+            &behavior_names,
         ))
     }
 
@@ -457,7 +658,7 @@ fn probe_candidate(candidate: StudioPortCandidate, timeout_ms: u64) -> StudioDev
 
 fn probe_candidate_rpc(candidate: StudioPortCandidate) -> StudioDeviceStatus {
     let mut status = base_status(&candidate);
-    let mut client = match StudioClient::open_serial(&candidate.port_name) {
+    let mut client = match open_serial_client(&candidate.port_name) {
         Ok(client) => client,
         Err(error) => {
             status.rpc_status = StudioRpcStatus::Failed;
@@ -508,9 +709,77 @@ fn probe_candidate_rpc(candidate: StudioPortCandidate) -> StudioDeviceStatus {
     status
 }
 
-fn read_keymap(candidate: StudioPortCandidate) -> Result<StudioKeymapSnapshot, StudioError> {
-    let mut client =
-        StudioClient::open_serial(&candidate.port_name).map_err(|_| StudioError::RpcFailed)?;
+fn probe_ble_candidate(candidate: StudioBleCandidate, timeout_ms: u64) -> StudioDeviceStatus {
+    let fallback = ble_base_status(&candidate);
+    match run_with_timeout(timeout_ms, move || probe_ble_candidate_rpc(candidate)) {
+        Some(status) => status,
+        None => StudioDeviceStatus {
+            rpc_status: StudioRpcStatus::Timeout,
+            lock_state: StudioLockState::Unknown,
+            keymap_viewer_status: KeymapViewerStatus::Failed,
+            error_code: StudioErrorCode::RpcTimeout,
+            ..fallback
+        },
+    }
+}
+
+fn probe_ble_candidate_rpc(candidate: StudioBleCandidate) -> StudioDeviceStatus {
+    let mut status = ble_base_status(&candidate);
+    let mut client = match open_ble_client(&candidate.device_id_json) {
+        Ok(client) => client,
+        Err(error) => {
+            status.rpc_status = StudioRpcStatus::Failed;
+            status.error_code = map_ble_error(&error);
+            return status;
+        }
+    };
+
+    let info = match client.get_device_info() {
+        Ok(info) => info,
+        Err(error) => {
+            status.rpc_status = StudioRpcStatus::Failed;
+            status.error_code = map_client_error(&error);
+            return status;
+        }
+    };
+
+    status.rpc_status = StudioRpcStatus::Ok;
+    status.error_code = StudioErrorCode::None;
+    if !info.name.is_empty() {
+        status.display_name = info.name.clone();
+        status.product = Some(info.name);
+    }
+    if !info.serial_number.is_empty() {
+        status.serial_number = Some(serial_bytes_to_string(&info.serial_number));
+    }
+
+    match client.get_lock_state() {
+        Ok(lock_state) => {
+            status.lock_state = lock_state_to_status(lock_state);
+            status.keymap_viewer_status = match status.lock_state {
+                StudioLockState::Unlocked => KeymapViewerStatus::Available,
+                StudioLockState::Locked => KeymapViewerStatus::Locked,
+                StudioLockState::Unknown => KeymapViewerStatus::Failed,
+            };
+            if status.lock_state == StudioLockState::Locked {
+                status.error_code = StudioErrorCode::Locked;
+            }
+        }
+        Err(error) => {
+            status.rpc_status = StudioRpcStatus::Failed;
+            status.lock_state = StudioLockState::Unknown;
+            status.keymap_viewer_status = KeymapViewerStatus::Failed;
+            status.error_code = map_client_error(&error);
+        }
+    }
+
+    status
+}
+
+fn read_keymap(device_ref: StudioDeviceRef) -> Result<StudioKeymapSnapshot, StudioError> {
+    let candidate = resolve_device_candidate(device_ref)?;
+    let snapshot_mode = snapshot_mode_for_candidate(&candidate);
+    let mut client = open_studio_client(&candidate).map_err(|_| StudioError::RpcFailed)?;
     let info = client
         .get_device_info()
         .map_err(|_| StudioError::RpcFailed)?;
@@ -522,7 +791,8 @@ fn read_keymap(candidate: StudioPortCandidate) -> Result<StudioKeymapSnapshot, S
         return Err(StudioError::Locked);
     }
 
-    let (keymap, layout_selection, behavior_names) = fetch_snapshot_data(&mut client)?;
+    let (keymap, layout_selection, behavior_names) =
+        fetch_snapshot_data(&mut client, snapshot_mode)?;
     Ok(snapshot_from_parts(
         candidate.id(),
         if info.name.is_empty() {
@@ -530,6 +800,7 @@ fn read_keymap(candidate: StudioPortCandidate) -> Result<StudioKeymapSnapshot, S
         } else {
             info.name
         },
+        candidate.connection_type().to_string(),
         lock_state,
         keymap,
         layout_selection,
@@ -537,18 +808,36 @@ fn read_keymap(candidate: StudioPortCandidate) -> Result<StudioKeymapSnapshot, S
     ))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StudioSnapshotMode {
+    Full,
+    LayoutOnly,
+}
+
+fn snapshot_mode_for_candidate(candidate: &StudioDeviceCandidate) -> StudioSnapshotMode {
+    match candidate {
+        StudioDeviceCandidate::Serial(_) => StudioSnapshotMode::Full,
+        StudioDeviceCandidate::Ble(_) => StudioSnapshotMode::LayoutOnly,
+    }
+}
+
 fn fetch_snapshot_data(
-    client: &mut StudioClient<SerialTransport>,
+    client: &mut StudioClient<StudioTransport>,
+    mode: StudioSnapshotMode,
 ) -> Result<(zmk::keymap::Keymap, LayoutSelection, BTreeMap<i32, String>), StudioError> {
     let keymap = client.get_keymap().map_err(map_client_to_studio_error)?;
     let layout_selection = select_layout(client.get_physical_layouts().ok(), &keymap);
-    let behavior_names = behavior_names_for_keymap(client, &keymap);
+    let behavior_names = match mode {
+        StudioSnapshotMode::Full => behavior_names_for_keymap(client, &keymap),
+        StudioSnapshotMode::LayoutOnly => BTreeMap::new(),
+    };
     Ok((keymap, layout_selection, behavior_names))
 }
 
 fn snapshot_from_parts(
     device_id: String,
     device_name: String,
+    connection_type: String,
     lock_state: StudioLockState,
     keymap: zmk::keymap::Keymap,
     layout_selection: LayoutSelection,
@@ -557,7 +846,7 @@ fn snapshot_from_parts(
     StudioKeymapSnapshot {
         device_id,
         device_name,
-        connection_type: "usb_serial".to_string(),
+        connection_type,
         lock_state,
         physical_layouts: layout_selection.physical_layouts,
         selected_physical_layout_index: layout_selection.selected_physical_layout_index,
@@ -588,6 +877,25 @@ fn base_status(candidate: &StudioPortCandidate) -> StudioDeviceStatus {
     }
 }
 
+fn ble_base_status(candidate: &StudioBleCandidate) -> StudioDeviceStatus {
+    StudioDeviceStatus {
+        id: candidate.id(),
+        connection_type: "ble_studio".to_string(),
+        port_name: candidate.endpoint_label(),
+        display_name: candidate.endpoint_label(),
+        vid: None,
+        pid: None,
+        serial_number: None,
+        manufacturer: None,
+        product: candidate.local_name.clone(),
+        transport_detected: true,
+        rpc_status: StudioRpcStatus::Unavailable,
+        lock_state: StudioLockState::Unknown,
+        keymap_viewer_status: KeymapViewerStatus::Unsupported,
+        error_code: StudioErrorCode::None,
+    }
+}
+
 fn serial_candidates() -> Result<Vec<StudioPortCandidate>, serialport::Error> {
     let mut candidates: Vec<_> = serialport::available_ports()?
         .into_iter()
@@ -605,6 +913,70 @@ fn serial_candidates() -> Result<Vec<StudioPortCandidate>, serialport::Error> {
         .collect();
     candidates.sort_by(|a, b| a.port_name.cmp(&b.port_name));
     Ok(candidates)
+}
+
+fn ble_candidates() -> Result<Vec<StudioBleCandidate>, zmk_studio_api::transport::PlatformBleError>
+{
+    let mut candidates: Vec<_> = StudioClient::<PlatformBleTransport>::list_ble_devices()?
+        .into_iter()
+        .map(|device| StudioBleCandidate {
+            device_id_json: device.device_id,
+            local_name: device.local_name,
+        })
+        .collect();
+    candidates.sort_by(|a, b| a.endpoint_label().cmp(&b.endpoint_label()));
+    Ok(candidates)
+}
+
+fn resolve_device_candidate(
+    device_ref: StudioDeviceRef,
+) -> Result<StudioDeviceCandidate, StudioError> {
+    match device_ref {
+        StudioDeviceRef::Serial(id) => {
+            let candidates = serial_candidates().map_err(|_| StudioError::DeviceNotFound)?;
+            candidates
+                .into_iter()
+                .find(|candidate| candidate.id() == id || candidate.legacy_id() == id)
+                .map(StudioDeviceCandidate::Serial)
+                .ok_or(StudioError::DeviceNotFound)
+        }
+        StudioDeviceRef::Ble(device_id_json) => {
+            Ok(StudioDeviceCandidate::Ble(StudioBleCandidate {
+                device_id_json,
+                local_name: None,
+            }))
+        }
+    }
+}
+
+fn open_studio_client(
+    candidate: &StudioDeviceCandidate,
+) -> Result<StudioClient<StudioTransport>, StudioOpenError> {
+    match candidate {
+        StudioDeviceCandidate::Serial(candidate) => {
+            open_serial_client(&candidate.port_name).map_err(|_| StudioOpenError::Serial)
+        }
+        StudioDeviceCandidate::Ble(candidate) => {
+            open_ble_client(&candidate.device_id_json).map_err(|_| StudioOpenError::Ble)
+        }
+    }
+}
+
+fn open_serial_client(path: &str) -> Result<StudioClient<StudioTransport>, SerialTransportError> {
+    let transport = SerialTransport::open(path)?;
+    Ok(StudioClient::new(StudioTransport::Serial(transport)))
+}
+
+fn open_ble_client(
+    device_id_json: &str,
+) -> Result<StudioClient<StudioTransport>, zmk_studio_api::transport::PlatformBleError> {
+    let transport = PlatformBleTransport::connect_device(device_id_json)?;
+    Ok(StudioClient::new(StudioTransport::Ble(transport)))
+}
+
+enum StudioOpenError {
+    Serial,
+    Ble,
 }
 
 #[derive(Debug, Clone)]
@@ -717,7 +1089,7 @@ fn grid_fallback_keys(position_count: usize) -> Vec<StudioPhysicalKey> {
 }
 
 fn behavior_names_for_keymap(
-    client: &mut StudioClient<zmk_studio_api::transport::serial::SerialTransport>,
+    client: &mut StudioClient<StudioTransport>,
     keymap: &zmk::keymap::Keymap,
 ) -> BTreeMap<i32, String> {
     let ids: BTreeSet<u32> = keymap
@@ -733,6 +1105,66 @@ fn behavior_names_for_keymap(
                 .get_behavior_details(id)
                 .ok()
                 .map(|details| (id as i32, details.display_name))
+        })
+        .collect()
+}
+
+fn behavior_names_for_raw_bindings(
+    client: &mut StudioClient<StudioTransport>,
+    raw_bindings: &[StudioRawBinding],
+    timeout: Duration,
+) -> BTreeMap<i32, String> {
+    let deadline = Instant::now() + timeout;
+    let ids: BTreeSet<u32> = raw_bindings
+        .iter()
+        .filter_map(|binding| u32::try_from(binding.behavior_id).ok())
+        .collect();
+    let mut names = BTreeMap::new();
+
+    for id in ids {
+        if Instant::now() >= deadline {
+            break;
+        }
+        match client.get_behavior_details(id) {
+            Ok(details) => {
+                names.insert(id as i32, details.display_name);
+            }
+            Err(error) => {
+                tracing::debug!(
+                    behavior_id = id,
+                    error = %error,
+                    "failed to resolve Studio behavior details"
+                );
+            }
+        }
+    }
+
+    names
+}
+
+fn label_patches_for_raw_bindings(
+    raw_bindings: Vec<StudioRawBinding>,
+    behavior_names: &BTreeMap<i32, String>,
+) -> Vec<StudioBindingLabelPatch> {
+    let mut seen = BTreeSet::new();
+    raw_bindings
+        .into_iter()
+        .filter_map(|raw| {
+            if !seen.insert((raw.behavior_id, raw.param1, raw.param2)) {
+                return None;
+            }
+            let behavior = behavior_names.get(&raw.behavior_id)?.clone();
+            let labels = binding_labels(&behavior, raw.param1, raw.param2);
+            Some(StudioBindingLabelPatch {
+                behavior_id: raw.behavior_id,
+                param1: raw.param1,
+                param2: raw.param2,
+                behavior,
+                binding_label: labels.full_label.clone(),
+                primary_label: labels.primary_label,
+                secondary_label: labels.secondary_label,
+                full_label: labels.full_label,
+            })
         })
         .collect()
 }
@@ -1805,6 +2237,11 @@ fn map_serial_error(_error: &SerialTransportError) -> StudioErrorCode {
     StudioErrorCode::OpenFailed
 }
 
+fn map_ble_error(error: &zmk_studio_api::transport::PlatformBleError) -> StudioErrorCode {
+    tracing::debug!(error = %error, "ZMK Studio BLE transport error");
+    StudioErrorCode::OpenFailed
+}
+
 fn map_client_error(error: &ClientError) -> StudioErrorCode {
     match error {
         ClientError::Io(err) if err.kind() == std::io::ErrorKind::TimedOut => {
@@ -1843,6 +2280,38 @@ fn encode_component(value: &str) -> String {
         .collect()
 }
 
+fn hex_encode(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    out
+}
+
+fn hex_decode(input: &str) -> Option<Vec<u8>> {
+    if input.len() % 2 != 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(input.len() / 2);
+    for chunk in input.as_bytes().chunks_exact(2) {
+        let high = hex_value(chunk[0])?;
+        let low = hex_value(chunk[1])?;
+        out.push((high << 4) | low);
+    }
+    Some(out)
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
 fn serial_bytes_to_string(bytes: &[u8]) -> String {
     std::str::from_utf8(bytes)
         .map(|value| value.to_string())
@@ -1868,6 +2337,51 @@ mod tests {
     }
 
     #[test]
+    fn studio_device_ref_parses_legacy_serial_ids() {
+        match StudioDeviceRef::parse("usb-serial:COM3:1209:0001:same").unwrap() {
+            StudioDeviceRef::Serial(id) => assert_eq!(id, "usb-serial:COM3:1209:0001:same"),
+            StudioDeviceRef::Ble(_) => panic!("expected serial device ref"),
+        }
+    }
+
+    #[test]
+    fn studio_device_ref_round_trips_ble_json() {
+        let json = r#"{"Windows":"device-id"}"#;
+        let encoded = format!("ble:{}", hex_encode(json.as_bytes()));
+        match StudioDeviceRef::parse(&encoded).unwrap() {
+            StudioDeviceRef::Ble(parsed) => assert_eq!(parsed, json),
+            StudioDeviceRef::Serial(_) => panic!("expected BLE device ref"),
+        }
+    }
+
+    #[test]
+    fn snapshot_mode_keeps_usb_full_and_ble_layout_only() {
+        let serial = StudioDeviceCandidate::Serial(StudioPortCandidate {
+            port_name: "COM57".to_string(),
+            vid: Some(0x1234),
+            pid: Some(0x5678),
+            serial_number: Some("serial".to_string()),
+            manufacturer: None,
+            product: Some("Keyboard".to_string()),
+        });
+        let ble = StudioDeviceCandidate::Ble(StudioBleCandidate {
+            device_id_json: r#"{"Windows":"device-id"}"#.to_string(),
+            local_name: Some("Keyboard".to_string()),
+        });
+
+        assert_eq!(
+            snapshot_mode_for_candidate(&serial),
+            StudioSnapshotMode::Full
+        );
+        assert_eq!(
+            snapshot_mode_for_candidate(&ble),
+            StudioSnapshotMode::LayoutOnly
+        );
+        assert_eq!(serial.connection_type(), "usb_serial");
+        assert_eq!(ble.connection_type(), "ble_studio");
+    }
+
+    #[test]
     fn binding_view_preserves_raw_values() {
         let mut names = BTreeMap::new();
         names.insert(7, "key press".to_string());
@@ -1888,6 +2402,25 @@ mod tests {
         assert_eq!(view.primary_label, "A");
         assert_eq!(view.secondary_label, "");
         assert_eq!(view.full_label, "&kp A");
+    }
+
+    #[test]
+    fn unknown_behavior_binding_stays_raw_without_behavior_name() {
+        let view = binding_to_view(
+            3,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 7,
+                param1: 0x0007_0004,
+                param2: 0,
+            },
+            &BTreeMap::new(),
+        );
+
+        assert_eq!(view.behavior, "behavior 7");
+        assert_eq!(view.binding_label, "behavior 7(458756, 0)");
+        assert_eq!(view.primary_label, "behavior 7");
+        assert_eq!(view.full_label, "behavior 7(458756, 0)");
+        assert_eq!(view.raw.behavior_id, 7);
     }
 
     #[test]

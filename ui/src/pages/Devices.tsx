@@ -290,17 +290,18 @@ function StudioDeviceCard({ device }: { device: StudioDeviceStatus }) {
   const { t } = useLang();
   const supported = device.rpc_status === "ok";
   const locked = device.lock_state === "locked";
+  const connectionLabel = studioConnectionLabel(device, t);
   return (
     <div className="rounded-card bg-surface">
       <div className="flex items-start gap-4 px-5 py-4">
-        <IconBox ok={supported} icon={<Keyboard size={18} />} />
+        <IconBox ok={supported} icon={studioConnectionIcon(device)} title={connectionLabel} />
         <div className="flex-1 min-w-0">
           <div className="flex flex-wrap items-center gap-2">
             <span className="font-medium text-ink text-sm">{device.display_name}</span>
             <StudioPill label={studioSupportedLabel(device, t)} tone={supported ? (locked ? "warn" : "ok") : "muted"} />
             <StudioPill label={t(`keymap.viewer.${device.keymap_viewer_status}` as TranslationKey)} tone={device.keymap_viewer_status === "available" ? "ok" : device.keymap_viewer_status === "locked" ? "warn" : "muted"} />
           </div>
-          <div className="mt-0.5 text-xs text-faint">{t("devices.studio.connection")}: {t("keymap.connection_usb_serial")}</div>
+          <div className="mt-0.5 text-xs text-faint">{t("devices.studio.connection")}: {connectionLabel}</div>
           <div className="mt-2 flex flex-wrap gap-2">
             <Badge label="Port" value={device.port_name} />
             {device.vid !== null && <Badge label="VID" value={hex(device.vid, 4)} />}
@@ -312,6 +313,16 @@ function StudioDeviceCard({ device }: { device: StudioDeviceStatus }) {
       </div>
     </div>
   );
+}
+
+function studioConnectionIcon(device: StudioDeviceStatus) {
+  if (device.connection_type === "ble_studio") return <Bluetooth size={18} />;
+  return <Keyboard size={18} />;
+}
+
+function studioConnectionLabel(device: StudioDeviceStatus, t: (key: TranslationKey) => string): string {
+  if (device.connection_type === "ble_studio") return t("keymap.connection_ble_studio");
+  return t("keymap.connection_usb_serial");
 }
 
 function hostLinkConnectionIcon(connectionType: ProbeResult["device"]["connection_type"]) {

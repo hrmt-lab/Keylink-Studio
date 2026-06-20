@@ -195,9 +195,13 @@ BLE 編集中の注意:
 - 総打鍵数、TOP 5 キー、左右バランスを表示
 - 記録されるのはキー位置ごとの回数だけです。入力した文字やキー内容は記録しません。
 
+ヒートマップの統計は Host Link の `device_uid_hash` 単位で保存されます。ZMK Studio 側の `get_device_info().serial_number` が同じ UID を 16 桁小文字 hex 文字列で返す firmware では、USB / BLE Studio のどちらで開いても同じ統計へ紐付けます。古い firmware では従来の serial number 照合を fallback として使います。
+
 ### キーテスター
 
 `テスター` タブでは、KEY_PRESS uplink による押下 / 離しイベントをリアルタイム表示します。押しているキーをハイライトし、直近イベントを確認できます。累積カウントは保持しません。
+
+同じキーの押下 packet が連続して届いた場合は、離しイベントが来るまで 1 回の押下として扱います。`リセット` は押下済みハイライト、テスト済み状態、直近イベント表示をまとめてクリアします。キーボードを切り替えた場合も、別デバイスのイベントが残らないように直近イベント表示をクリアします。
 
 ## デバイス
 
@@ -206,11 +210,12 @@ BLE 編集中の注意:
 デバイス画面では、Host Link と ZMK Studio の対応状態を確認できます。
 
 Host Link は、RawHID Host 独自の packet protocol に対応しているかを表します。`OK` のデバイスは、capability に応じて `APP_LAYER`、`TIME_SYNC`、`AI_USAGE`、uplink などの対象になります。Host Link デバイスの左側アイコンは接続種別を表し、USB 接続は USB アイコン、BLE HOG 接続は Bluetooth アイコンで表示されます。判定できない場合は汎用キーボードアイコンになります。
-Devices 画面は transport 単位の詳細確認を優先するため、同じ `device_uid_hash` のキーボードが USB と BLE HOG の両方で見えている場合も別カードとして表示します。Dashboard はこれと異なり、`device_uid_hash` 単位に集約して表示します。
+
+Devices 画面の Host Link 一覧は `device_uid_hash` 単位で集約します。同じキーボードが USB と BLE HOG の両方で見えている場合は 1 カードにまとめ、USB / Bluetooth の両方のアイコンと、それぞれの HID path を表示します。`device_uid_hash` が取得できないデバイスは誤結合を避けるため path 単位で個別に扱います。
 
 ZMK Studio は、ZMK Studio RPC に対応しているかを表します。Keymap Viewer では、この Studio 対応デバイスを使ってキーマップを読み取り・編集します。
 
-Host Link 対応デバイスと Studio 対応デバイスは、必ずしも同じとは限りません。同じキーボードが両方に対応する場合もあります。
+Host Link 対応デバイスと Studio 対応デバイスは、必ずしも同じとは限りません。同じキーボードが両方に対応する場合もあります。現在の ZMK Studio 一覧は Studio RPC transport の検出結果をそのまま表示します。USB Host Link が HID として見えていても、USB serial / CDC ACM の Studio endpoint が見えていない場合は Studio 側に 2 件表示されません。
 
 BATTERY 対応キーボードを監視中は、デバイスカードに本体 / 左 / 右 / AUX のバッテリー残量が表示されます。左右分割キーボードでペリフェラル側の電源が入っていない、または firmware 側の battery cache がまだ未取得の場合は、source 名だけが表示され残量は `--%` になります。
 

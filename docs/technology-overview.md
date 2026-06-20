@@ -131,7 +131,7 @@ cargo run -p rawhid-host-cli -- run
 | `TimeSync.tsx` | 時刻同期設定 |
 | `AiUsage.tsx` | Codex / Claude Code 使用量設定と状態表示 |
 | `KeymapViewer.tsx` | ZMK Studio キーマップ表示・編集、ヒートマップ、テスター |
-| `Devices.tsx` | Raw HID / ZMK Studio device scan と結果 |
+| `Devices.tsx` | Raw HID / ZMK Studio device scan と結果。Host Link は `device_uid_hash` 単位で USB / BLE endpoint を集約表示 |
 | `Settings.tsx` | 外観、起動、polling、HID 基本設定 |
 
 `ui/src/i18n.tsx` に日本語 / 英語の表示文言があります。新しい UI 文言を追加する場合は、両言語へ追加します。
@@ -224,6 +224,8 @@ Host Link HID は PC とキーボードの間で独自の 32 byte payload を送
 | `KEY_PRESS` | 押下 / 離しイベントを送る |
 
 byte layout は [Packet Specification](packet-spec.md) にあります。
+
+Host Link の UID は `DEVICE_HELLO` の `device_uid_hash` から `uid:<16桁hex>` として扱います。ZMK Studio `get_device_info().serial_number` が同じ UID を 16 桁小文字 hex 文字列で返す firmware では、Keymap Viewer のヒートマップやキーテスターも USB / BLE Studio のどちらから開いても同じ Host Link デバイスへ紐付けます。
 
 ## Layer が切り替わる流れ
 

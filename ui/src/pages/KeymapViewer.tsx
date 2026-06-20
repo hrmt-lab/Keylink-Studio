@@ -22,6 +22,8 @@ import { KeymapCanvas } from "../components/KeymapCanvas";
 import { friendlyError } from "../lib/errors";
 import { useLang, type TranslationKey } from "../i18n";
 import type {
+  DeviceInfo,
+  DeviceLayerState,
   KeyPressEvent,
   EditBehavior,
   EditState,
@@ -60,6 +62,82 @@ interface PendingKeyWrite {
 function serialsMatch(a: string | null, b: string | null): boolean {
   if (!a || !b) return false;
   return a.trim().toLowerCase() === b.trim().toLowerCase();
+}
+
+function uidHex(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return null;
+  const hex = normalized.startsWith("uid:") ? normalized.slice(4) : normalized;
+  return /^[0-9a-f]{16}$/.test(hex) ? hex : null;
+}
+
+function uidStringsMatch(a: string | null | undefined, b: string | null | undefined): boolean {
+  const uidA = uidHex(a);
+  const uidB = uidHex(b);
+  return uidA !== null && uidA === uidB;
+}
+
+function normalizedName(value: string | null | undefined): string | null {
+  const normalized = value?.trim().toLowerCase();
+  return normalized ? normalized : null;
+}
+
+function studioDeviceNames(device: StudioDeviceStatus): Set<string> {
+  return new Set(
+    [device.product, device.display_name]
+      .map(normalizedName)
+      .filter((value): value is string => value !== null)
+  );
+}
+
+function findDeviceLayerForStudio(
+  entries: DeviceLayerState[],
+  studioDevice: StudioDeviceStatus
+): DeviceLayerState | null {
+  const uidMatch = entries.find((entry) =>
+    uidStringsMatch(entry.device_key, studioDevice.serial_number)
+  );
+  if (uidMatch) return uidMatch;
+
+  const serialMatch = entries.find((entry) =>
+    serialsMatch(entry.serial_number, studioDevice.serial_number)
+  );
+  if (serialMatch) return serialMatch;
+
+  const names = studioDeviceNames(studioDevice);
+  if (names.size === 0) return null;
+  const productMatches = entries.filter((entry) => {
+    const product = normalizedName(entry.product);
+    return product !== null && names.has(product);
+  });
+  return productMatches.length === 1 ? productMatches[0] : null;
+}
+
+function findHostLinkDeviceForStudio(
+  devices: DeviceInfo[],
+  studioDevice: StudioDeviceStatus
+): DeviceInfo | null {
+  const uidMatch = devices.find((device) =>
+    uidStringsMatch(device.device_uid_hash, studioDevice.serial_number)
+  );
+  if (uidMatch) return uidMatch;
+
+  const serialMatch = devices.find((device) =>
+    serialsMatch(device.serial_number, studioDevice.serial_number)
+  );
+  if (serialMatch) return serialMatch;
+
+  const names = studioDeviceNames(studioDevice);
+  if (names.size === 0) return null;
+  const productMatches = devices.filter((device) => {
+    const product = normalizedName(device.product);
+    return (
+      device.connection_type === "bluetooth" &&
+      product !== null &&
+      names.has(product)
+    );
+  });
+  return productMatches.length === 1 ? productMatches[0] : null;
 }
 
 function compareDeviceName(a: string, b: string): number {
@@ -398,22 +476,20 @@ export default function KeymapViewer({
   const snapshot = selectedId ? snapshotsByDeviceId[selectedId] ?? null : null;
   const layer = snapshot?.layers[activeLayer] ?? null;
 
-  // Best-effort correlation with Host Link data via the USB serial number.
+  // Prefer the firmware UID contract: Studio serial_number is the 16-char UID
+  // hex, while Host Link exposes the same value as uid:<hex>. Keep older
+  // serial/name fallbacks for firmware that has not adopted that contract yet.
   const reportedLayer = useMemo(
     () =>
       selected
-        ? status.device_layers.find((entry) =>
-            serialsMatch(entry.serial_number, selected.serial_number)
-          ) ?? null
+        ? findDeviceLayerForStudio(status.device_layers, selected)
         : null,
     [selected, status.device_layers]
   );
   const statsUid = useMemo(
     () =>
       selected
-        ? status.host_link_devices.find((device) =>
-            serialsMatch(device.serial_number, selected.serial_number)
-          )?.device_uid_hash ?? null
+        ? findHostLinkDeviceForStudio(status.host_link_devices, selected)?.device_uid_hash ?? null
         : null,
     [selected, status.host_link_devices]
   );
@@ -2195,6 +2271,7 @@ function TesterContent({ snapshot, activeLayer, setActiveLayer, layer, reportedL
   const [pressedKeys, setPressedKeys] = useState<Set<number>>(new Set());
   const [testedKeys, setTestedKeys] = useState<Set<number>>(new Set());
   const [typed, setTyped] = useState<{ id: number; label: string }[]>([]);
+  const pressedKeysRef = useRef<Set<number>>(new Set());
 
   // Resolve a pressed position to its keymap label on the currently displayed
   // layer. We have no real keycode from the firmware (KEY_PRESS carries only
@@ -2215,6 +2292,8 @@ function TesterContent({ snapshot, activeLayer, setActiveLayer, layer, reportedL
     void onKeyPressEvent((ev: KeyPressEvent) => {
       if (ev.device_uid !== statsUid) return;
       if (ev.pressed) {
+        if (pressedKeysRef.current.has(ev.position)) return;
+        pressedKeysRef.current.add(ev.position);
         setPressedKeys((prev) => new Set(prev).add(ev.position));
         setTestedKeys((prev) => new Set(prev).add(ev.position));
         const label = labelByPositionRef.current.get(ev.position);
@@ -2227,6 +2306,7 @@ function TesterContent({ snapshot, activeLayer, setActiveLayer, layer, reportedL
           next.delete(ev.position);
           return next;
         });
+        pressedKeysRef.current.delete(ev.position);
       }
     }).then((fn) => {
       if (disposed) fn();
@@ -2235,9 +2315,19 @@ function TesterContent({ snapshot, activeLayer, setActiveLayer, layer, reportedL
     return () => {
       disposed = true;
       unlisten?.();
+      pressedKeysRef.current.clear();
       setPressedKeys(new Set());
+      setTestedKeys(new Set());
+      setTyped([]);
     };
   }, [statsUid]);
+
+  const resetTester = useCallback(() => {
+    pressedKeysRef.current.clear();
+    setTestedKeys(new Set());
+    setPressedKeys(new Set());
+    setTyped([]);
+  }, []);
 
   const keyStyle = useCallback(
     (key: StudioPhysicalKey): CSSProperties | undefined => {
@@ -2269,15 +2359,15 @@ function TesterContent({ snapshot, activeLayer, setActiveLayer, layer, reportedL
       reportedLayerIndex={reportedLayerIndex}
       keyStyle={keyStyle}
       marquee={
-        <>
+        <div className="flex min-w-0 items-center gap-2">
           <TypedMarquee typed={typed} />
           <button
-            onClick={() => { setTestedKeys(new Set()); setPressedKeys(new Set()); setTyped([]); }}
+            onClick={resetTester}
             className="shrink-0 rounded-pill px-3 py-1.5 text-sm text-muted hover:bg-plate hover:text-ink transition-colors"
           >
             {t("tester.reset")}
           </button>
-        </>
+        </div>
       }
     />
   );

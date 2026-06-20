@@ -4,7 +4,7 @@ import { probeDevices } from "../api";
 import { RollingNumber } from "../components/RollingNumber";
 import { friendlyError } from "../lib/errors";
 import { useLang, type TranslationKey } from "../i18n";
-import type { DeviceBatteryStatus, MonitorStatus, ProbeResult, StudioDeviceStatus } from "../types";
+import type { DeviceBatteryStatus, DeviceInfo, MonitorStatus, ProbeResult, StudioDeviceStatus } from "../types";
 
 interface DevicesProps {
   studioDevices: StudioDeviceStatus[];
@@ -47,9 +47,9 @@ export default function Devices({ studioDevices, studioScanning, studioError, re
   }, [scanHostLink, scanStudio]);
 
   const loading = hostLinkLoading || studioScanning;
-  const sortedResults = results === null ? null : [...results].sort(compareProbeResults);
+  const hostLinkGroups = results === null ? null : groupProbeResults(results);
   const sortedStudioDevices = [...studioDevices].sort(compareStudioDevices);
-  const hostLinkOkCount = results?.filter((result) => result.verified).length ?? 0;
+  const hostLinkOkCount = hostLinkGroups?.filter((group) => group.verified).length ?? 0;
   const studioOkCount = studioDevices.filter((device) => device.rpc_status === "ok").length;
 
   useEffect(() => { handleProbe(); }, [handleProbe]);
@@ -85,11 +85,11 @@ export default function Devices({ studioDevices, studioScanning, studioError, re
           <EmptyCard title={t("devices.empty")} body={t("devices.empty.hint")} />
         ) : (
           <div className="space-y-3">
-            {sortedResults!.map((result) => (
+            {hostLinkGroups!.map((group) => (
               <HostLinkDeviceCard
-                key={result.device.path}
-                result={result}
-                battery={findBatteryForDevice(status.device_battery, result.device)}
+                key={group.key}
+                group={group}
+                battery={findBatteryForGroup(status.device_battery, group.devices)}
               />
             ))}
           </div>
@@ -115,15 +115,6 @@ export default function Devices({ studioDevices, studioScanning, studioError, re
         </p>
       )}
     </div>
-  );
-}
-
-function compareProbeResults(a: ProbeResult, b: ProbeResult): number {
-  return (
-    Number(b.verified) - Number(a.verified) ||
-    compareConnectionType(a.device.connection_type, b.device.connection_type) ||
-    deviceDisplayName(a.device).localeCompare(deviceDisplayName(b.device)) ||
-    a.device.path.localeCompare(b.device.path)
   );
 }
 
@@ -157,18 +148,77 @@ function deviceDisplayName(device: ProbeResult["device"]): string {
   return device.product ?? device.manufacturer ?? device.serial_number ?? device.device_uid_hash ?? "Unknown Device";
 }
 
-function findBatteryForDevice(
-  batteries: DeviceBatteryStatus[],
-  device: ProbeResult["device"]
-): DeviceBatteryStatus | null {
+interface HostLinkDeviceGroup {
+  key: string;
+  name: string;
+  devices: DeviceInfo[];
+  verified: boolean;
+  errors: string[];
+}
+
+function groupProbeResults(results: ProbeResult[]): HostLinkDeviceGroup[] {
+  const groups = new Map<string, HostLinkDeviceGroup>();
+  for (const result of results) {
+    const key = result.device.device_uid_hash ?? `path:${result.device.path}`;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.devices.push(result.device);
+      existing.name = chooseGroupName(existing.name, deviceDisplayName(result.device));
+      existing.verified ||= result.verified;
+      if (result.error) existing.errors.push(result.error);
+    } else {
+      groups.set(key, {
+        key,
+        name: deviceDisplayName(result.device),
+        devices: [result.device],
+        verified: result.verified,
+        errors: result.error ? [result.error] : [],
+      });
+    }
+  }
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      devices: [...group.devices].sort(compareDeviceTransport),
+    }))
+    .sort(compareHostLinkGroups);
+}
+
+function compareHostLinkGroups(a: HostLinkDeviceGroup, b: HostLinkDeviceGroup): number {
   return (
-    batteries.find(
-      (entry) =>
-        (device.device_uid_hash !== null && entry.device_key === device.device_uid_hash) ||
-        serialsMatch(entry.serial_number, device.serial_number) ||
-        (entry.product !== null && entry.product === device.product)
-    ) ?? null
+    Number(b.verified) - Number(a.verified) ||
+    a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }) ||
+    a.key.localeCompare(b.key)
   );
+}
+
+function compareDeviceTransport(a: DeviceInfo, b: DeviceInfo): number {
+  return (
+    compareConnectionType(a.connection_type, b.connection_type) ||
+    a.path.localeCompare(b.path)
+  );
+}
+
+function chooseGroupName(current: string, next: string): string {
+  if (current === "Unknown Device") return next;
+  return current;
+}
+
+function findBatteryForGroup(
+  batteries: DeviceBatteryStatus[],
+  devices: DeviceInfo[]
+): DeviceBatteryStatus | null {
+  for (const device of devices) {
+    const battery =
+      batteries.find(
+        (entry) =>
+          (device.device_uid_hash !== null && entry.device_key === device.device_uid_hash) ||
+          serialsMatch(entry.serial_number, device.serial_number) ||
+          (entry.product !== null && entry.product === device.product)
+      ) ?? null;
+    if (battery) return battery;
+  }
+  return null;
 }
 
 function serialsMatch(a: string | null, b: string | null): boolean {
@@ -207,23 +257,24 @@ function EmptyCard({ title, body }: { title: string; body: string }) {
   );
 }
 
-function HostLinkDeviceCard({ result, battery }: { result: ProbeResult; battery: DeviceBatteryStatus | null }) {
+function HostLinkDeviceCard({ group, battery }: { group: HostLinkDeviceGroup; battery: DeviceBatteryStatus | null }) {
   const { t } = useLang();
-  const { device, verified, error } = result;
-  const name = device.product ?? device.manufacturer ?? "Unknown Device";
-  const connectionLabel = hostLinkConnectionLabel(device.connection_type);
+  const device = group.devices[0];
+  const verified = group.verified;
+  const connectionLabel = group.devices.map((item) => hostLinkConnectionLabel(item.connection_type)).join(" / ");
 
   return (
     <div className="rounded-card bg-surface">
       <div className="flex items-start gap-4 px-5 py-4">
-        <IconBox ok={verified} icon={hostLinkConnectionIcon(device.connection_type)} title={connectionLabel} />
+        <IconBox ok={verified} icon={<HostLinkTransportIcons devices={group.devices} />} title={connectionLabel} />
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
-            <span className="font-medium text-ink text-sm">{name}</span>
+            <span className="font-medium text-ink text-sm">{group.name}</span>
             <StatusPill ok={verified} label={verified ? t("devices.host_link.ok") : t("devices.host_link.not_supported")} />
           </div>
           {device.manufacturer && <div className="text-xs text-faint mt-0.5">{device.manufacturer}</div>}
-          <DeviceBadges device={device} />
+          <div className="mt-0.5 text-xs text-faint">{connectionLabel}</div>
+          <HostLinkDeviceBadges devices={group.devices} />
           {verified && <HostLinkCapabilityBadges device={device} />}
           {battery && battery.sources.length > 0 && (
             <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -243,8 +294,16 @@ function HostLinkDeviceCard({ result, battery }: { result: ProbeResult; battery:
               ))}
             </div>
           )}
-          <div className="mt-1.5 font-mono text-[10px] text-faint truncate" title={device.path}>{device.path}</div>
-          {error && <div className="mt-2 rounded-md bg-red-50 px-3 py-1.5 text-xs text-red-600">{error}</div>}
+          <div className="mt-1.5 space-y-0.5">
+            {group.devices.map((item) => (
+              <div key={item.path} className="font-mono text-[10px] text-faint truncate" title={item.path}>
+                {hostLinkConnectionLabel(item.connection_type)}: {item.path}
+              </div>
+            ))}
+          </div>
+          {group.errors.map((error, index) => (
+            <div key={`${error}-${index}`} className="mt-2 rounded-md bg-red-50 px-3 py-1.5 text-xs text-red-600">{error}</div>
+          ))}
         </div>
       </div>
     </div>
@@ -325,10 +384,10 @@ function studioConnectionLabel(device: StudioDeviceStatus, t: (key: TranslationK
   return t("keymap.connection_usb_serial");
 }
 
-function hostLinkConnectionIcon(connectionType: ProbeResult["device"]["connection_type"]) {
-  if (connectionType === "bluetooth") return <Bluetooth size={18} />;
-  if (connectionType === "usb") return <Usb size={18} />;
-  return <Keyboard size={18} />;
+function hostLinkConnectionIcon(connectionType: ProbeResult["device"]["connection_type"], size = 18) {
+  if (connectionType === "bluetooth") return <Bluetooth size={size} />;
+  if (connectionType === "usb") return <Usb size={size} />;
+  return <Keyboard size={size} />;
 }
 
 function hostLinkConnectionLabel(connectionType: ProbeResult["device"]["connection_type"]) {
@@ -337,8 +396,26 @@ function hostLinkConnectionLabel(connectionType: ProbeResult["device"]["connecti
   return "Unknown";
 }
 
+function HostLinkTransportIcons({ devices }: { devices: DeviceInfo[] }) {
+  const types = uniqueConnectionTypes(devices);
+  return (
+    <div className="flex items-center gap-1">
+      {types.map((type) => (
+        <span key={type} className="flex items-center">
+          {hostLinkConnectionIcon(type, types.length > 1 ? 15 : 18)}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+function uniqueConnectionTypes(devices: DeviceInfo[]): DeviceInfo["connection_type"][] {
+  return [...new Set(devices.map((device) => device.connection_type))]
+    .sort(compareConnectionType);
+}
+
 function IconBox({ ok, icon, title }: { ok: boolean; icon: React.ReactNode; title?: string }) {
-  return <div title={title} aria-label={title} className={`mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-lg ${ok ? "bg-accent-soft text-accent-deep" : "bg-plate text-disabled"}`}>{icon}</div>;
+  return <div title={title} aria-label={title} className={`mt-0.5 flex h-9 min-w-9 flex-shrink-0 items-center justify-center rounded-lg px-2 ${ok ? "bg-accent-soft text-accent-deep" : "bg-plate text-disabled"}`}>{icon}</div>;
 }
 
 function StatusPill({ ok, label }: { ok: boolean; label: string }) {
@@ -351,16 +428,25 @@ function StudioPill({ label, tone }: { label: string; tone: "ok" | "warn" | "mut
   return <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${color}`}>{label}</span>;
 }
 
-function DeviceBadges({ device }: { device: ProbeResult["device"] }) {
+function HostLinkDeviceBadges({ devices }: { devices: DeviceInfo[] }) {
+  const device = devices[0];
+  const serialNumbers = uniqueStrings(devices.map((item) => item.serial_number));
+
   return (
     <div className="mt-2 flex flex-wrap gap-2">
       <Badge label="VID" value={hex(device.vendor_id, 4)} />
       <Badge label="PID" value={hex(device.product_id, 4)} />
       <Badge label="Usage Page" value={hex(device.usage_page, 4)} />
       <Badge label="Usage" value={hex(device.usage, 2)} />
-      {device.serial_number && <Badge label="S/N" value={device.serial_number} />}
+      {serialNumbers.map((serialNumber) => (
+        <Badge key={serialNumber} label="S/N" value={serialNumber} />
+      ))}
     </div>
   );
+}
+
+function uniqueStrings(values: Array<string | null>): string[] {
+  return [...new Set(values.filter((value): value is string => value !== null && value.length > 0))];
 }
 
 function studioSupportedLabel(device: StudioDeviceStatus, t: (key: TranslationKey) => string) {

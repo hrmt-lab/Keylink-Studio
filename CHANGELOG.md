@@ -2,6 +2,18 @@
 
 All notable changes to RawHID Host are documented in this file.
 
+## [Unreleased]
+
+### Changed
+
+- Keymap Viewer の Host Link 紐付けを、ZMK Studio `get_device_info().serial_number` が返す 16 桁 hex UID と Host Link `device_uid_hash` の UID 優先照合へ変更。BLE Studio でもヒートマップ / キーテスターを同じ個体の統計へ紐付けられるようにした。
+- Devices 画面の Host Link 一覧を `device_uid_hash` 単位で集約。同じキーボードが USB HID と BLE HOG の両方で見えている場合は 1 カードにまとめ、USB / Bluetooth の両方のアイコンと各 HID path を表示するようにした。
+
+### Fixed
+
+- キーテスターで同じキーの pressed event が連続受信されたとき、直近入力表示に同じ文字が重複して流れる問題を修正。
+- キーテスターの `リセット` で直近入力表示が残る問題を修正し、キーボード切り替え時にも表示をクリアするようにした。
+
 ## [0.9.1] - 2026-06-18
 
 ### Changed

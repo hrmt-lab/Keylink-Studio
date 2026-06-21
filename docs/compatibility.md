@@ -10,7 +10,8 @@ RawHID Host のアプリバージョンと Host Link プロトコルバージョ
 
 | ホストアプリバージョン | Host Link プロトコル | 必要な firmware 側対応 | 主な機能 |
 | --- | --- | --- | --- |
-| `main` | `v1` | Host Link protocol は 0.9.1 と同じ。BLE Host Link を使う場合は firmware transport 側で BLE HOG の連続 uplink notify を落とさない実装が必要。ZMK Studio 編集には firmware 側の ZMK Studio 対応と実機での `&studio_unlock` が必要。Keymap Viewer の統計紐付けを BLE Studio でも安定させるには、ZMK Studio `get_device_info().serial_number` が Host Link `device_uid_hash` と同じ 16 桁小文字 hex UID を返す firmware が必要 | Host Link の BLE HOG 接続対応、BLE HELLO miss の一時許容、HELLO timeout 既定 750ms、Dashboard / Devices 画面の `device_uid_hash` 単位集約と USB / Bluetooth アイコン表示、BLE device への battery 表示紐付け改善、BLE Studio transport でのキーマップ表示・編集、BLE Studio と Host Link の UID 優先紐付け、キーテスターの重複押下表示抑止とリセット改善、BLE 編集中の書き込み待ち表示と失敗時の再読み込み復旧 |
+| `main` | `v1` | 次期開発版、未リリース | — |
+| `1.0.0` | `v1` | 0.9.1 と同じ (Host Link firmware 側変更なし)。BLE Host Link には BLE HOG uplink notify 実装が必要。BLE Studio / UID 紐付けには ZMK Studio 対応 firmware + `&studio_unlock` + 16 桁 hex UID の `serial_number` が必要 | BLE Host Link 対応、ZMK Studio BLE 編集、キーマップ export / restore（`-keymap.json`）、UID 優先紐付け、Devices の UID 集約、キーテスター修正、キー書き込み ✓ フラッシュ、export ファイル名を `-keymap.json` に変更 |
 | `0.9.1` | `v1` | 0.9.0 と同じ (Host Link firmware 側変更なし) | UI のみの更新。設定の保存方法を画面ごとに統一 (即時保存画面と保存ボタン画面)、失敗時のエラー文言を利用者向けに変更、キーマップ表示の現在レイヤードット見切れ修正 |
 | `0.9.0` | `v1` | Host Link は 0.6.0 と同系統。キーテスターには `KEY_PRESS` capability が必要。ZMK Studio 編集には firmware 側の ZMK Studio 対応と実機での `&studio_unlock` が必要 | ZMK Studio RPC 経由のキーマップ編集を拡張。MO / TG / TO、MT / LT、Sticky、Bluetooth、Output、Mouse、Utility、System、レイヤー追加 / 名前変更 / 削除、キーテスター。README / docs を現状仕様へ更新 |
 | `0.8.5` | `v1` | 0.6.0 と同じ (Host Link firmware 側変更なし)。ZMK Studio 編集 v1 には firmware 側の ZMK Studio 対応と実機での `&studio_unlock` が必要 | 0.8.1 の機能 + ZMK Studio RPC 経由のキーマップ編集 v1 (通常キー / 透過 / 無効、保存 / 破棄、キーコードピッカー)。キーマップ表示の自動縮小、左右余白調整、キーマップ画面・ダッシュボードのデバイス名順表示 |

@@ -464,6 +464,7 @@ export default function KeymapViewer({
   const [restoreReport, setRestoreReport] = useState<RestoreReport | null>(null);
   const [restoreNotice, setRestoreNotice] = useState<"no_targets" | null>(null);
   const [changedKeys, setChangedKeys] = useState<Set<string>>(() => new Set());
+  const [flashKeys, setFlashKeys] = useState<Map<string, number>>(() => new Map());
   const [catalog, setCatalog] = useState<KeyCatalogEntry[]>([]);
   const [pendingKeyWrites, setPendingKeyWrites] = useState(0);
   const [keyWriteErrorCode, setKeyWriteErrorCode] = useState<string | null>(null);
@@ -673,6 +674,15 @@ export default function KeymapViewer({
             next.add(changedKeyId(job.layerIndex, job.position));
             return next;
           });
+          const flashId = changedKeyId(job.layerIndex, job.position);
+          const flashVersion = Date.now();
+          setFlashKeys((current) => { const next = new Map(current); next.set(flashId, flashVersion); return next; });
+          window.setTimeout(() => {
+            setFlashKeys((current) => {
+              if (current.get(flashId) !== flashVersion) return current;
+              const next = new Map(current); next.delete(flashId); return next;
+            });
+          }, 1200);
           setPendingKeyWrites((current) => {
             const next = Math.max(0, current - 1);
             if (next === 0 && latestKeyWriteSnapshotRef.current) {
@@ -1179,6 +1189,7 @@ export default function KeymapViewer({
                   layer={layer}
                   reportedLayerIndex={reportedLayerIndex}
                   keyStyle={changedKeyStyle}
+                  flashKeys={flashKeys}
                   editing={editing}
                   hasChangedKeys={changedKeys.size > 0}
                   editBusy={structuralEditBusy}
@@ -1269,6 +1280,7 @@ function KeymapContent({
   layer,
   reportedLayerIndex,
   keyStyle,
+  flashKeys,
   marquee,
   onKeyClick,
   editing = false,
@@ -1287,6 +1299,7 @@ function KeymapContent({
   /** Layer the keyboard itself reports as active (LAYER_STATE uplink), or null. */
   reportedLayerIndex: number | null;
   keyStyle?: (key: StudioPhysicalKey) => CSSProperties | undefined;
+  flashKeys?: Map<string, number>;
   onKeyClick?: (key: StudioPhysicalKey, element: HTMLDivElement) => void;
   /** Optional element shown to the right of the layer tabs (tester typed-char marquee). */
   marquee?: ReactNode;
@@ -1494,6 +1507,7 @@ function KeymapContent({
           onKeyClick={onKeyClick}
           keyContent={(key) => {
             const binding = bindingsByPosition.get(key.position);
+            const flashVersion = flashKeys?.get(`${activeLayer}:${key.position}`);
             return (
               <>
                 <div className="w-full truncate text-[11px] font-medium leading-tight text-ink">
@@ -1502,6 +1516,16 @@ function KeymapContent({
                 {binding?.primary_label && (
                   <div className="absolute bottom-1 right-1 font-mono text-[9px] leading-none text-faint">
                     {`#${key.position}`}
+                  </div>
+                )}
+                {flashVersion !== undefined && (
+                  <div key={flashVersion} className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                    <div
+                      className="animate-key-check-flash flex h-6 w-6 items-center justify-center rounded-full"
+                      style={{ backgroundColor: "rgb(var(--accent-rgb))" }}
+                    >
+                      <span className="text-base font-bold leading-none text-white">✓</span>
+                    </div>
                   </div>
                 )}
               </>

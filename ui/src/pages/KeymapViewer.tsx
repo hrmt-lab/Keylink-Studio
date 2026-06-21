@@ -837,7 +837,7 @@ export default function KeymapViewer({
     setRestoreReport(null);
     setRestoreNotice(null);
     setChangedKeys(new Set());
-    const defaultName = `${selected.display_name.replace(/[\\/:*?"<>|]+/g, "-")}.rawhid-keymap.json`;
+    const defaultName = `${selected.display_name.replace(/[\\/:*?"<>|]+/g, "-")}-keymap.json`;
     const path = await saveDialog({
       defaultPath: defaultName,
       filters: [{ name: "JSON", extensions: ["json"] }],

@@ -130,7 +130,7 @@ access token、credentials JSON、API response、raw error は画面に表示し
 - タイピング統計ヒートマップ
 - キーテスター
 
-`Export` は、現在デバイス上にある ZMK Studio/NVS のキーマップ状態を `.rawhid-keymap.json` として保存します。これは firmware の `.keymap` ソースを書き換えるものではありません。firmware をフルイレース、または settings reset 付きで焼き直す前の運用バックアップとして使います。
+`Export` は、現在デバイス上にある ZMK Studio/NVS のキーマップ状態を `-keymap.json` として保存します。これは firmware の `.keymap` ソースを書き換えるものではありません。firmware をフルイレース、または settings reset 付きで焼き直す前の運用バックアップとして使います。
 
 `Restore` は、バックアップ JSON を読み込み、現在キーボードにも存在する layer index と key position の raw binding だけを復元します。backup にしかない layer / position は書き込まず、現在キーボードにしかない layer / position は変更しません。復元対象の差分がない場合は、画面上にその旨を表示し、未保存変更は作りません。復元は即保存ではなく、編集モードの未保存変更として反映されます。永続化するには下部バーの `保存` を押してください。取り消す場合は `変更を破棄` を押します。
 

@@ -900,7 +900,14 @@ fn wsl_home_dirs() -> Vec<PathBuf> {
 }
 
 fn wsl_distro_names_from_command() -> Vec<String> {
-    let Ok(output) = Command::new("wsl.exe").args(["-l", "-q"]).output() else {
+    #[cfg(windows)]
+    use std::os::windows::process::CommandExt;
+    #[allow(unused_mut)]
+    let mut cmd = Command::new("wsl.exe");
+    cmd.args(["-l", "-q"]);
+    #[cfg(windows)]
+    cmd.creation_flags(0x08000000); // CREATE_NO_WINDOW
+    let Ok(output) = cmd.output() else {
         return Vec::new();
     };
     parse_wsl_distro_names(&output.stdout)

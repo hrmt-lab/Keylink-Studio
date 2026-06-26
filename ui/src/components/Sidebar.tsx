@@ -1,6 +1,5 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  LayoutDashboard,
   List,
   Zap,
   Clock,
@@ -10,7 +9,8 @@ import {
   Settings,
   type LucideIcon,
 } from "lucide-react";
-import type { MonitorStatus, Page } from "../types";
+import { supportedDeviceCount } from "../lib/deviceCards";
+import type { MonitorStatus, Page, StudioDeviceStatus } from "../types";
 import { useLang, type TranslationKey } from "../i18n";
 
 interface NavItem {
@@ -20,13 +20,12 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { id: "dashboard", labelKey: "nav.dashboard", icon: LayoutDashboard },
+  { id: "devices", labelKey: "nav.devices", icon: Usb },
   { id: "rules", labelKey: "nav.rules", icon: List },
   { id: "actions", labelKey: "nav.actions", icon: Zap },
   { id: "timesync", labelKey: "nav.timesync", icon: Clock },
   { id: "ai_usage", labelKey: "nav.ai_usage", icon: ChartColumn },
   { id: "keymap_viewer", labelKey: "nav.keymap_viewer", icon: Keyboard },
-  { id: "devices", labelKey: "nav.devices", icon: Usb },
   { id: "settings", labelKey: "nav.settings", icon: Settings },
 ];
 
@@ -34,10 +33,15 @@ interface Props {
   currentPage: Page;
   onNavigate: (page: Page) => void;
   status: MonitorStatus;
+  studioDevices: StudioDeviceStatus[];
 }
 
-export function Sidebar({ currentPage, onNavigate, status }: Props) {
+export function Sidebar({ currentPage, onNavigate, status, studioDevices }: Props) {
   const { lang, setLang, t } = useLang();
+  const connectedDeviceCount = useMemo(
+    () => supportedDeviceCount(status.host_link_devices, studioDevices, status.device_battery),
+    [status.device_battery, status.host_link_devices, studioDevices]
+  );
 
   // Pulse the status dot briefly whenever the active layer changes.
   const [pulse, setPulse] = useState(false);
@@ -102,7 +106,7 @@ export function Sidebar({ currentPage, onNavigate, status }: Props) {
             {status.running && (
               <div className="text-[10px] text-faint truncate">
                 {t("sidebar.devices_connected", {
-                  n: status.connected_devices,
+                  n: connectedDeviceCount,
                 })}
               </div>
             )}

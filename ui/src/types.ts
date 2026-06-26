@@ -448,4 +448,4 @@ export interface ProbeResult {
 
 // 笏笏笏 Page Types 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
-export type Page = "dashboard" | "rules" | "actions" | "timesync" | "ai_usage" | "keymap_viewer" | "devices" | "settings";
+export type Page = "devices" | "rules" | "actions" | "timesync" | "ai_usage" | "keymap_viewer" | "settings";

@@ -53,6 +53,7 @@ interface KeymapViewerProps {
   snapshotsByDeviceId: Record<string, StudioKeymapSnapshot>;
   setSnapshotsByDeviceId: Dispatch<SetStateAction<Record<string, StudioKeymapSnapshot>>>;
   status: MonitorStatus;
+  onRegisterNavigationGuard?: (guard: KeymapNavigationGuard | null) => void;
 }
 
 interface PendingKeyWrite {
@@ -62,6 +63,13 @@ interface PendingKeyWrite {
   position: number;
   behavior: EditBehavior;
   previousSnapshot: StudioKeymapSnapshot | null;
+}
+
+interface KeymapNavigationGuard {
+  hasUnsaved: () => Promise<boolean>;
+  canLeave: () => boolean;
+  saveAndLeave: () => Promise<boolean>;
+  discardAndLeave: () => Promise<boolean>;
 }
 
 function changedKeyId(layerIndex: number, position: number): string {
@@ -446,6 +454,7 @@ export default function KeymapViewer({
   snapshotsByDeviceId,
   setSnapshotsByDeviceId,
   status,
+  onRegisterNavigationGuard,
 }: KeymapViewerProps) {
   const { t } = useLang();
   const [selectedId, setSelectedId] = useState<string>("");
@@ -764,7 +773,7 @@ export default function KeymapViewer({
   }, [catalog.length, mapEditProblem, selected, setSnapshotsByDeviceId, snapshot, t]);
 
   const saveEdit = useCallback(async () => {
-    if (!selected) return;
+    if (!selected) return false;
     setEditNotice(null);
     setKeyWriteErrorCode(null);
     setEditState((current) => ({ ...current, operation: "saving", problem: null }));
@@ -775,11 +784,13 @@ export default function KeymapViewer({
       setRestoreNotice(null);
       setChangedKeys(new Set());
       setEditNotice("saved");
+      return true;
     } catch (e) {
       const code = String(e);
       const problem = mapEditProblem(code) ?? "save_failed";
       setEditState((current) => ({ ...current, operation: "idle", problem }));
       setError(errorLabel(code, t));
+      return false;
     }
   }, [mapEditProblem, selected, t]);
 
@@ -830,6 +841,70 @@ export default function KeymapViewer({
       setError(errorLabel(code, t));
     }
   }, [discardEdit, editState.dirty, selected, t]);
+
+  const canLeaveForNavigation = useCallback(
+    () => pendingKeyWrites === 0 && editState.operation === "idle",
+    [editState.operation, pendingKeyWrites],
+  );
+
+  const hasUnsavedForNavigation = useCallback(async () => {
+    if (!selected || editState.mode !== "editing") return false;
+    if (pendingKeyWrites > 0) return true;
+    if (editState.dirty) {
+      return await studioHasUnsaved(selected.id).catch(() => true);
+    }
+    return await studioHasUnsaved(selected.id).catch(() => false);
+  }, [editState.dirty, editState.mode, pendingKeyWrites, selected]);
+
+  const finishEditForNavigation = useCallback(async () => {
+    if (!selected) return true;
+    setEditState((current) => ({ ...current, operation: "ending" }));
+    try {
+      await studioEndEdit(selected.id);
+      setPicker(null);
+      setRestoreReport(null);
+      setRestoreNotice(null);
+      setChangedKeys(new Set());
+      setEditState({ mode: "viewing", dirty: false, operation: "idle", problem: null });
+      return true;
+    } catch (e) {
+      const code = String(e);
+      setEditState((current) => ({ ...current, operation: "idle" }));
+      setError(errorLabel(code, t));
+      return false;
+    }
+  }, [selected, t]);
+
+  const saveAndLeaveForNavigation = useCallback(async () => {
+    if (!canLeaveForNavigation()) return false;
+    const saved = await saveEdit();
+    if (!saved) return false;
+    return await finishEditForNavigation();
+  }, [canLeaveForNavigation, finishEditForNavigation, saveEdit]);
+
+  const discardAndLeaveForNavigation = useCallback(async () => {
+    if (!canLeaveForNavigation()) return false;
+    const discarded = await discardEdit();
+    if (!discarded) return false;
+    return await finishEditForNavigation();
+  }, [canLeaveForNavigation, discardEdit, finishEditForNavigation]);
+
+  useEffect(() => {
+    if (!onRegisterNavigationGuard) return undefined;
+    onRegisterNavigationGuard({
+      hasUnsaved: hasUnsavedForNavigation,
+      canLeave: canLeaveForNavigation,
+      saveAndLeave: saveAndLeaveForNavigation,
+      discardAndLeave: discardAndLeaveForNavigation,
+    });
+    return () => onRegisterNavigationGuard(null);
+  }, [
+    canLeaveForNavigation,
+    discardAndLeaveForNavigation,
+    hasUnsavedForNavigation,
+    onRegisterNavigationGuard,
+    saveAndLeaveForNavigation,
+  ]);
 
   const exportKeymap = useCallback(async () => {
     if (!selected || keymapFileBusy || pendingKeyWrites > 0 || editState.operation !== "idle") return;

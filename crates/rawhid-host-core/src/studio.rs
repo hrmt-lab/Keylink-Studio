@@ -2297,14 +2297,14 @@ fn category_rank(category: &str) -> u8 {
     match category {
         "letters" => 0,
         "numbers" => 1,
-        "symbols" => 2,
+        "modifiers" => 2,
         "control" => 3,
-        "navigation" => 4,
-        "locks" => 5,
-        "function" => 6,
-        "international" => 7,
-        "language" => 8,
-        "modifiers" => 9,
+        "symbols" => 4,
+        "navigation" => 5,
+        "locks" => 6,
+        "function" => 7,
+        "international" => 8,
+        "language" => 9,
         "keypad" => 10,
         "editing" => 11,
         "media" => 12,
@@ -3081,7 +3081,7 @@ mod tests {
     }
 
     #[test]
-    fn key_catalog_uses_zmk_reference_category_order() {
+    fn key_catalog_uses_picker_category_order() {
         let catalog = key_catalog();
         assert!(!catalog.is_empty());
         assert!(catalog.iter().any(|entry| entry.display == "Esc"
@@ -3110,6 +3110,16 @@ mod tests {
             .iter()
             .any(|entry| entry.canonical.starts_with("C_AL_") && entry.category == "applications"));
         assert_eq!(catalog[0].category, "letters");
+        assert!(category_rank("letters") < category_rank("numbers"));
+        assert!(category_rank("numbers") < category_rank("modifiers"));
+        assert!(category_rank("modifiers") < category_rank("control"));
+        assert!(category_rank("control") < category_rank("symbols"));
+        assert!(category_rank("symbols") < category_rank("navigation"));
+        assert!(category_rank("navigation") < category_rank("locks"));
+        assert!(category_rank("locks") < category_rank("function"));
+        assert!(category_rank("function") < category_rank("international"));
+        assert!(category_rank("international") < category_rank("language"));
+        assert!(category_rank("language") < category_rank("keypad"));
         assert!(category_rank("miscellaneous") > category_rank("power_lock"));
     }
 

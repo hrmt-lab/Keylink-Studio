@@ -1321,32 +1321,45 @@ fn handle_uplink_events(
                             })
                     })
                     .flatten();
-                let message = match binding {
+                let (level, message) = match binding {
                     Some(binding) => {
                         match actions::execute(app, binding, action.value, extras, status) {
-                            Ok(actions::ActionOutcome::Continue) => format!(
-                                "host action {} executed ({:?})",
-                                action.action_id, binding.action
+                            Ok(actions::ActionOutcome::Continue) => (
+                                "info",
+                                format!(
+                                    "host action {} executed ({:?})",
+                                    action.action_id, binding.action
+                                ),
                             ),
                             Ok(actions::ActionOutcome::StopRequested) => {
                                 should_stop = true;
-                                format!("host action {}: stop monitoring", action.action_id)
+                                (
+                                    "info",
+                                    format!("host action {}: stop monitoring", action.action_id),
+                                )
                             }
-                            Err(error) => {
-                                format!("host action {} failed: {}", action.action_id, error)
-                            }
+                            Err(error) => (
+                                "error",
+                                format!("host action {} failed: {}", action.action_id, error),
+                            ),
                         }
                     }
-                    None if actions_cfg.enabled => format!(
-                        "unbound host action id={} value={} ({})",
-                        action.action_id, action.value, device_key
+                    None if actions_cfg.enabled => (
+                        "warn",
+                        format!(
+                            "unbound host action id={} value={} ({})",
+                            action.action_id, action.value, device_key
+                        ),
                     ),
-                    None => format!(
-                        "host action id={} ignored (actions disabled)",
-                        action.action_id
+                    None => (
+                        "warn",
+                        format!(
+                            "host action id={} ignored (actions disabled)",
+                            action.action_id
+                        ),
                     ),
                 };
-                let entry = add_log(log_entries, log_counter, "info", &message);
+                let entry = add_log(log_entries, log_counter, level, &message);
                 let _ = app.emit("log-added", entry);
             }
             UplinkPacket::KeyStats(_) => {

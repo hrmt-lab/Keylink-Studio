@@ -1,6 +1,5 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Sidebar } from "./components/Sidebar";
-import Dashboard from "./pages/Dashboard";
 import Rules from "./pages/Rules";
 import Actions from "./pages/Actions";
 import TimeSync from "./pages/TimeSync";
@@ -28,6 +27,15 @@ import { LangProvider, useLang } from "./i18n";
 
 const MAX_LOGS = 200;
 
+type PendingNavigationAction = "save" | "discard";
+
+interface KeymapNavigationGuard {
+  hasUnsaved: () => Promise<boolean>;
+  canLeave: () => boolean;
+  saveAndLeave: () => Promise<boolean>;
+  discardAndLeave: () => Promise<boolean>;
+}
+
 export default function App() {
   return (
     <LangProvider>
@@ -37,7 +45,12 @@ export default function App() {
 }
 
 function AppInner() {
-  const [page, setPage] = useState<Page>("dashboard");
+  const [page, setPage] = useState<Page>("devices");
+  const keymapNavigationGuardRef = useRef<KeymapNavigationGuard | null>(null);
+  const [pendingNavigation, setPendingNavigation] = useState<Page | null>(null);
+  const [pendingNavigationCanLeave, setPendingNavigationCanLeave] = useState(false);
+  const [pendingNavigationAction, setPendingNavigationAction] =
+    useState<PendingNavigationAction | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [status, setStatus] = useState<MonitorStatus>({
     running: false,
@@ -120,7 +133,54 @@ function AppInner() {
     void refreshStudioDevices().catch(() => {});
   }, [refreshStudioDevices]);
 
+  useEffect(() => {
+    if (!pendingNavigation) return undefined;
+    const update = () => setPendingNavigationCanLeave(keymapNavigationGuardRef.current?.canLeave() ?? false);
+    update();
+    const timer = window.setInterval(update, 250);
+    return () => window.clearInterval(timer);
+  }, [pendingNavigation]);
+
   const { t } = useLang();
+  const registerKeymapNavigationGuard = useCallback((guard: KeymapNavigationGuard | null) => {
+    keymapNavigationGuardRef.current = guard;
+  }, []);
+
+  const requestNavigate = useCallback(async (nextPage: Page) => {
+    if (nextPage === page) return;
+    const guard = page === "keymap_viewer" ? keymapNavigationGuardRef.current : null;
+    if (guard && await guard.hasUnsaved()) {
+      setPendingNavigationCanLeave(guard.canLeave());
+      setPendingNavigation(nextPage);
+      return;
+    }
+    setPage(nextPage);
+  }, [page]);
+
+  const closePendingNavigation = useCallback(() => {
+    if (pendingNavigationAction) return;
+    setPendingNavigation(null);
+    setPendingNavigationCanLeave(false);
+  }, [pendingNavigationAction]);
+
+  const completePendingNavigation = useCallback(async (action: PendingNavigationAction) => {
+    if (!pendingNavigation || pendingNavigationAction) return;
+    const guard = keymapNavigationGuardRef.current;
+    if (!guard || !guard.canLeave()) return;
+
+    setPendingNavigationAction(action);
+    try {
+      const ok = action === "save"
+        ? await guard.saveAndLeave()
+        : await guard.discardAndLeave();
+      if (!ok) return;
+      setPage(pendingNavigation);
+      setPendingNavigation(null);
+      setPendingNavigationCanLeave(false);
+    } finally {
+      setPendingNavigationAction(null);
+    }
+  }, [pendingNavigation, pendingNavigationAction]);
 
   if (loading || !config) {
     return (
@@ -137,16 +197,13 @@ function AppInner() {
 
   return (
     <div className="flex h-full overflow-hidden bg-background">
-      <Sidebar currentPage={page} onNavigate={setPage} status={status} />
+      <Sidebar
+        currentPage={page}
+        onNavigate={(nextPage) => void requestNavigate(nextPage)}
+        status={status}
+        studioDevices={studioDevices}
+      />
       <main className="app-main-scroll flex-1 overflow-y-auto">
-        {page === "dashboard" && (
-          <Dashboard
-            config={config}
-            setConfig={updateConfig}
-            status={status}
-            logs={logs}
-          />
-        )}
         {page === "rules" && (
           <Rules config={config} setConfig={updateConfig} status={status} />
         )}
@@ -168,6 +225,7 @@ function AppInner() {
             snapshotsByDeviceId={keymapSnapshotsByDeviceId}
             setSnapshotsByDeviceId={setKeymapSnapshotsByDeviceId}
             status={status}
+            onRegisterNavigationGuard={registerKeymapNavigationGuard}
           />
         )}
         {page === "devices" && (
@@ -177,12 +235,86 @@ function AppInner() {
             studioError={studioError}
             refreshStudioDevices={refreshStudioDevices}
             status={status}
+            logs={logs}
           />
         )}
         {page === "settings" && (
           <Settings config={config} setConfig={updateConfig} />
         )}
       </main>
+      {pendingNavigation && (
+        <UnsavedNavigationDialog
+          busyAction={pendingNavigationAction}
+          canLeave={pendingNavigationCanLeave}
+          onSave={() => void completePendingNavigation("save")}
+          onDiscard={() => void completePendingNavigation("discard")}
+          onCancel={closePendingNavigation}
+        />
+      )}
+    </div>
+  );
+}
+
+function UnsavedNavigationDialog({
+  busyAction,
+  canLeave,
+  onSave,
+  onDiscard,
+  onCancel,
+}: {
+  busyAction: PendingNavigationAction | null;
+  canLeave: boolean;
+  onSave: () => void;
+  onDiscard: () => void;
+  onCancel: () => void;
+}) {
+  const { t } = useLang();
+  const busy = busyAction !== null;
+  const actionDisabled = busy || !canLeave;
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/20 px-4">
+      <div className="w-[min(440px,100%)] rounded-card bg-surface p-5 shadow-neu-up ring-1 ring-border">
+        <div>
+          <h2 className="text-base font-medium text-ink">
+            {t("keymap.edit.leave_unsaved_title")}
+          </h2>
+          <p className="mt-2 text-sm leading-6 text-muted">
+            {canLeave
+              ? t("keymap.edit.leave_unsaved_body")
+              : t("keymap.edit.leave_unsaved_busy")}
+          </p>
+        </div>
+        <div className="mt-5 flex flex-wrap justify-end gap-2">
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={busy}
+            className="rounded-pill bg-background px-3 py-2 text-sm font-medium text-muted ring-1 ring-border disabled:opacity-50"
+          >
+            {t("keymap.edit.leave_cancel")}
+          </button>
+          <button
+            type="button"
+            onClick={onDiscard}
+            disabled={actionDisabled}
+            className="rounded-pill bg-background px-3 py-2 text-sm font-medium text-red-700 ring-1 ring-red-100 disabled:opacity-50"
+          >
+            {busyAction === "discard"
+              ? t("keymap.edit.discarding")
+              : t("keymap.edit.leave_discard")}
+          </button>
+          <button
+            type="button"
+            onClick={onSave}
+            disabled={actionDisabled}
+            className="rounded-pill bg-accent px-3 py-2 text-sm font-medium text-white disabled:opacity-50"
+          >
+            {busyAction === "save"
+              ? t("keymap.edit.saving")
+              : t("keymap.edit.leave_save")}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

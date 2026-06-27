@@ -4,6 +4,12 @@ Keylink Studio の主な変更点をこのファイルに記録します。
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-06-27
+
+### Fixed
+
+- Windows の bundled application executable 名を `rawhid-host-tauri.exe` から `keylink-studio.exe` に変更。
+
 ## [1.1.0] - 2026-06-27
 
 ### Changed

@@ -1,6 +1,6 @@
-# Changelog
+# 変更履歴
 
-All notable changes to Keylink Studio are documented in this file.
+Keylink Studio の主な変更点をこのファイルに記録します。
 
 ## [Unreleased]
 
@@ -8,18 +8,22 @@ All notable changes to Keylink Studio are documented in this file.
 
 ### Changed
 
-- Renamed the app to Keylink Studio across the app UI, CLI, configuration file name, user data paths, release output naming, and documentation.
-- Updated the app icon assets and sidebar logo to the current Keylink Studio icon set.
+- アプリ UI、CLI、設定ファイル名、ユーザーデータ保存先、リリース出力名、ドキュメント内のアプリ名を Keylink Studio に変更。
+- アプリアイコン素材とサイドバーのロゴを現在の Keylink Studio アイコンセットに更新。
+
+### Fixed
+
+- `BATTERY_STATUS` を送信するデバイスで、`DEVICE_HELLO` の capability に BATTERY が含まれていない場合でも、Devices 画面とタスクトレイにバッテリー残量を表示できるように修正。
 
 ## [1.0.1] - 2026-06-27
 
 ### Changed
 
-- Refined the Devices view and keymap edit navigation.
+- Devices 画面とキーマップ編集へのナビゲーションを調整。
 
 ### Fixed
 
-- Fixed a console window flash when spawning `wsl.exe` on Windows.
+- Windows で `wsl.exe` を起動するときにコンソールウィンドウが一瞬表示される問題を修正。
 
 ## [1.0.0] - 2026-06-22
 

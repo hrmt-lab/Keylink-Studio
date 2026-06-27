@@ -225,13 +225,20 @@ where
     ) {
         {
             {
-                if device.capabilities & packet.required_capability() == 0 {
+                let missing_capability = device.capabilities & packet.required_capability() == 0;
+                if missing_capability && !matches!(packet, UplinkPacket::Battery(_)) {
                     debug!(
                         "dropping uplink {:?} from {}: capability not advertised",
                         packet.packet_type(),
                         device.path
                     );
                     return;
+                }
+                if missing_capability {
+                    debug!(
+                        "accepting battery uplink from {} even though BATTERY capability is not advertised",
+                        device.path
+                    );
                 }
                 let device_key = uplink_device_key(&device);
                 match &packet {
@@ -1120,7 +1127,7 @@ mod tests {
     }
 
     #[test]
-    fn uplink_without_capability_is_dropped() {
+    fn battery_uplink_without_capability_is_still_displayed() {
         use crate::packet::{BatteryEntry, BatteryStatusPacket, UplinkPacket};
 
         let transport = MultiMockTransport {
@@ -1148,8 +1155,10 @@ mod tests {
 
         runner.tick().unwrap();
 
-        assert!(runner.battery_statuses().is_empty());
-        assert!(runner.take_uplink_events().is_empty());
+        let battery = runner.battery_statuses();
+        assert_eq!(battery.len(), 1);
+        assert_eq!(battery[0].sources[0].level, Some(50));
+        assert_eq!(runner.take_uplink_events().len(), 1);
     }
 
     #[test]

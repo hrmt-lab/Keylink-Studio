@@ -21,6 +21,7 @@ import { friendlyError } from "../lib/errors";
 import {
   buildDeviceCards,
   groupProbeResults,
+  groupVerifiedHostLinkDevices,
   hasKnownConnectionType,
   isKnownStudioConnectionType,
   knownHostLinkConnectionTypes,
@@ -105,11 +106,15 @@ export default function Devices({
 
   const loading = hostLinkLoading || studioScanning;
   const hostLinkGroups = useMemo(
-    () => (results === null ? null : groupProbeResults(results)),
-    [results]
+    () =>
+      mergeHostLinkGroups(
+        results === null ? [] : groupProbeResults(results),
+        groupVerifiedHostLinkDevices(status.host_link_devices)
+      ),
+    [results, status.host_link_devices]
   );
   const cards = useMemo(
-    () => buildDeviceCards(hostLinkGroups ?? [], studioDevices, status.device_battery),
+    () => buildDeviceCards(hostLinkGroups, studioDevices, status.device_battery),
     [hostLinkGroups, studioDevices, status.device_battery]
   );
   const supportedCards = useMemo(() => cards.filter((card) => card.supported), [cards]);
@@ -203,6 +208,33 @@ function cardHasWarning(card: DeviceCardModel): boolean {
     (card.hostLink !== null && (!card.hostLink.verified || card.hostLink.errors.length > 0)) ||
     (card.studio !== null && (card.studio.rpc_status !== "ok" || card.studio.lock_state === "locked" || card.studio.error_code !== "none"))
   );
+}
+
+function mergeHostLinkGroups(
+  scannedGroups: ReturnType<typeof groupProbeResults>,
+  monitoredGroups: ReturnType<typeof groupVerifiedHostLinkDevices>
+): ReturnType<typeof groupProbeResults> {
+  const merged = new Map<string, ReturnType<typeof groupProbeResults>[number]>();
+  for (const group of scannedGroups) {
+    merged.set(group.key, { ...group, devices: [...group.devices], errors: [...group.errors] });
+  }
+  for (const group of monitoredGroups) {
+    const existing = merged.get(group.key);
+    if (!existing) {
+      merged.set(group.key, { ...group, devices: [...group.devices], errors: [...group.errors] });
+      continue;
+    }
+    const devices = new Map(existing.devices.map((device) => [device.path, device]));
+    for (const device of group.devices) devices.set(device.path, device);
+    merged.set(group.key, {
+      key: existing.key,
+      name: existing.name === "Unknown Device" ? group.name : existing.name,
+      devices: [...devices.values()],
+      verified: existing.verified || group.verified,
+      errors: existing.errors,
+    });
+  }
+  return [...merged.values()];
 }
 
 function DeviceCard({ card }: { card: DeviceCardModel }) {
@@ -341,6 +373,7 @@ function capabilityChips(card: DeviceCardModel, t: (key: TranslationKey) => stri
   }
   if ((capabilities & 2) !== 0) add(t("devices.capability.time_sync"));
   if ((capabilities & 4) !== 0) add(t("devices.capability.ai_usage"));
+  if ((capabilities & 16) !== 0 || card.battery !== null) add(t("devices.capability.battery"));
   if ((capabilities & 32) !== 0) add(t("devices.capability.host_action"));
   if ((capabilities & 64) !== 0) add(t("devices.capability.key_stats"));
   if ((capabilities & 128) !== 0) add(t("devices.capability.layer_state"));

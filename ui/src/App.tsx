@@ -36,6 +36,13 @@ interface KeymapNavigationGuard {
   discardAndLeave: () => Promise<boolean>;
 }
 
+function sortLogsNewestFirst(entries: LogEntry[]) {
+  return [...entries].sort((a, b) => {
+    if (a.timestamp_ms !== b.timestamp_ms) return b.timestamp_ms - a.timestamp_ms;
+    return b.id - a.id;
+  });
+}
+
 export default function App() {
   return (
     <LangProvider>
@@ -73,8 +80,9 @@ function AppInner() {
 
   const addLog = useCallback((entry: LogEntry) => {
     setLogs((prev) => {
-      const next = [...prev, entry];
-      return next.length > MAX_LOGS ? next.slice(next.length - MAX_LOGS) : next;
+      if (prev.some((existing) => existing.id === entry.id)) return prev;
+      const next = sortLogsNewestFirst([...prev, entry]);
+      return next.length > MAX_LOGS ? next.slice(0, MAX_LOGS) : next;
     });
   }, []);
 
@@ -102,6 +110,7 @@ function AppInner() {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
     let unlisten1: (() => void) | null = null;
     let unlisten2: (() => void) | null = null;
 
@@ -112,18 +121,31 @@ function AppInner() {
           getStatus(),
           getLogEntries(),
         ]);
+        if (cancelled) return;
         setConfig(cfg);
         setStatus(st);
-        setLogs(logEntries);
+        setLogs(sortLogsNewestFirst(logEntries).slice(0, MAX_LOGS));
       } finally {
-        setLoading(false);
+        if (!cancelled) setLoading(false);
       }
 
-      unlisten1 = await onStatusUpdate(setStatus);
-      unlisten2 = await onLogAdded(addLog);
+      const statusUnlisten = await onStatusUpdate(setStatus);
+      if (cancelled) {
+        statusUnlisten();
+        return;
+      }
+      unlisten1 = statusUnlisten;
+
+      const logUnlisten = await onLogAdded(addLog);
+      if (cancelled) {
+        logUnlisten();
+        return;
+      }
+      unlisten2 = logUnlisten;
     })();
 
     return () => {
+      cancelled = true;
       unlisten1?.();
       unlisten2?.();
     };

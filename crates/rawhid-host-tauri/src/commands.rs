@@ -1160,27 +1160,26 @@ fn build_tray_tooltip(status: &MonitorStatus) -> String {
             .as_deref()
             .or(dev.serial_number.as_deref())
             .unwrap_or(&dev.device_key);
-        let multi = dev.sources.len() > 1;
         let sources: Vec<String> = dev
             .sources
             .iter()
-            .map(|src| {
-                let level = src
-                    .level
-                    .map(|v| format!("{}%", v))
-                    .unwrap_or_else(|| "?".to_string());
-                match src.source {
-                    1 => format!("L {}", level),
-                    2 => format!("R {}", level),
-                    3 => format!("AUX {}", level),
-                    // 0 = self/dongle: label only when shown alongside others.
-                    _ if multi => format!("本体 {}", level),
-                    _ => level,
-                }
+            .filter_map(|src| {
+                let level = src.level?;
+                let label = if src.source == 0 {
+                    "C".to_string()
+                } else {
+                    format!("P{}", src.source)
+                };
+                Some(format!("{}:{}%", label, level))
             })
             .collect();
         text.push('\n');
-        text.push_str(&format!("{}: {}", name, sources.join(" / ")));
+        let summary = if sources.is_empty() {
+            "?".to_string()
+        } else {
+            sources.join(" ")
+        };
+        text.push_str(&format!("{}: {}", name, summary));
     }
     if text.chars().count() > 127 {
         text = text.chars().take(126).collect::<String>() + "…";
@@ -1701,4 +1700,83 @@ fn refresh_error_code(error: AiUsageRefreshError) -> String {
         AiUsageRefreshError::Stopped => "not_running",
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rawhid_host_core::runner::{DeviceBatterySource, DeviceBatteryStatus};
+
+    fn battery_status(sources: Vec<DeviceBatterySource>) -> MonitorStatus {
+        let mut status = MonitorStatus::default();
+        status.device_battery = vec![DeviceBatteryStatus {
+            device_key: "uid:00000000000000aa".to_string(),
+            serial_number: Some("serial-a".to_string()),
+            product: Some("Test Keyboard".to_string()),
+            sources,
+            updated_unix: 0,
+        }];
+        status
+    }
+
+    #[test]
+    fn tray_tooltip_hides_unknown_battery_sources() {
+        let status = battery_status(vec![
+            DeviceBatterySource {
+                source: 0,
+                level: None,
+            },
+            DeviceBatterySource {
+                source: 1,
+                level: Some(78),
+            },
+        ]);
+
+        assert_eq!(
+            build_tray_tooltip(&status),
+            "Keylink Studio\nTest Keyboard: P1:78%"
+        );
+    }
+
+    #[test]
+    fn tray_tooltip_shows_unknown_when_no_source_is_available() {
+        let status = battery_status(vec![
+            DeviceBatterySource {
+                source: 0,
+                level: None,
+            },
+            DeviceBatterySource {
+                source: 1,
+                level: None,
+            },
+        ]);
+
+        assert_eq!(
+            build_tray_tooltip(&status),
+            "Keylink Studio\nTest Keyboard: ?"
+        );
+    }
+
+    #[test]
+    fn tray_tooltip_uses_central_and_peripheral_labels() {
+        let status = battery_status(vec![
+            DeviceBatterySource {
+                source: 0,
+                level: Some(92),
+            },
+            DeviceBatterySource {
+                source: 1,
+                level: Some(78),
+            },
+            DeviceBatterySource {
+                source: 2,
+                level: Some(76),
+            },
+        ]);
+
+        assert_eq!(
+            build_tray_tooltip(&status),
+            "Keylink Studio\nTest Keyboard: C:92% P1:78% P2:76%"
+        );
+    }
 }

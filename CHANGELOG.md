@@ -4,6 +4,10 @@ Keylink Studio の主な変更点をこのファイルに記録します。
 
 ## [Unreleased]
 
+### Fixed
+
+- `BATTERY_STATUS` の source 表示を `C` / `P1` / `P2` / `P3` に変更し、`level=0xFF` の source を通常表示から隠すように修正。全 source が未取得の場合のみ、Devices / Dashboard は `--`、タスクトレイ tooltip は `?` を表示します。
+
 ## [1.1.1] - 2026-06-27
 
 ### Fixed
@@ -153,7 +157,7 @@ Keylink Studio の主な変更点をこのファイルに記録します。
 ### Added
 
 - **device→host (uplink) packet 対応**。キーボード側から host へ送る 4 つの packet type と capability bit を Host Link v1 の拡張として追加 (protocol は `v1` のまま)
-  - `BATTERY_STATUS (0x40)`: 本体/左右ペリフェラルのバッテリー残量。Dashboard と Devices に表示
+  - `BATTERY_STATUS (0x40)`: central/self と peripheral のバッテリー残量。Dashboard と Devices に表示
   - `HOST_ACTION (0x50)`: キーボードから host 側アクションを起動する仕組み。`[actions]` config の許可リスト制 (既定オフ) で、バインディングはキーボード単位 (`actions.devices."uid:..."`)。専用の「アクション」ページから UI で設定可能。組み込み action: `show_window` / `start_monitoring` / `stop_monitoring` / `refresh_ai_usage` / `launch`。未定義 id はログのみ
   - `KEY_STATS (0x60)`: キー位置別の打鍵数差分。日別にローカルファイルへ永続化 (`[stats]` config、既定オン)
   - `LAYER_STATE (0x70)`: キーボード側レイヤー変更の逆同期 (表示専用。ルールエンジンには影響しない)

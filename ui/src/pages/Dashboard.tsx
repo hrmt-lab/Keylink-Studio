@@ -17,6 +17,7 @@ import { startMonitoring, stopMonitoring, saveConfig } from "../api";
 import { Toggle } from "../components/Toggle";
 import { RollingNumber } from "../components/RollingNumber";
 import { ErrorNotice } from "../components/Ui";
+import { displayBatterySources } from "../lib/battery";
 import { aiStatusKey, formatClockTime, formatUsedBp, usageBarColor } from "../lib/format";
 import { friendlyError } from "../lib/errors";
 import { useLang, type TranslationKey } from "../i18n";
@@ -268,21 +269,23 @@ export default function Dashboard({ config, setConfig, status, logs }: Props) {
               <div className="space-y-1 border-t border-background pt-2.5">
                 {connectedDeviceGroups.slice(0, 2).map((group) => {
                   const battery = findBatteryForGroup(status.device_battery, group.devices);
+                  const batterySources = battery ? displayBatterySources(battery.sources) : [];
                   return (
                     <div key={group.key} className="flex items-center gap-1.5 text-[11px] text-muted">
                       <TransportIcons devices={group.devices} />
                       <span className="min-w-0 truncate">{group.name}</span>
                       {battery && (
                         <span className="ml-auto flex flex-shrink-0 items-center gap-1.5">
-                          {battery.sources.map((source) => (
-                            <span key={source.source} className="font-mono">
-                              {t(`battery.source.${source.source}` as Parameters<typeof t>[0])}{" "}
-                              <RollingNumber
-                                value={source.level}
-                                format={(v) => `${Math.round(v)}%`}
-                              />
-                            </span>
-                          ))}
+                          {batterySources.length === 0 ? (
+                            <span className="font-mono text-faint">--</span>
+                          ) : (
+                            batterySources.map((source) => (
+                              <span key={source.source} className="font-mono">
+                                {source.label}:
+                                <RollingNumber value={source.level} format={(v) => `${Math.round(v)}%`} />
+                              </span>
+                            ))
+                          )}
                         </span>
                       )}
                     </div>

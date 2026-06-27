@@ -225,7 +225,7 @@ ZMK Studio は、ZMK Studio RPC に対応しているかを表します。Keymap
 
 Host Link 対応デバイスと Studio 対応デバイスは、必ずしも同じとは限りません。同じキーボードが両方に対応する場合もあります。現在の ZMK Studio 一覧は Studio RPC transport の検出結果をそのまま表示します。USB Host Link が HID として見えていても、USB serial / CDC ACM の Studio endpoint が見えていない場合は Studio 側に 2 件表示されません。
 
-BATTERY 対応キーボードを監視中は、デバイスカードに本体 / 左 / 右 / AUX のバッテリー残量が表示されます。左右分割キーボードでペリフェラル側の電源が入っていない、または firmware 側の battery cache がまだ未取得の場合は、source 名だけが表示され残量は `--%` になります。
+BATTERY 対応キーボードを監視中は、デバイスカードに `C` (central/self) と `P1` / `P2` / `P3` (peripheral) のバッテリー残量が表示されます。`level=0xFF` の source は unknown / not available / disconnected として通常表示から隠されます。表示可能な source がない場合のみ、未取得状態として `--` が表示されます。USB 給電 central などで `source=0` が `0xFF` になることは正常です。
 
 ## 設定
 

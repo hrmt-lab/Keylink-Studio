@@ -4,13 +4,14 @@ Keylink Studio のアプリバージョンと Host Link プロトコルバージ
 
 - アプリバージョンは PC 側アプリ、UI、CLI、配布物のバージョンです。
 - Host Link プロトコルバージョンは、ZMK firmware 側と Raw HID packet で合意する通信仕様のバージョンです。
-- Keylink Studio `1.1.1` 時点の Host Link プロトコルは `v1` です。
+- Keylink Studio `1.1.2` 時点の Host Link プロトコルは `v1` です。
 
 ## 互換性一覧
 
 | ホストアプリバージョン | Host Link プロトコル | 必要な firmware 側対応 | 主な機能 |
 | --- | --- | --- | --- |
 | `main` | `v1` | 次期開発版、未リリース | - |
+| `1.1.2` | `v1` | `BATTERY_STATUS` の source を `0=central/self`, `1..=3=peripheral` として送信 | バッテリー表示を `C` / `P1` / `P2` / `P3` に変更。`level=0xFF` の source は通常表示せず、全 source 未取得時のみ UI は `--`、tray は `?` を表示 |
 | `1.1.1` | `v1` | 1.1.0 と同じ (Host Link firmware 側変更なし) | Windows の bundled application executable 名を `keylink-studio.exe` に変更 |
 | `1.1.0` | `v1` | 1.0.0 と同じ (Host Link firmware 側変更なし) | アプリ名、CLI 名、設定ファイル名、ユーザーデータ保存先、リリース出力名、ドキュメントを Keylink Studio に統一。現在の Keylink Studio アイコンセットへ更新。`BATTERY_STATUS` を送信するデバイスで、`DEVICE_HELLO` の capability に BATTERY が含まれない場合でも Devices 画面とタスクトレイにバッテリー残量を表示 |
 | `1.0.0` | `v1` | 0.9.1 と同じ (Host Link firmware 側変更なし)。BLE Host Link には BLE HOG uplink notify 実装が必要。BLE Studio / UID 紐付けには ZMK Studio 対応 firmware + `&studio_unlock` + 16 桁 hex UID の `serial_number` が必要 | BLE Host Link 対応、ZMK Studio BLE 編集、キーマップ export / restore（`-keymap.json`）、UID 優先紐付け、Devices の UID 集約、キーテスター修正、キー書き込み ✓ フラッシュ、export ファイル名を `-keymap.json` に変更 |

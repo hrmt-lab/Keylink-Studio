@@ -16,6 +16,7 @@ import {
 import { probeDevices, startMonitoring, stopMonitoring } from "../api";
 import { RollingNumber } from "../components/RollingNumber";
 import { ErrorNotice, SpinnerIcon } from "../components/Ui";
+import { displayBatterySources } from "../lib/battery";
 import { formatClockTime } from "../lib/format";
 import { friendlyError } from "../lib/errors";
 import {
@@ -476,16 +477,20 @@ function Metric({ label, value }: { label: string; value: string }) {
 }
 
 function BatterySummary({ battery }: { battery: DeviceBatteryStatus }) {
-  const { t } = useLang();
+  const sources = displayBatterySources(battery.sources);
   return (
     <span className="inline-flex items-center gap-1.5">
       <BatteryMedium size={13} className="text-faint" />
-      {battery.sources.map((source) => (
-        <span key={source.source} className={`font-mono ${batteryTextClass(source.level)}`}>
-          {battery.sources.length > 1 && `${t(`battery.source.${source.source}` as TranslationKey)} `}
-          {source.level === null ? "--" : <RollingNumber value={source.level} format={(v) => `${Math.round(v)}%`} />}
-        </span>
-      ))}
+      {sources.length === 0 ? (
+        <span className="font-mono text-faint">--</span>
+      ) : (
+        sources.map((source) => (
+          <span key={source.source} className={`font-mono ${batteryTextClass(source.level)}`}>
+            {source.label}:
+            <RollingNumber value={source.level} format={(v) => `${Math.round(v)}%`} />
+          </span>
+        ))
+      )}
     </span>
   );
 }
@@ -529,8 +534,7 @@ function DetailRow({ label, value }: { label: string; value: string }) {
   );
 }
 
-function batteryTextClass(level: number | null): string {
-  if (level === null) return "text-faint";
+function batteryTextClass(level: number): string {
   if (level <= 15) return "text-red-600";
   if (level <= 30) return "text-amber-600";
   return "text-ink";

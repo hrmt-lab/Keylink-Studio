@@ -35,7 +35,7 @@ pub struct UplinkEvent {
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct DeviceBatterySource {
-    /// 0 = self/dongle, 1 = left peripheral, 2 = right peripheral, 3 = aux.
+    /// 0 = central/self, 1..=3 = peripheral 1..=3.
     pub source: u8,
     /// 0..=100; None = unknown / disconnected.
     pub level: Option<u8>,

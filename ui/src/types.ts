@@ -135,7 +135,7 @@ export interface AppConfig {
 // 笏笏笏 Runtime Types 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏
 
 export interface DeviceBatterySource {
-  /** 0 = self/dongle, 1 = left, 2 = right, 3 = aux. */
+  /** 0 = central/self, 1..3 = peripheral 1..3. */
   source: number;
   /** 0..100, or null when unknown / disconnected. */
   level: number | null;

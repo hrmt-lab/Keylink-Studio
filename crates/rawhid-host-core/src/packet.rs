@@ -309,7 +309,7 @@ impl DeviceHello {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BatteryEntry {
-    /// 0 = self/dongle (central), 1 = left peripheral, 2 = right peripheral, 3 = aux.
+    /// 0 = central/self, 1..=3 = peripheral 1..=3.
     pub source: u8,
     /// 0..=100; None when the device reported 0xFF (unknown / disconnected).
     pub level: Option<u8>,

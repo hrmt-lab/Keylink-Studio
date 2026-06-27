@@ -163,11 +163,11 @@ Error/status は固定 code として扱います。access token、credentials J
 | `2` | 1 | version | `0x01` |
 | `3` | 1 | type | `0x40` |
 | `4` | 1 | count | エントリ数、`1..=4` |
-| `5+2i` | 1 | source[i] | `0=self/dongle`、`1=left`、`2=right`、`3=aux` |
+| `5+2i` | 1 | source[i] | `0=central/self`、`1..=3=peripheral 1..=3` |
 | `6+2i` | 1 | level[i] | `0..=100`、`0xFF` = 不明 / 切断 |
 | `5+2*count..31` | - | reserved | ゼロ固定 |
 
-Validation: count `1..=4`、source `0..=3` かつ packet 内で重複禁止、level は `0..=100` か `0xFF`(`101..=254` は reject)。`0` は有効な 0% です。`0xFF` は不明または切断を表し、host UI では `--%`、tray tooltip では `?` として表示します。変化時+定期(~5分)送信を想定します。
+Validation: count `1..=4`、source `0..=3` かつ packet 内で重複禁止、level は `0..=100` か `0xFF`(`101..=254` は reject)。`0` は有効な 0% です。`0xFF` は unknown / not available / disconnected を表します。host UI は `source=0` を `C`、`source=1..=3` を `P1..P3` として表示し、`0xFF` の source は通常表示しません。表示可能な source がない場合のみ UI では `--`、tray tooltip では `?` として表示します。変化時+定期(~5分)送信を想定します。
 
 ## HOST_ACTION (ZMK -> Host)
 

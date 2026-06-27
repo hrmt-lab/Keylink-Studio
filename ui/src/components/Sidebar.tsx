@@ -12,6 +12,7 @@ import {
 import { supportedDeviceCount } from "../lib/deviceCards";
 import type { MonitorStatus, Page, StudioDeviceStatus } from "../types";
 import { useLang, type TranslationKey } from "../i18n";
+import appIcon from "../assets/app-icon.png";
 
 interface NavItem {
   id: Page;
@@ -57,12 +58,18 @@ export function Sidebar({ currentPage, onNavigate, status, studioDevices }: Prop
 
   return (
     <aside className="flex w-60 flex-col bg-surface text-ink select-none flex-shrink-0 border-r border-border">
-      {/* Logo: white "power button" circle with the accent keyboard glyph */}
+      {/* Logo */}
       <div className="flex items-center gap-3 px-5 py-5 border-b border-background">
-        <div className="flex h-11 w-11 items-center justify-center rounded-full bg-surface shadow-neu-sel">
-          <Keyboard size={22} className="text-accent" aria-hidden="true" />
+        <div className="flex h-11 w-11 items-center justify-center overflow-hidden rounded-full shadow-neu-sel">
+          <img
+            src={appIcon}
+            alt=""
+            aria-hidden="true"
+            className="h-full w-full object-cover"
+            draggable={false}
+          />
         </div>
-        <span className="text-sm font-medium">RawHID Host</span>
+        <span className="text-[20px] font-medium leading-tight">Keylink Studio</span>
       </div>
 
       {/* Navigation */}

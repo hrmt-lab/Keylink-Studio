@@ -1,7 +1,7 @@
 //! "Launch at login" via the per-user Windows Run registry key.
 
 #[cfg(windows)]
-const RUN_VALUE_NAME: &str = "RawHID Host";
+const RUN_VALUE_NAME: &str = "Keylink Studio";
 
 pub fn is_launch_at_login() -> bool {
     #[cfg(windows)]

@@ -21,9 +21,10 @@ use crate::packet::KeyStatsEntry;
 
 pub type SharedKeyStatsStore = Arc<Mutex<KeyStatsStore>>;
 
-/// Production stats directory: `<user data dir>/RawHID Host/data/stats`.
+/// Production stats directory: `<user data dir>/Keylink Studio/data/stats`.
 pub fn default_stats_dir() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "RawHID Host").map(|dirs| dirs.data_dir().join("stats"))
+    directories::ProjectDirs::from("", "", "Keylink Studio")
+        .map(|dirs| dirs.data_dir().join("stats"))
 }
 
 const FILE_VERSION: u32 = 1;
@@ -288,7 +289,7 @@ mod tests {
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
-            "rawhid-host-stats-test-{name}-{}",
+            "keylink-studio-stats-test-{name}-{}",
             std::process::id()
         ));
         let _ = fs::remove_dir_all(&dir);

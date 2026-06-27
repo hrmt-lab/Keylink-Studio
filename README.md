@@ -1,6 +1,6 @@
-# RawHID Host
+# Keylink Studio
 
-RawHID Host は、Windows 上で動く ZMK キーボード向けのホストアプリです。
+Keylink Studio は、Windows 上で動く ZMK キーボード向けのホストアプリです。
 前面アプリに応じたレイヤー切り替え、時刻同期、AI 使用量送信、キーボードから PC へのアクション実行、ZMK Studio RPC 経由のキーマップ閲覧・編集を扱います。
 
 このリポジトリに含まれるのは **PC 側のホストアプリのみ** です。Host Link 機能を使うには、ZMK firmware 側に `HL` packet protocol を受け取る実装が必要です。Host Link は Windows / `hidapi` から HID device として見える USB 接続または BLE HOG 接続を扱います。ZMK Studio キーマップ機能は Host Link とは別経路の Studio RPC transport を使い、USB serial / CDC ACM と BLE Studio の読み取り・編集に対応します。
@@ -71,7 +71,7 @@ cargo run -p rawhid-host-cli -- run
 設定ファイル例を作成:
 
 ```powershell
-cargo run -p rawhid-host-cli -- init-config --output rawhid-host.toml
+cargo run -p rawhid-host-cli -- init-config --output keylink-studio.toml
 ```
 
 設定ファイルの探索先を確認:
@@ -258,6 +258,6 @@ Tauri 開発起動:
 
 ## English Summary
 
-RawHID Host is a Windows host application for ZMK keyboards. It monitors the foreground application, sends app-layer packets over Host Link HID, synchronizes time for keyboard displays, optionally sends Codex / Claude Code usage snapshots, handles keyboard-initiated host actions, and provides ZMK Studio keymap viewing and editing.
+Keylink Studio is a Windows host application for ZMK keyboards. It monitors the foreground application, sends app-layer packets over Host Link HID, synchronizes time for keyboard displays, optionally sends Codex / Claude Code usage snapshots, handles keyboard-initiated host actions, and provides ZMK Studio keymap viewing and editing.
 
 The repository contains the host-side app only. Host Link features require compatible ZMK firmware and can use USB HID or BLE HOG when exposed through Windows HID APIs. ZMK Studio keymap features use Studio RPC separately from Host Link HID, with USB serial / CDC ACM and BLE Studio read/edit support.

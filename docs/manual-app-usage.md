@@ -1,4 +1,4 @@
-# RawHID Host アプリ操作マニュアル
+# Keylink Studio アプリ操作マニュアル
 
 ## 共通操作
 
@@ -217,7 +217,7 @@ BLE 編集中の注意:
 
 デバイス画面では、Host Link と ZMK Studio の対応状態を確認できます。
 
-Host Link は、RawHID Host 独自の packet protocol に対応しているかを表します。`OK` のデバイスは、capability に応じて `APP_LAYER`、`TIME_SYNC`、`AI_USAGE`、uplink などの対象になります。Host Link デバイスの左側アイコンは接続種別を表し、USB 接続は USB アイコン、BLE HOG 接続は Bluetooth アイコンで表示されます。判定できない場合は汎用キーボードアイコンになります。
+Host Link は、Keylink Studio 独自の packet protocol に対応しているかを表します。`OK` のデバイスは、capability に応じて `APP_LAYER`、`TIME_SYNC`、`AI_USAGE`、uplink などの対象になります。Host Link デバイスの左側アイコンは接続種別を表し、USB 接続は USB アイコン、BLE HOG 接続は Bluetooth アイコンで表示されます。判定できない場合は汎用キーボードアイコンになります。
 
 Devices 画面の Host Link 一覧は `device_uid_hash` 単位で集約します。同じキーボードが USB と BLE HOG の両方で見えている場合は 1 カードにまとめ、USB / Bluetooth の両方のアイコンと、それぞれの HID path を表示します。`device_uid_hash` が取得できないデバイスは誤結合を避けるため path 単位で個別に扱います。
 
@@ -237,12 +237,12 @@ BATTERY 対応キーボードを監視中は、デバイスカードに本体 / 
 
 - アクセント色を選べます。
 - プリセット色に加えてカスタム色を追加できます。
-- 外観設定はこの PC の UI にのみ保存され、`rawhid-host.toml` やキーボードには影響しません。
+- 外観設定はこの PC の UI にのみ保存され、`keylink-studio.toml` やキーボードには影響しません。
 
 ### アプリの起動
 
 - `起動時に監視を開始`: アプリ起動時に自動で監視を開始します。
-- `Windows ログイン時に起動`: Windows ログイン時に RawHID Host を自動起動します。HKCU Run レジストリキーを使うため管理者権限は不要です。
+- `Windows ログイン時に起動`: Windows ログイン時に Keylink Studio を自動起動します。HKCU Run レジストリキーを使うため管理者権限は不要です。
 
 ### 基本設定
 

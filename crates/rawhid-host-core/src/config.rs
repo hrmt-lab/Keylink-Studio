@@ -422,7 +422,7 @@ impl ConfigPaths {
     pub fn discover(explicit: Option<PathBuf>) -> Self {
         Self {
             explicit,
-            cwd: PathBuf::from("rawhid-host.toml"),
+            cwd: PathBuf::from("keylink-studio.toml"),
             user: user_config_path(),
         }
     }
@@ -489,7 +489,7 @@ pub fn write_default_config(path: &Path, overwrite: bool) -> Result<(), ConfigEr
 }
 
 pub fn example_config() -> &'static str {
-    r#"# RawHID Host configuration
+    r#"# Keylink Studio configuration
 
 [app]
 # Start monitoring automatically when the GUI launches.
@@ -591,7 +591,7 @@ api_timeout_sec = 10
 }
 
 fn user_config_path() -> Option<PathBuf> {
-    ProjectDirs::from("", "", "RawHID Host").map(|dirs| dirs.config_dir().join("config.toml"))
+    ProjectDirs::from("", "", "Keylink Studio").map(|dirs| dirs.config_dir().join("config.toml"))
 }
 
 #[derive(Debug, Error)]
@@ -848,7 +848,7 @@ keymap_read_timeout_ms = 5000
     fn explicit_path_is_selected_even_when_missing() {
         let paths = ConfigPaths {
             explicit: Some(PathBuf::from("custom.toml")),
-            cwd: PathBuf::from("rawhid-host.toml"),
+            cwd: PathBuf::from("keylink-studio.toml"),
             user: Some(PathBuf::from("user.toml")),
         };
 

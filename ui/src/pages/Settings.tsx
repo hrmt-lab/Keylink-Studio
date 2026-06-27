@@ -283,7 +283,7 @@ export default function Settings({ config, setConfig }: Props) {
 
       <div className="rounded-card bg-plate px-4 py-3 text-xs text-muted space-y-1">
         <div>
-          {t("settings.note1", { file: "rawhid-host.toml" })}
+          {t("settings.note1", { file: "keylink-studio.toml" })}
         </div>
         <div>
           {t("settings.note2", { up: "0xFF60", u: "0x61" })}

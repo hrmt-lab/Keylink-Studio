@@ -84,7 +84,7 @@ pub fn run() {
             }
         })
         .run(tauri::generate_context!())
-        .expect("failed to start RawHID Host");
+        .expect("failed to start Keylink Studio");
 }
 
 fn setup_window_icon(app: &mut tauri::App) -> tauri::Result<()> {
@@ -109,7 +109,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
 
     let _tray = TrayIconBuilder::with_id("main")
         .icon(app.default_window_icon().unwrap().clone())
-        .tooltip("RawHID Host")
+        .tooltip("Keylink Studio")
         .menu(&menu)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "start" => {

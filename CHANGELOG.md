@@ -1,8 +1,15 @@
 # Changelog
 
-All notable changes to RawHID Host are documented in this file.
+All notable changes to Keylink Studio are documented in this file.
 
 ## [Unreleased]
+
+## [1.1.0] - 2026-06-27
+
+### Changed
+
+- Renamed the app to Keylink Studio across the app UI, CLI, configuration file name, user data paths, release output naming, and documentation.
+- Updated the app icon assets and sidebar logo to the current Keylink Studio icon set.
 
 ## [1.0.1] - 2026-06-27
 
@@ -243,7 +250,7 @@ All notable changes to RawHID Host are documented in this file.
 ### Added
 
 - 技術概要ドキュメントを追加
-- RawHID Host の構成、Rust core、Tauri UI、ZMK firmware 側との関係を整理
+- Keylink Studio の構成、Rust core、Tauri UI、ZMK firmware 側との関係を整理
 
 ## [0.1.1] - 2026-05-26
 
@@ -257,7 +264,7 @@ All notable changes to RawHID Host are documented in this file.
 
 ### Added
 
-- RawHID Host の初期版
+- Keylink Studio の初期版
 - Windows 前面アプリ監視
 - `path` / `exe` / `title` によるアプリ判定
 - Raw HID device scan
@@ -265,4 +272,4 @@ All notable changes to RawHID Host are documented in this file.
 - ZMK layer switching 用 `APP_LAYER` packet 送信
 - `TIME_SYNC` packet 送信
 - Rust core / CLI / Tauri + React UI の基本構成
-- `rawhid-host.toml` による設定管理
+- `keylink-studio.toml` による設定管理

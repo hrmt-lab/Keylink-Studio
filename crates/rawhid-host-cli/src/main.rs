@@ -10,7 +10,7 @@ use thiserror::Error;
 use tracing_subscriber::{filter::EnvFilter, fmt};
 
 #[derive(Debug, Parser)]
-#[command(name = "rawhid-host")]
+#[command(name = "keylink-studio")]
 #[command(about = "Switch ZMK layers from the active host application over Raw HID")]
 struct Cli {
     #[arg(short, long, global = true)]

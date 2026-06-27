@@ -145,7 +145,7 @@ pub struct StudioRawBinding {
     pub param2: u32,
 }
 
-pub const KEYMAP_BACKUP_SCHEMA: &str = "rawhid-host.keymap-backup";
+pub const KEYMAP_BACKUP_SCHEMA: &str = "keylink-studio.keymap-backup";
 pub const KEYMAP_BACKUP_SCHEMA_VERSION: u32 = 1;
 pub const KEYMAP_BACKUP_MAX_BYTES: usize = 1024 * 1024;
 

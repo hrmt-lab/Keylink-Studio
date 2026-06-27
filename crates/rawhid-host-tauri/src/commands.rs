@@ -224,7 +224,7 @@ fn preferred_existing_config_path() -> Option<PathBuf> {
 fn workspace_config_path() -> Option<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let workspace = manifest_dir.parent()?.parent()?;
-    Some(workspace.join("rawhid-host.toml"))
+    Some(workspace.join("keylink-studio.toml"))
 }
 
 #[cfg(not(debug_assertions))]
@@ -255,7 +255,7 @@ pub fn save_config(config: AppConfig, state: State<AppState>) -> Result<(), Stri
         let config_path = state.config_path.lock().unwrap();
         match config_path.clone() {
             Some(p) => p,
-            None => preferred_config_path().unwrap_or_else(|| PathBuf::from("rawhid-host.toml")),
+            None => preferred_config_path().unwrap_or_else(|| PathBuf::from("keylink-studio.toml")),
         }
     };
 
@@ -301,7 +301,7 @@ pub fn show_config_file_location(state: State<AppState>) -> Result<ConfigLocatio
         let config_path = state.config_path.lock().unwrap();
         match config_path.clone() {
             Some(p) => p,
-            None => preferred_config_path().unwrap_or_else(|| PathBuf::from("rawhid-host.toml")),
+            None => preferred_config_path().unwrap_or_else(|| PathBuf::from("keylink-studio.toml")),
         }
     };
     let revealed = reveal_config_path(&path);
@@ -1150,10 +1150,10 @@ fn update_tray_tooltip(app: &AppHandle, status: &MonitorStatus) {
     }
 }
 
-/// Build the tray tooltip: "RawHID Host" plus one line per battery-reporting
+/// Build the tray tooltip: "Keylink Studio" plus one line per battery-reporting
 /// device. Capped to ~128 chars (Windows tray tooltip limit).
 fn build_tray_tooltip(status: &MonitorStatus) -> String {
-    let mut text = String::from("RawHID Host");
+    let mut text = String::from("Keylink Studio");
     for dev in &status.device_battery {
         let name = dev
             .product

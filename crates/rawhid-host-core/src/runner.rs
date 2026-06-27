@@ -1158,8 +1158,10 @@ mod tests {
         use crate::stats::{KeyStatsStore, StatsPeriod};
         use std::sync::{Arc, Mutex};
 
-        let dir =
-            std::env::temp_dir().join(format!("rawhid-host-runner-stats-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!(
+            "keylink-studio-runner-stats-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&dir);
         let store = Arc::new(Mutex::new(KeyStatsStore::new(
             dir.clone(),

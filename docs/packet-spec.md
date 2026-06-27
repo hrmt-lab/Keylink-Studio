@@ -1,6 +1,6 @@
-# RawHID Host Packet Specification
+# Keylink Studio Packet Specification
 
-この仕様は、host 側 `rawhid-host` と ZMK 側 Raw HID 受信処理の間で使う packet を定義します。
+この仕様は、host 側 `Keylink Studio` と ZMK 側 Raw HID 受信処理の間で使う packet を定義します。
 
 ## Transport
 
@@ -54,7 +54,7 @@ host が `hidapi` で write する buffer は、先頭 1 byte の Report ID `0x0
 | `7` | 1 | seq | u8 ラッピングカウンター |
 | `8..31` | 24 | reserved | ゼロ固定 |
 
-`seq` は u8 wrapping counter です。`rawhid-host` は `HOST_HELLO` を送り、同じ `seq` の `DEVICE_HELLO` が返った device だけを verified として扱います。
+`seq` は u8 wrapping counter です。`Keylink Studio` は `HOST_HELLO` を送り、同じ `seq` の `DEVICE_HELLO` が返った device だけを verified として扱います。
 
 `byte 4..6` と `byte 8..31` は v1 では reserved zero です。
 
@@ -283,7 +283,7 @@ bit7 = LAYER_STATE  (device sends LAYER_STATE)
 bit8 = KEY_PRESS    (device sends KEY_PRESS)
 ```
 
-RawHID Host は `APP_LAYER` capability がないデバイスへ `APP_LAYER` packet を送信しません。その場合もデバイスは Devices 画面に Host Link device として表示されます。
+Keylink Studio は `APP_LAYER` capability がないデバイスへ `APP_LAYER` packet を送信しません。その場合もデバイスは Devices 画面に Host Link device として表示されます。
 
 ### capability の host 側動作
 

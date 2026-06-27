@@ -33,7 +33,7 @@
       - 推奨拡張子は -keymap.json。dialog filter は実装互換性重視で json のみにし、defaultPath で推奨拡張子を付
         ける。
 
-      - 必須フィールド: schema: "rawhid-host.keymap-backup", schema_version: 1, app_version, exported_at_ms, device,
+      - 必須フィールド: schema: "keylink-studio.keymap-backup", schema_version: 1, app_version, exported_at_ms, device,
         layout, behavior_catalog, layers。
 
       - 復元の真実は position, behavior_id, param1, param2。behavior は検証用、label は表示用。

@@ -1,4 +1,4 @@
-﻿# RawHID Host - Dev launcher
+# Keylink Studio - Dev launcher
 # Usage: .\dev.ps1
 
 $root = $PSScriptRoot

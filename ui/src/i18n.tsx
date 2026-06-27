@@ -593,7 +593,7 @@ const T = {
     "settings.app.start_on_launch": "起動時に監視を開始",
     "settings.app.start_on_launch.desc": "アプリ起動時に自動で監視を開始します",
     "settings.app.launch_at_login": "Windows ログイン時に起動",
-    "settings.app.launch_at_login.desc": "サインイン時に RawHID Host を自動起動します（トレイ常駐）",
+    "settings.app.launch_at_login.desc": "サインイン時に Keylink Studio を自動起動します（トレイ常駐）",
     "settings.app.hex_invalid": "0x0000〜0xFFFF の範囲で入力してください",
     "settings.appearance.section": "外観",
     "settings.appearance.accent": "アクセント色",
@@ -1187,7 +1187,7 @@ const T = {
     "settings.app.start_on_launch": "Start monitoring on launch",
     "settings.app.start_on_launch.desc": "Automatically start monitoring when the app launches",
     "settings.app.launch_at_login": "Launch at Windows login",
-    "settings.app.launch_at_login.desc": "Start RawHID Host automatically at sign-in (runs in the tray)",
+    "settings.app.launch_at_login.desc": "Start Keylink Studio automatically at sign-in (runs in the tray)",
     "settings.app.hex_invalid": "Enter a value between 0x0000 and 0xFFFF",
     "settings.appearance.section": "Appearance",
     "settings.appearance.accent": "Accent color",
@@ -1213,7 +1213,7 @@ const LangContext = createContext<LangContextType>({
   t: (key) => key,
 });
 
-const STORAGE_KEY = "rawhid-host-lang";
+const STORAGE_KEY = "keylink-studio-lang";
 
 export function LangProvider({ children }: { children: ReactNode }) {
   const [lang, setLangState] = useState<Lang>(() => {

@@ -1,4 +1,4 @@
-# RawHID Host - Release build script
+# Keylink Studio - Release build script
 # Usage: .\build-release.ps1
 
 $root = $PSScriptRoot
@@ -7,9 +7,9 @@ $tauriDir = Join-Path $root "crates\rawhid-host-tauri"
 $tauriConfig = Join-Path $tauriDir "tauri.conf.json"
 $version = (Get-Content $tauriConfig -Raw | ConvertFrom-Json).version
 $bundleDir = Join-Path $root "target\release\bundle"
-$releaseDir = Join-Path $root ("release\RawHID-Host-v{0}" -f $version)
+$releaseDir = Join-Path $root ("release\Keylink-Studio-v{0}" -f $version)
 
-Write-Host "Building RawHID Host v$version (release)..."
+Write-Host "Building Keylink Studio v$version (release)..."
 
 # Install npm deps if needed
 if (-not (Test-Path (Join-Path $uiDir "node_modules"))) {

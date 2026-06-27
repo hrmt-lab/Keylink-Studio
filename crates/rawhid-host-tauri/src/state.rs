@@ -89,7 +89,7 @@ impl AppState {
         let mut status = MonitorStatus::default();
         status.ai_usage = ai_usage_statuses;
         let stats_dir = default_stats_dir()
-            .unwrap_or_else(|| std::env::temp_dir().join("rawhid-host").join("stats"));
+            .unwrap_or_else(|| std::env::temp_dir().join("keylink-studio").join("stats"));
         let key_stats = Arc::new(Mutex::new(KeyStatsStore::new(
             stats_dir,
             Duration::from_secs(config.stats.flush_interval_sec.max(1)),

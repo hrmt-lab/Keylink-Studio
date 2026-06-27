@@ -17,7 +17,7 @@
 <!-- ── Sidebar ── -->
 <rect width="200" height="580" fill="#FFFFFF"/>
 <line x1="200" y1="0" x2="200" y2="580" stroke="#E8ECF1"/>
-<text x="20" y="37" font-size="14" font-weight="bold" fill="#1A1A2E">RawHID Host</text>
+<text x="20" y="37" font-size="14" font-weight="bold" fill="#1A1A2E">Keylink Studio</text>
 
 <text x="30" y="72" font-size="13" fill="#4B5563">Dashboard</text>
 <text x="30" y="110" font-size="13" fill="#4B5563">レイヤールール</text>

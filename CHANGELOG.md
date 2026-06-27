@@ -4,6 +4,16 @@ All notable changes to RawHID Host are documented in this file.
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-06-27
+
+### Changed
+
+- Refined the Devices view and keymap edit navigation.
+
+### Fixed
+
+- Fixed a console window flash when spawning `wsl.exe` on Windows.
+
 ## [1.0.0] - 2026-06-22
 
 ### Added

@@ -4,9 +4,18 @@ Keylink Studio の主な変更点をこのファイルに記録します。
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-06-28
+
 ### Fixed
 
 - `BATTERY_STATUS` の source 表示を `C` / `P1` / `P2` / `P3` に変更し、`level=0xFF` の source を通常表示から隠すように修正。全 source が未取得の場合のみ、Devices / Dashboard は `--`、タスクトレイ tooltip は `?` を表示します。
+
+- Devices 画面の直近ログが、画面遷移前から常に時系列の降順で表示されるように修正。
+- React StrictMode で Tauri event listener が重複し、ホストアクション実行時などに同じログが 2 行表示される問題を修正。
+
+### Removed
+
+- 未使用のルート直下アイコン `keylink-studio-icon-256.png` を削除。
 
 ## [1.1.1] - 2026-06-27
 

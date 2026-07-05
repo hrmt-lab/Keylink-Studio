@@ -207,7 +207,7 @@ TOML は人が直接編集しやすい形式です。UI にまだ細かい項目
 
 ## Host Link HID と packet
 
-Host Link HID は PC とキーボードの間で独自の 32 byte payload を送受信する HID 経路です。USB HID でも BLE HOG でも、アプリ上は同じ `HL` protocol として扱います。
+Host Link HID は PC とキーボードの間で独自の 64 byte Host Link packet を送受信する HID 経路です。USB HID でも BLE HOG でも、アプリ上は同じ Host Link v2 / `HL` protocol として扱います。
 
 | Packet | Meaning |
 | --- | --- |

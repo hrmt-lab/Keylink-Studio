@@ -1612,7 +1612,7 @@ pub fn list_key_stats_devices(state: State<AppState>) -> Vec<String> {
 }
 
 /// Debug-only helper to exercise the uplink path without firmware. Accepts a
-/// 32-byte packet payload as hex and feeds it through the monitor loop.
+/// 64-byte packet payload as hex and feeds it through the monitor loop.
 #[tauri::command]
 pub fn debug_inject_uplink(
     device_uid: String,

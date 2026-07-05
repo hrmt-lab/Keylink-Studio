@@ -13,8 +13,7 @@ use tracing::{debug, warn};
 use crate::{
     config::HidConfig,
     packet::{
-        AiUsagePacket, DeviceHello, Packet, TimeSyncPacket, UplinkPacket, MAGIC, PACKET_SIZE,
-        REPORT_SIZE, VERSION,
+        AiUsagePacket, DeviceHello, Packet, TimeSyncPacket, UplinkPacket, PACKET_SIZE, REPORT_SIZE,
     },
 };
 
@@ -84,7 +83,7 @@ pub trait HidTransport {
     ) -> Result<Option<DeviceHello>, HidError>;
     fn write_report(&self, device: &DeviceInfo, report: &[u8; REPORT_SIZE])
         -> Result<(), HidError>;
-    /// Read one 32-byte input report if available. The default no-op keeps
+    /// Read one 64-byte input report if available. The default no-op keeps
     /// transports without an uplink path (and test mocks) working unchanged.
     fn read_packet(
         &self,
@@ -205,15 +204,21 @@ impl HidTransport for RealHidTransport {
                         return Ok(Some(response));
                     }
                     Ok(_) => {} // stale HELLO from an earlier probe; keep waiting
-                    Err(_) => {
-                        if buffer[0..2] == MAGIC && buffer[2] == VERSION {
+                    Err(hello_error) => match UplinkPacket::decode_payload(&buffer) {
+                        Ok(_) => {
                             self.pending_uplink
                                 .borrow_mut()
                                 .entry(device.path.clone())
                                 .or_default()
                                 .push_back(buffer);
                         }
-                    }
+                        Err(uplink_error) => {
+                            debug!(
+                                "dropping non-HELLO packet while waiting for HELLO from {}: hello={}, uplink={}",
+                                device.path, hello_error, uplink_error
+                            );
+                        }
+                    },
                 }
             }
             if Instant::now() >= deadline {
@@ -575,8 +580,6 @@ mod tests {
                 .borrow()
                 .contains(&device.path)
                 .then_some(DeviceHello {
-                    protocol_min: 0,
-                    protocol_max: 0,
                     seq: packet.seq,
                     capabilities: crate::packet::CAPABILITY_APP_LAYER,
                     device_uid_hash: Some(1),

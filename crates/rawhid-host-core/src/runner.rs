@@ -586,8 +586,6 @@ mod tests {
             _timeout_ms: i32,
         ) -> Result<Option<crate::packet::DeviceHello>, HidError> {
             Ok(Some(crate::packet::DeviceHello {
-                protocol_min: 0,
-                protocol_max: 0,
                 seq: packet.seq,
                 capabilities: crate::packet::CAPABILITY_APP_LAYER,
                 device_uid_hash: Some(1),
@@ -713,8 +711,6 @@ mod tests {
             _timeout_ms: i32,
         ) -> Result<Option<crate::packet::DeviceHello>, HidError> {
             Ok(Some(crate::packet::DeviceHello {
-                protocol_min: 0,
-                protocol_max: 0,
                 seq: packet.seq,
                 capabilities: device.capabilities,
                 device_uid_hash: device.device_uid_hash,
@@ -823,7 +819,7 @@ mod tests {
         let writes = writes.borrow();
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].0, "a");
-        assert_eq!(writes[0].1[6], 3);
+        assert_eq!(writes[0].1[14], 3);
     }
 
     #[test]
@@ -950,7 +946,7 @@ mod tests {
 
         // Only the initial set was written; no clear packet.
         assert_eq!(writes.borrow().len(), 1);
-        assert_eq!(writes.borrow()[0].1[5], 1); // AppLayerAction::Set
+        assert_eq!(writes.borrow()[0].1[13], 1); // AppLayerAction::Set
     }
 
     fn push_uplink(

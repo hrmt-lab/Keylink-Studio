@@ -109,7 +109,7 @@
 <text x="228" y="336" font-size="13" font-weight="bold" fill="#1A1A2E">直近ログ</text>
 
 <text x="228" y="362" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#9CA3AF">12:34:02</text>
-<text x="298" y="362" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#374151">デバイス接続: hitsuki46 (Host Link v1)</text>
+<text x="298" y="362" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#374151">デバイス接続: hitsuki46 (Host Link v2)</text>
 
 <text x="228" y="382" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#9CA3AF">12:34:03</text>
 <text x="298" y="382" font-family="'Courier New',Consolas,monospace" font-size="11" fill="#EF5B25">LAYER_STATE: layer 0</text>

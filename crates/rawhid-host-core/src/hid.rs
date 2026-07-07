@@ -13,7 +13,9 @@ use tracing::{debug, warn};
 use crate::{
     config::HidConfig,
     packet::{
-        AiUsagePacket, DeviceHello, Packet, TimeSyncPacket, UplinkPacket, PACKET_SIZE, REPORT_SIZE,
+        AiUsagePacket, ConfigRequest, ConfigResponse, ConfigStatus, DeviceHello, EncoderBinding,
+        EncoderGetBindings, EncoderGetInfo, Packet, TimeSyncPacket, UplinkPacket,
+        CAPABILITY_CONFIG_RPC, PACKET_SIZE, REPORT_SIZE,
     },
 };
 
@@ -457,6 +459,162 @@ impl<T: HidTransport> HidDeviceManager<T> {
         self.send_report_to_verified(packet.encode_report())
     }
 
+    pub fn config_get_encoder_info(
+        &mut self,
+        device: &DeviceInfo,
+    ) -> Result<EncoderGetInfo, HidError> {
+        if device.capabilities & CAPABILITY_CONFIG_RPC == 0 {
+            return Err(HidError::ConfigRpcUnsupported);
+        }
+
+        let request = ConfigRequest::encoder_get_info(self.next_seq());
+        const MAX_ATTEMPTS: usize = 2;
+        for attempt in 0..MAX_ATTEMPTS {
+            self.send_report_to_device(device, request.encode_report())?;
+            match self.wait_for_config_response(device, request)? {
+                Some(response) => {
+                    if response.status == ConfigStatus::Ok {
+                        return response
+                            .encoder_get_info
+                            .ok_or(HidError::ConfigRpcMissingPayload);
+                    }
+                    return Err(HidError::ConfigRpcStatus(response.status));
+                }
+                None if attempt + 1 < MAX_ATTEMPTS => {
+                    debug!(
+                        "Config RPC ENCODER GET_INFO timed out for {}; retrying with seq {}",
+                        device.path, request.seq
+                    );
+                }
+                None => return Err(HidError::ConfigRpcTimeout),
+            }
+        }
+        Err(HidError::ConfigRpcTimeout)
+    }
+
+    pub fn config_get_encoder_bindings(
+        &mut self,
+        device: &DeviceInfo,
+        layer_id: u32,
+        encoder_id: u8,
+    ) -> Result<EncoderGetBindings, HidError> {
+        if device.capabilities & CAPABILITY_CONFIG_RPC == 0 {
+            return Err(HidError::ConfigRpcUnsupported);
+        }
+
+        let request = ConfigRequest::encoder_get_bindings(self.next_seq(), layer_id, encoder_id);
+        const MAX_ATTEMPTS: usize = 2;
+        for attempt in 0..MAX_ATTEMPTS {
+            self.send_report_to_device(device, request.encode_report())?;
+            match self.wait_for_config_response(device, request)? {
+                Some(response) => {
+                    if response.status == ConfigStatus::Ok {
+                        return response
+                            .encoder_get_bindings
+                            .ok_or(HidError::ConfigRpcMissingPayload);
+                    }
+                    return Err(HidError::ConfigRpcStatus(response.status));
+                }
+                None if attempt + 1 < MAX_ATTEMPTS => {
+                    debug!(
+                        "Config RPC ENCODER GET_BINDINGS timed out for {}; retrying with seq {}",
+                        device.path, request.seq
+                    );
+                }
+                None => return Err(HidError::ConfigRpcTimeout),
+            }
+        }
+        Err(HidError::ConfigRpcTimeout)
+    }
+
+    pub fn config_set_encoder_bindings(
+        &mut self,
+        device: &DeviceInfo,
+        layer_id: u32,
+        encoder_id: u8,
+        cw_binding: EncoderBinding,
+        ccw_binding: EncoderBinding,
+    ) -> Result<(), HidError> {
+        if device.capabilities & CAPABILITY_CONFIG_RPC == 0 {
+            return Err(HidError::ConfigRpcUnsupported);
+        }
+
+        let request = ConfigRequest::encoder_set_bindings(
+            self.next_seq(),
+            layer_id,
+            encoder_id,
+            cw_binding,
+            ccw_binding,
+        );
+        const MAX_ATTEMPTS: usize = 2;
+        for attempt in 0..MAX_ATTEMPTS {
+            self.send_report_to_device(device, request.encode_report())?;
+            match self.wait_for_config_response(device, request)? {
+                Some(response) => {
+                    if response.status == ConfigStatus::Ok {
+                        return Ok(());
+                    }
+                    return Err(HidError::ConfigRpcStatus(response.status));
+                }
+                None if attempt + 1 < MAX_ATTEMPTS => {
+                    debug!(
+                        "Config RPC ENCODER SET_BINDINGS timed out for {}; retrying with seq {}",
+                        device.path, request.seq
+                    );
+                }
+                None => return Err(HidError::ConfigRpcTimeout),
+            }
+        }
+        Err(HidError::ConfigRpcTimeout)
+    }
+
+    fn wait_for_config_response(
+        &mut self,
+        device: &DeviceInfo,
+        request: ConfigRequest,
+    ) -> Result<Option<ConfigResponse>, HidError> {
+        let deadline =
+            Instant::now() + Duration::from_millis(self.config.hello_timeout_ms.max(1) as u64);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Ok(None);
+            }
+            let timeout_ms = (remaining.as_millis() as i32).max(1);
+            let Some(payload) = self.transport.read_packet(device, timeout_ms)? else {
+                if Instant::now() >= deadline {
+                    return Ok(None);
+                }
+                continue;
+            };
+
+            match ConfigResponse::decode_payload(&payload) {
+                Ok(response) if response.is_response_to(request) => return Ok(Some(response)),
+                Ok(response) => {
+                    debug!(
+                        "ignoring stale Config RPC response from {}: seq={} feature={:#04x} op={:#04x}",
+                        device.path, response.seq, response.feature, response.op
+                    );
+                }
+                Err(config_error) => match UplinkPacket::decode_payload(&payload) {
+                    Ok(packet) => {
+                        debug!(
+                            "uplink while waiting for Config RPC from {}: {:?}",
+                            device.path,
+                            packet.packet_type()
+                        );
+                    }
+                    Err(uplink_error) => {
+                        debug!(
+                            "dropping packet while waiting for Config RPC from {}: config={}, uplink={}",
+                            device.path, config_error, uplink_error
+                        );
+                    }
+                },
+            }
+        }
+    }
+
     fn send_report_to_device(
         &mut self,
         device: &DeviceInfo,
@@ -547,6 +705,14 @@ pub enum HidError {
     Packet(#[from] crate::packet::PacketError),
     #[error("invalid HID device path")]
     InvalidDevicePath,
+    #[error("device does not advertise CONFIG_RPC capability")]
+    ConfigRpcUnsupported,
+    #[error("Config RPC request timed out")]
+    ConfigRpcTimeout,
+    #[error("Config RPC failed with status {0:?}")]
+    ConfigRpcStatus(ConfigStatus),
+    #[error("Config RPC OK response did not contain the expected payload")]
+    ConfigRpcMissingPayload,
 }
 
 #[cfg(test)]
@@ -558,6 +724,7 @@ mod tests {
     struct MockTransport {
         candidates: RefCell<Vec<DeviceInfo>>,
         hello_paths: RefCell<HashSet<String>>,
+        hello_capabilities: RefCell<HashMap<String, u32>>,
         failing_writes: RefCell<HashSet<String>>,
         failing_reads: RefCell<HashSet<String>>,
         writes: RefCell<Vec<(String, [u8; REPORT_SIZE])>>,
@@ -581,7 +748,12 @@ mod tests {
                 .contains(&device.path)
                 .then_some(DeviceHello {
                     seq: packet.seq,
-                    capabilities: crate::packet::CAPABILITY_APP_LAYER,
+                    capabilities: self
+                        .hello_capabilities
+                        .borrow()
+                        .get(&device.path)
+                        .copied()
+                        .unwrap_or(crate::packet::CAPABILITY_APP_LAYER),
                     device_uid_hash: Some(1),
                 }))
         }
@@ -630,6 +802,12 @@ mod tests {
             capabilities: crate::packet::CAPABILITY_APP_LAYER,
             device_uid_hash: Some(1),
         }
+    }
+
+    fn device_with_capabilities(path: &str, capabilities: u32) -> DeviceInfo {
+        let mut device = device(path);
+        device.capabilities = capabilities;
+        device
     }
 
     #[test]
@@ -825,6 +1003,424 @@ mod tests {
         assert!(events.is_empty());
         assert_eq!(manager.verified_devices(), &[device("b")]);
         assert_ne!(manager.device_generation(), generation);
+    }
+
+    #[test]
+    fn config_get_info_does_not_send_without_capability() {
+        let transport = MockTransport::default();
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        let device = device("a");
+
+        let err = manager.config_get_encoder_info(&device).unwrap_err();
+
+        assert!(matches!(err, HidError::ConfigRpcUnsupported));
+        assert!(manager.transport.writes.borrow().is_empty());
+    }
+
+    #[test]
+    fn config_get_info_returns_matching_response() {
+        let transport = MockTransport::default();
+        let response = crate::packet::ConfigResponse::encoder_get_info_ok(
+            0,
+            crate::packet::EncoderGetInfo {
+                layer_count: 4,
+                encoder_count: 2,
+                capabilities: 0,
+            },
+        )
+        .encode_payload();
+        transport
+            .uplink
+            .borrow_mut()
+            .insert("a".to_string(), VecDeque::from(vec![response]));
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        let device = device_with_capabilities("a", crate::packet::CAPABILITY_CONFIG_RPC);
+
+        let info = manager.config_get_encoder_info(&device).unwrap();
+
+        assert_eq!(info.layer_count, 4);
+        assert_eq!(info.encoder_count, 2);
+        assert_eq!(manager.transport.writes.borrow().len(), 1);
+    }
+
+    #[test]
+    fn config_get_info_ignores_uplink_and_mismatched_response() {
+        let transport = MockTransport::default();
+        let battery = crate::packet::UplinkPacket::Battery(crate::packet::BatteryStatusPacket {
+            entries: vec![crate::packet::BatteryEntry {
+                source: 0,
+                level: Some(80),
+            }],
+        })
+        .encode_payload();
+        let stale = crate::packet::ConfigResponse::encoder_get_info_ok(
+            99,
+            crate::packet::EncoderGetInfo {
+                layer_count: 1,
+                encoder_count: 1,
+                capabilities: 0,
+            },
+        )
+        .encode_payload();
+        let matching = crate::packet::ConfigResponse::encoder_get_info_ok(
+            0,
+            crate::packet::EncoderGetInfo {
+                layer_count: 5,
+                encoder_count: 2,
+                capabilities: 0,
+            },
+        )
+        .encode_payload();
+        transport.uplink.borrow_mut().insert(
+            "a".to_string(),
+            VecDeque::from(vec![battery, stale, matching]),
+        );
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        let device = device_with_capabilities("a", crate::packet::CAPABILITY_CONFIG_RPC);
+
+        let info = manager.config_get_encoder_info(&device).unwrap();
+
+        assert_eq!(info.layer_count, 5);
+        assert_eq!(info.encoder_count, 2);
+        assert_eq!(manager.transport.writes.borrow().len(), 1);
+    }
+
+    #[test]
+    fn config_get_info_retries_same_seq_once() {
+        let transport = MockTransport::default();
+        let config = HidConfig {
+            hello_timeout_ms: 1,
+            ..HidConfig::default()
+        };
+        let mut manager = HidDeviceManager::new(config, transport);
+        let device = device_with_capabilities("a", crate::packet::CAPABILITY_CONFIG_RPC);
+
+        let err = manager.config_get_encoder_info(&device).unwrap_err();
+
+        assert!(matches!(err, HidError::ConfigRpcTimeout));
+        let writes = manager.transport.writes.borrow();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].1, writes[1].1);
+    }
+
+    #[test]
+    fn config_get_bindings_does_not_send_without_capability() {
+        let transport = MockTransport::default();
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        let device = device("a");
+
+        let err = manager
+            .config_get_encoder_bindings(&device, 0, 0)
+            .unwrap_err();
+
+        assert!(matches!(err, HidError::ConfigRpcUnsupported));
+        assert!(manager.transport.writes.borrow().is_empty());
+    }
+
+    #[test]
+    fn config_get_bindings_returns_matching_response() {
+        let transport = MockTransport::default();
+        let response = crate::packet::ConfigResponse::encoder_get_bindings_ok(
+            0,
+            crate::packet::EncoderGetBindings {
+                layer_id: 3,
+                encoder_id: 1,
+                source: crate::packet::EncoderBindingSource::Keymap,
+                flags: crate::packet::EncoderBindingFlags::default(),
+                cw_binding: crate::packet::EncoderBinding {
+                    behavior_id: 0,
+                    param1: 0,
+                    param2: 0,
+                },
+                ccw_binding: crate::packet::EncoderBinding {
+                    behavior_id: 0,
+                    param1: 0,
+                    param2: 0,
+                },
+            },
+        )
+        .encode_payload();
+        transport
+            .uplink
+            .borrow_mut()
+            .insert("a".to_string(), VecDeque::from(vec![response]));
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        let device = device_with_capabilities("a", crate::packet::CAPABILITY_CONFIG_RPC);
+
+        let bindings = manager.config_get_encoder_bindings(&device, 3, 1).unwrap();
+
+        assert_eq!(bindings.layer_id, 3);
+        assert_eq!(bindings.encoder_id, 1);
+        assert_eq!(bindings.source, crate::packet::EncoderBindingSource::Keymap);
+        assert_eq!(bindings.flags.bits(), 0);
+        assert_eq!(manager.transport.writes.borrow().len(), 1);
+    }
+
+    #[test]
+    fn config_get_bindings_ignores_uplink_and_mismatched_response() {
+        let transport = MockTransport::default();
+        let battery = crate::packet::UplinkPacket::Battery(crate::packet::BatteryStatusPacket {
+            entries: vec![crate::packet::BatteryEntry {
+                source: 0,
+                level: Some(80),
+            }],
+        })
+        .encode_payload();
+        let stale = crate::packet::ConfigResponse::encoder_get_bindings_ok(
+            99,
+            crate::packet::EncoderGetBindings {
+                layer_id: 0,
+                encoder_id: 0,
+                source: crate::packet::EncoderBindingSource::Keymap,
+                flags: crate::packet::EncoderBindingFlags::default(),
+                cw_binding: crate::packet::EncoderBinding {
+                    behavior_id: 0,
+                    param1: 0,
+                    param2: 0,
+                },
+                ccw_binding: crate::packet::EncoderBinding {
+                    behavior_id: 0,
+                    param1: 0,
+                    param2: 0,
+                },
+            },
+        )
+        .encode_payload();
+        let matching = crate::packet::ConfigResponse::encoder_get_bindings_ok(
+            0,
+            crate::packet::EncoderGetBindings {
+                layer_id: 5,
+                encoder_id: 1,
+                source: crate::packet::EncoderBindingSource::Keymap,
+                flags: crate::packet::EncoderBindingFlags::default(),
+                cw_binding: crate::packet::EncoderBinding {
+                    behavior_id: 0,
+                    param1: 0,
+                    param2: 0,
+                },
+                ccw_binding: crate::packet::EncoderBinding {
+                    behavior_id: 0,
+                    param1: 0,
+                    param2: 0,
+                },
+            },
+        )
+        .encode_payload();
+        transport.uplink.borrow_mut().insert(
+            "a".to_string(),
+            VecDeque::from(vec![battery, stale, matching]),
+        );
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        let device = device_with_capabilities("a", crate::packet::CAPABILITY_CONFIG_RPC);
+
+        let bindings = manager.config_get_encoder_bindings(&device, 5, 1).unwrap();
+
+        assert_eq!(bindings.layer_id, 5);
+        assert_eq!(bindings.encoder_id, 1);
+        assert_eq!(manager.transport.writes.borrow().len(), 1);
+    }
+
+    #[test]
+    fn config_get_bindings_returns_config_status_error() {
+        let transport = MockTransport::default();
+        let response = crate::packet::ConfigResponse::status(
+            0,
+            crate::packet::ConfigFeature::Encoder as u8,
+            crate::packet::ConfigOp::GetBindings as u8,
+            crate::packet::ConfigStatus::InvalidArgument,
+        )
+        .encode_payload();
+        transport
+            .uplink
+            .borrow_mut()
+            .insert("a".to_string(), VecDeque::from(vec![response]));
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        let device = device_with_capabilities("a", crate::packet::CAPABILITY_CONFIG_RPC);
+
+        let err = manager
+            .config_get_encoder_bindings(&device, 9, 2)
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            HidError::ConfigRpcStatus(crate::packet::ConfigStatus::InvalidArgument)
+        ));
+    }
+
+    #[test]
+    fn config_get_bindings_retries_same_seq_once() {
+        let transport = MockTransport::default();
+        let config = HidConfig {
+            hello_timeout_ms: 1,
+            ..HidConfig::default()
+        };
+        let mut manager = HidDeviceManager::new(config, transport);
+        let device = device_with_capabilities("a", crate::packet::CAPABILITY_CONFIG_RPC);
+
+        let err = manager
+            .config_get_encoder_bindings(&device, 0, 0)
+            .unwrap_err();
+
+        assert!(matches!(err, HidError::ConfigRpcTimeout));
+        let writes = manager.transport.writes.borrow();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].1, writes[1].1);
+    }
+
+    #[test]
+    fn config_set_bindings_does_not_send_without_capability() {
+        let transport = MockTransport::default();
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        let device = device("a");
+
+        let err = manager
+            .config_set_encoder_bindings(
+                &device,
+                0,
+                0,
+                crate::packet::EncoderBinding {
+                    behavior_id: 1,
+                    param1: 2,
+                    param2: 3,
+                },
+                crate::packet::EncoderBinding {
+                    behavior_id: 4,
+                    param1: 5,
+                    param2: 6,
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, HidError::ConfigRpcUnsupported));
+        assert!(manager.transport.writes.borrow().is_empty());
+    }
+
+    #[test]
+    fn config_set_bindings_sends_request_and_returns_ok() {
+        let transport = MockTransport::default();
+        let response = crate::packet::ConfigResponse::status(
+            0,
+            crate::packet::ConfigFeature::Encoder as u8,
+            crate::packet::ConfigOp::SetBindings as u8,
+            crate::packet::ConfigStatus::Ok,
+        )
+        .encode_payload();
+        transport
+            .uplink
+            .borrow_mut()
+            .insert("a".to_string(), VecDeque::from(vec![response]));
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        let device = device_with_capabilities("a", crate::packet::CAPABILITY_CONFIG_RPC);
+
+        manager
+            .config_set_encoder_bindings(
+                &device,
+                0x01020304,
+                2,
+                crate::packet::EncoderBinding {
+                    behavior_id: 0x1234,
+                    param1: 56,
+                    param2: 78,
+                },
+                crate::packet::EncoderBinding {
+                    behavior_id: 0x5678,
+                    param1: 90,
+                    param2: 12,
+                },
+            )
+            .unwrap();
+
+        let writes = manager.transport.writes.borrow();
+        assert_eq!(writes.len(), 1);
+        let report = writes[0].1;
+        let payload = &report[1..];
+        assert_eq!(payload[3], crate::packet::PacketType::ConfigRequest as u8);
+        assert_eq!(payload[5], crate::packet::ConfigFeature::Encoder as u8);
+        assert_eq!(payload[6], crate::packet::ConfigOp::SetBindings as u8);
+        assert_eq!(payload[8], 28);
+        assert_eq!(
+            &payload[crate::packet::PAYLOAD_OFFSET..crate::packet::PAYLOAD_OFFSET + 4],
+            &[4, 3, 2, 1]
+        );
+        assert_eq!(payload[crate::packet::PAYLOAD_OFFSET + 4], 2);
+        assert_eq!(payload[crate::packet::PAYLOAD_OFFSET + 5], 0x03);
+        assert_eq!(payload[crate::packet::PAYLOAD_OFFSET + 6], 0);
+        assert_eq!(payload[crate::packet::PAYLOAD_OFFSET + 7], 0);
+    }
+
+    #[test]
+    fn config_set_bindings_returns_config_status_error() {
+        let transport = MockTransport::default();
+        let response = crate::packet::ConfigResponse::status(
+            0,
+            crate::packet::ConfigFeature::Encoder as u8,
+            crate::packet::ConfigOp::SetBindings as u8,
+            crate::packet::ConfigStatus::InvalidArgument,
+        )
+        .encode_payload();
+        transport
+            .uplink
+            .borrow_mut()
+            .insert("a".to_string(), VecDeque::from(vec![response]));
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        let device = device_with_capabilities("a", crate::packet::CAPABILITY_CONFIG_RPC);
+
+        let err = manager
+            .config_set_encoder_bindings(
+                &device,
+                9,
+                2,
+                crate::packet::EncoderBinding {
+                    behavior_id: 1,
+                    param1: 2,
+                    param2: 3,
+                },
+                crate::packet::EncoderBinding {
+                    behavior_id: 4,
+                    param1: 5,
+                    param2: 6,
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(
+            err,
+            HidError::ConfigRpcStatus(crate::packet::ConfigStatus::InvalidArgument)
+        ));
+    }
+
+    #[test]
+    fn config_set_bindings_retries_same_seq_once() {
+        let transport = MockTransport::default();
+        let config = HidConfig {
+            hello_timeout_ms: 1,
+            ..HidConfig::default()
+        };
+        let mut manager = HidDeviceManager::new(config, transport);
+        let device = device_with_capabilities("a", crate::packet::CAPABILITY_CONFIG_RPC);
+
+        let err = manager
+            .config_set_encoder_bindings(
+                &device,
+                0,
+                0,
+                crate::packet::EncoderBinding {
+                    behavior_id: 1,
+                    param1: 2,
+                    param2: 3,
+                },
+                crate::packet::EncoderBinding {
+                    behavior_id: 4,
+                    param1: 5,
+                    param2: 6,
+                },
+            )
+            .unwrap_err();
+
+        assert!(matches!(err, HidError::ConfigRpcTimeout));
+        let writes = manager.transport.writes.borrow();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].1, writes[1].1);
     }
 
     #[test]

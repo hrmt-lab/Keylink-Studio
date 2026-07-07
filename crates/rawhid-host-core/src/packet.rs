@@ -189,6 +189,381 @@ pub enum AiUsageErrorCode {
     MissingLimit = 9,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ConfigFeature {
+    Encoder = 0x01,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ConfigOp {
+    GetInfo = 0x01,
+    GetBindings = 0x02,
+    SetBindings = 0x03,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ConfigStatus {
+    Ok = 0x00,
+    BadPacket = 0x01,
+    UnsupportedFeature = 0x02,
+    UnsupportedOp = 0x03,
+    InvalidArgument = 0x04,
+    Busy = 0x05,
+    NotFound = 0x06,
+    StorageError = 0x07,
+    InternalError = 0x08,
+}
+
+impl TryFrom<u8> for ConfigStatus {
+    type Error = PacketError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x00 => Ok(Self::Ok),
+            0x01 => Ok(Self::BadPacket),
+            0x02 => Ok(Self::UnsupportedFeature),
+            0x03 => Ok(Self::UnsupportedOp),
+            0x04 => Ok(Self::InvalidArgument),
+            0x05 => Ok(Self::Busy),
+            0x06 => Ok(Self::NotFound),
+            0x07 => Ok(Self::StorageError),
+            0x08 => Ok(Self::InternalError),
+            other => Err(PacketError::InvalidConfigStatus(other)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncoderGetInfo {
+    pub layer_count: u8,
+    pub encoder_count: u8,
+    pub capabilities: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncoderBinding {
+    pub behavior_id: u16,
+    pub param1: u32,
+    pub param2: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum EncoderBindingSource {
+    Keymap = 0x00,
+    Override = 0x01,
+}
+
+impl TryFrom<u8> for EncoderBindingSource {
+    type Error = PacketError;
+
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x00 => Ok(Self::Keymap),
+            0x01 => Ok(Self::Override),
+            other => Err(PacketError::InvalidEncoderBindingSource(other)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EncoderBindingFlags(u8);
+
+impl EncoderBindingFlags {
+    pub const STALE_SAVED_EXISTS: u8 = 1 << 0;
+    pub const SAVED_EXISTS: u8 = 1 << 1;
+    pub const RUNTIME_DIRTY: u8 = 1 << 2;
+    pub const INVALID_SAVED_EXISTS: u8 = 1 << 3;
+    pub const VALID_MASK: u8 = Self::STALE_SAVED_EXISTS
+        | Self::SAVED_EXISTS
+        | Self::RUNTIME_DIRTY
+        | Self::INVALID_SAVED_EXISTS;
+
+    pub fn new(bits: u8) -> Result<Self, PacketError> {
+        if bits & !Self::VALID_MASK != 0 {
+            return Err(PacketError::InvalidEncoderBindingFlags(bits));
+        }
+        Ok(Self(bits))
+    }
+
+    pub fn bits(self) -> u8 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EncoderGetBindings {
+    pub layer_id: u32,
+    pub encoder_id: u8,
+    pub source: EncoderBindingSource,
+    pub flags: EncoderBindingFlags,
+    pub cw_binding: EncoderBinding,
+    pub ccw_binding: EncoderBinding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigRequest {
+    pub seq: u8,
+    pub feature: u8,
+    pub op: u8,
+    payload_len: u8,
+    payload: [u8; MAX_PAYLOAD_LEN],
+}
+
+impl ConfigRequest {
+    pub fn encoder_get_info(seq: u8) -> Self {
+        Self {
+            seq,
+            feature: ConfigFeature::Encoder as u8,
+            op: ConfigOp::GetInfo as u8,
+            payload_len: 0,
+            payload: [0; MAX_PAYLOAD_LEN],
+        }
+    }
+
+    pub fn encoder_get_bindings(seq: u8, layer_id: u32, encoder_id: u8) -> Self {
+        let mut payload = [0u8; MAX_PAYLOAD_LEN];
+        payload[0..4].copy_from_slice(&layer_id.to_le_bytes());
+        payload[4] = encoder_id;
+        Self {
+            seq,
+            feature: ConfigFeature::Encoder as u8,
+            op: ConfigOp::GetBindings as u8,
+            payload_len: 5,
+            payload,
+        }
+    }
+
+    pub fn encoder_set_bindings(
+        seq: u8,
+        layer_id: u32,
+        encoder_id: u8,
+        cw_binding: EncoderBinding,
+        ccw_binding: EncoderBinding,
+    ) -> Self {
+        let mut payload = [0u8; MAX_PAYLOAD_LEN];
+        payload[0..4].copy_from_slice(&layer_id.to_le_bytes());
+        payload[4] = encoder_id;
+        payload[5] = 0x03;
+        payload[6] = 0;
+        payload[7] = 0;
+        encode_encoder_binding(&mut payload[8..18], cw_binding);
+        encode_encoder_binding(&mut payload[18..28], ccw_binding);
+        Self {
+            seq,
+            feature: ConfigFeature::Encoder as u8,
+            op: ConfigOp::SetBindings as u8,
+            payload_len: 28,
+            payload,
+        }
+    }
+
+    pub fn encode_payload(self) -> [u8; PACKET_SIZE] {
+        let mut bytes = [0u8; PACKET_SIZE];
+        encode_header(
+            &mut bytes,
+            CommonHeader {
+                packet_type: PacketType::ConfigRequest,
+                seq: self.seq,
+                feature: self.feature,
+                op: self.op,
+                status_or_flags: 0,
+                payload_len: self.payload_len,
+            },
+        );
+        let payload_len = self.payload_len as usize;
+        bytes[PAYLOAD_OFFSET..PAYLOAD_OFFSET + payload_len]
+            .copy_from_slice(&self.payload[..payload_len]);
+        bytes
+    }
+
+    pub fn encode_report(self) -> [u8; REPORT_SIZE] {
+        let mut report = [0u8; REPORT_SIZE];
+        report[1..].copy_from_slice(&self.encode_payload());
+        report
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfigResponse {
+    pub seq: u8,
+    pub feature: u8,
+    pub op: u8,
+    pub status: ConfigStatus,
+    pub encoder_get_info: Option<EncoderGetInfo>,
+    pub encoder_get_bindings: Option<EncoderGetBindings>,
+}
+
+impl ConfigResponse {
+    pub fn encoder_get_info_ok(seq: u8, info: EncoderGetInfo) -> Self {
+        Self {
+            seq,
+            feature: ConfigFeature::Encoder as u8,
+            op: ConfigOp::GetInfo as u8,
+            status: ConfigStatus::Ok,
+            encoder_get_info: Some(info),
+            encoder_get_bindings: None,
+        }
+    }
+
+    pub fn encoder_get_bindings_ok(seq: u8, bindings: EncoderGetBindings) -> Self {
+        Self {
+            seq,
+            feature: ConfigFeature::Encoder as u8,
+            op: ConfigOp::GetBindings as u8,
+            status: ConfigStatus::Ok,
+            encoder_get_info: None,
+            encoder_get_bindings: Some(bindings),
+        }
+    }
+
+    pub fn status(seq: u8, feature: u8, op: u8, status: ConfigStatus) -> Self {
+        Self {
+            seq,
+            feature,
+            op,
+            status,
+            encoder_get_info: None,
+            encoder_get_bindings: None,
+        }
+    }
+
+    pub fn encode_payload(self) -> [u8; PACKET_SIZE] {
+        let mut bytes = [0u8; PACKET_SIZE];
+        let payload_len = if self.status == ConfigStatus::Ok
+            && self.feature == ConfigFeature::Encoder as u8
+            && self.op == ConfigOp::GetInfo as u8
+        {
+            4
+        } else if self.status == ConfigStatus::Ok
+            && self.feature == ConfigFeature::Encoder as u8
+            && self.op == ConfigOp::GetBindings as u8
+        {
+            28
+        } else {
+            0
+        };
+        encode_header(
+            &mut bytes,
+            CommonHeader {
+                packet_type: PacketType::ConfigResponse,
+                seq: self.seq,
+                feature: self.feature,
+                op: self.op,
+                status_or_flags: self.status as u8,
+                payload_len,
+            },
+        );
+        if let Some(info) = self.encoder_get_info {
+            let p = &mut bytes[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 4];
+            p[0] = info.layer_count;
+            p[1] = info.encoder_count;
+            p[2] = info.capabilities;
+            p[3] = 0;
+        }
+        if let Some(bindings) = self.encoder_get_bindings {
+            let p = &mut bytes[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 28];
+            p[0..4].copy_from_slice(&bindings.layer_id.to_le_bytes());
+            p[4] = bindings.encoder_id;
+            p[5] = bindings.source as u8;
+            p[6] = bindings.flags.bits();
+            p[7] = 0;
+            encode_encoder_binding(&mut p[8..18], bindings.cw_binding);
+            encode_encoder_binding(&mut p[18..28], bindings.ccw_binding);
+        }
+        bytes
+    }
+
+    pub fn decode_payload(bytes: &[u8]) -> Result<Self, PacketError> {
+        let header = decode_header(bytes)?;
+        if header.packet_type != PacketType::ConfigResponse {
+            return Err(PacketError::DecodeUnsupportedType(header.packet_type as u8));
+        }
+        let status = ConfigStatus::try_from(header.status_or_flags)?;
+        let mut encoder_get_info = None;
+        let mut encoder_get_bindings = None;
+        if status == ConfigStatus::Ok
+            && header.feature == ConfigFeature::Encoder as u8
+            && header.op == ConfigOp::GetInfo as u8
+        {
+            if header.payload_len != 4 {
+                return Err(PacketError::InvalidPayloadLength {
+                    max: 4,
+                    actual: header.payload_len,
+                });
+            }
+            let p = &bytes[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 4];
+            if p[3] != 0 {
+                return Err(PacketError::ReservedNotZero);
+            }
+            encoder_get_info = Some(EncoderGetInfo {
+                layer_count: p[0],
+                encoder_count: p[1],
+                capabilities: p[2],
+            });
+        } else if status == ConfigStatus::Ok
+            && header.feature == ConfigFeature::Encoder as u8
+            && header.op == ConfigOp::GetBindings as u8
+        {
+            if header.payload_len != 28 {
+                return Err(PacketError::InvalidPayloadLength {
+                    max: 28,
+                    actual: header.payload_len,
+                });
+            }
+            let p = &bytes[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 28];
+            if p[7] != 0 {
+                return Err(PacketError::ReservedNotZero);
+            }
+            encoder_get_bindings = Some(EncoderGetBindings {
+                layer_id: u32::from_le_bytes(p[0..4].try_into().unwrap()),
+                encoder_id: p[4],
+                source: EncoderBindingSource::try_from(p[5])?,
+                flags: EncoderBindingFlags::new(p[6])?,
+                cw_binding: decode_encoder_binding(&p[8..18]),
+                ccw_binding: decode_encoder_binding(&p[18..28]),
+            });
+        } else {
+            if header.payload_len != 0 {
+                return Err(PacketError::InvalidPayloadLength {
+                    max: 0,
+                    actual: header.payload_len,
+                });
+            }
+        }
+
+        Ok(Self {
+            seq: header.seq,
+            feature: header.feature,
+            op: header.op,
+            status,
+            encoder_get_info,
+            encoder_get_bindings,
+        })
+    }
+
+    pub fn is_response_to(self, request: ConfigRequest) -> bool {
+        self.seq == request.seq && self.feature == request.feature && self.op == request.op
+    }
+}
+
+fn encode_encoder_binding(bytes: &mut [u8], binding: EncoderBinding) {
+    bytes[0..2].copy_from_slice(&binding.behavior_id.to_le_bytes());
+    bytes[2..6].copy_from_slice(&binding.param1.to_le_bytes());
+    bytes[6..10].copy_from_slice(&binding.param2.to_le_bytes());
+}
+
+fn decode_encoder_binding(bytes: &[u8]) -> EncoderBinding {
+    EncoderBinding {
+        behavior_id: u16::from_le_bytes(bytes[0..2].try_into().unwrap()),
+        param1: u32::from_le_bytes(bytes[2..6].try_into().unwrap()),
+        param2: u32::from_le_bytes(bytes[6..10].try_into().unwrap()),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AiUsageFlags(u8);
 
@@ -863,6 +1238,12 @@ pub enum PacketError {
     InvalidKeyStatsDelta(u8),
     #[error("layer mask {layer_mask:#010x} does not include active layer {active_layer}")]
     InvalidLayerMask { active_layer: u8, layer_mask: u32 },
+    #[error("invalid config status {0:#04x}")]
+    InvalidConfigStatus(u8),
+    #[error("invalid encoder binding source {0:#04x}")]
+    InvalidEncoderBindingSource(u8),
+    #[error("invalid encoder binding flags {0:#04x}")]
+    InvalidEncoderBindingFlags(u8),
 }
 
 #[cfg(test)]
@@ -1256,7 +1637,6 @@ mod tests {
             pressed: true,
             seq: 2,
         });
-
         assert_eq!(
             UplinkPacket::decode_payload(&packet.encode_payload()).unwrap(),
             packet
@@ -1297,6 +1677,249 @@ mod tests {
         assert_eq!(
             UplinkPacket::decode_payload(&response).unwrap_err(),
             PacketError::DecodeUnsupportedType(PacketType::ConfigResponse as u8)
+        );
+    }
+
+    #[test]
+    fn config_get_info_request_encodes_common_header() {
+        let request = ConfigRequest::encoder_get_info(11);
+        let payload = request.encode_payload();
+
+        assert_eq!(&payload[0..2], b"HL");
+        assert_eq!(payload[2], VERSION);
+        assert_eq!(payload[3], PacketType::ConfigRequest as u8);
+        assert_eq!(payload[4], 11);
+        assert_eq!(payload[5], ConfigFeature::Encoder as u8);
+        assert_eq!(payload[6], ConfigOp::GetInfo as u8);
+        assert_eq!(payload[7], 0);
+        assert_eq!(payload[8], 0);
+        assert!(payload[9..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn config_get_bindings_request_encodes_payload() {
+        let request = ConfigRequest::encoder_get_bindings(11, 0x01020304, 2);
+        let payload = request.encode_payload();
+
+        assert_eq!(&payload[0..2], b"HL");
+        assert_eq!(payload[2], VERSION);
+        assert_eq!(payload[3], PacketType::ConfigRequest as u8);
+        assert_eq!(payload[4], 11);
+        assert_eq!(payload[5], ConfigFeature::Encoder as u8);
+        assert_eq!(payload[6], ConfigOp::GetBindings as u8);
+        assert_eq!(payload[7], 0);
+        assert_eq!(payload[8], 5);
+        assert_eq!(&payload[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 4], &[4, 3, 2, 1]);
+        assert_eq!(payload[PAYLOAD_OFFSET + 4], 2);
+        assert!(payload[PAYLOAD_OFFSET + 5..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn config_set_bindings_request_encodes_payload() {
+        let cw_binding = EncoderBinding {
+            behavior_id: 0x1234,
+            param1: 0x01020304,
+            param2: 0x05060708,
+        };
+        let ccw_binding = EncoderBinding {
+            behavior_id: 0x5678,
+            param1: 0x11121314,
+            param2: 0x15161718,
+        };
+        let request =
+            ConfigRequest::encoder_set_bindings(11, 0x0a0b0c0d, 2, cw_binding, ccw_binding);
+        let payload = request.encode_payload();
+
+        assert_eq!(&payload[0..2], b"HL");
+        assert_eq!(payload[2], VERSION);
+        assert_eq!(payload[3], PacketType::ConfigRequest as u8);
+        assert_eq!(payload[4], 11);
+        assert_eq!(payload[5], ConfigFeature::Encoder as u8);
+        assert_eq!(payload[6], ConfigOp::SetBindings as u8);
+        assert_eq!(payload[7], 0);
+        assert_eq!(payload[8], 28);
+        assert_eq!(
+            &payload[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 4],
+            &[0x0d, 0x0c, 0x0b, 0x0a]
+        );
+        assert_eq!(payload[PAYLOAD_OFFSET + 4], 2);
+        assert_eq!(payload[PAYLOAD_OFFSET + 5], 0x03);
+        assert_eq!(payload[PAYLOAD_OFFSET + 6], 0);
+        assert_eq!(payload[PAYLOAD_OFFSET + 7], 0);
+        assert_eq!(
+            &payload[PAYLOAD_OFFSET + 8..PAYLOAD_OFFSET + 18],
+            &[0x34, 0x12, 0x04, 0x03, 0x02, 0x01, 0x08, 0x07, 0x06, 0x05]
+        );
+        assert_eq!(
+            &payload[PAYLOAD_OFFSET + 18..PAYLOAD_OFFSET + 28],
+            &[0x78, 0x56, 0x14, 0x13, 0x12, 0x11, 0x18, 0x17, 0x16, 0x15]
+        );
+        assert!(payload[PAYLOAD_OFFSET + 28..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn config_get_info_response_decodes_ok_payload() {
+        let info = EncoderGetInfo {
+            layer_count: 4,
+            encoder_count: 2,
+            capabilities: 0,
+        };
+        let payload = ConfigResponse::encoder_get_info_ok(12, info).encode_payload();
+
+        let decoded = ConfigResponse::decode_payload(&payload).unwrap();
+
+        assert_eq!(decoded.seq, 12);
+        assert_eq!(decoded.feature, ConfigFeature::Encoder as u8);
+        assert_eq!(decoded.op, ConfigOp::GetInfo as u8);
+        assert_eq!(decoded.status, ConfigStatus::Ok);
+        assert_eq!(decoded.encoder_get_info, Some(info));
+    }
+
+    #[test]
+    fn config_get_bindings_response_decodes_ok_payload() {
+        let bindings = EncoderGetBindings {
+            layer_id: 7,
+            encoder_id: 1,
+            source: EncoderBindingSource::Keymap,
+            flags: EncoderBindingFlags::new(
+                EncoderBindingFlags::SAVED_EXISTS | EncoderBindingFlags::RUNTIME_DIRTY,
+            )
+            .unwrap(),
+            cw_binding: EncoderBinding {
+                behavior_id: 0x1234,
+                param1: 56,
+                param2: 78,
+            },
+            ccw_binding: EncoderBinding {
+                behavior_id: 0x5678,
+                param1: 90,
+                param2: 12,
+            },
+        };
+        let payload = ConfigResponse::encoder_get_bindings_ok(12, bindings).encode_payload();
+
+        let decoded = ConfigResponse::decode_payload(&payload).unwrap();
+
+        assert_eq!(decoded.seq, 12);
+        assert_eq!(decoded.feature, ConfigFeature::Encoder as u8);
+        assert_eq!(decoded.op, ConfigOp::GetBindings as u8);
+        assert_eq!(decoded.status, ConfigStatus::Ok);
+        assert_eq!(decoded.encoder_get_bindings, Some(bindings));
+        assert_eq!(payload[8], 28);
+        assert!(payload[PAYLOAD_OFFSET + 28..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn config_response_decodes_non_ok_status_without_payload() {
+        let payload = ConfigResponse::status(
+            12,
+            ConfigFeature::Encoder as u8,
+            ConfigOp::GetInfo as u8,
+            ConfigStatus::UnsupportedOp,
+        )
+        .encode_payload();
+
+        let decoded = ConfigResponse::decode_payload(&payload).unwrap();
+
+        assert_eq!(decoded.status, ConfigStatus::UnsupportedOp);
+        assert_eq!(decoded.encoder_get_info, None);
+        assert_eq!(decoded.encoder_get_bindings, None);
+    }
+
+    #[test]
+    fn config_set_bindings_response_decodes_ok_status_without_payload() {
+        let payload = ConfigResponse::status(
+            12,
+            ConfigFeature::Encoder as u8,
+            ConfigOp::SetBindings as u8,
+            ConfigStatus::Ok,
+        )
+        .encode_payload();
+
+        let decoded = ConfigResponse::decode_payload(&payload).unwrap();
+
+        assert_eq!(decoded.seq, 12);
+        assert_eq!(decoded.feature, ConfigFeature::Encoder as u8);
+        assert_eq!(decoded.op, ConfigOp::SetBindings as u8);
+        assert_eq!(decoded.status, ConfigStatus::Ok);
+        assert_eq!(decoded.encoder_get_info, None);
+        assert_eq!(decoded.encoder_get_bindings, None);
+        assert_eq!(payload[8], 0);
+    }
+
+    #[test]
+    fn config_get_info_response_rejects_invalid_payload() {
+        let info = EncoderGetInfo {
+            layer_count: 4,
+            encoder_count: 2,
+            capabilities: 0,
+        };
+        let mut payload = ConfigResponse::encoder_get_info_ok(12, info).encode_payload();
+        payload[PAYLOAD_OFFSET + 3] = 1;
+
+        assert_eq!(
+            ConfigResponse::decode_payload(&payload).unwrap_err(),
+            PacketError::ReservedNotZero
+        );
+
+        let mut payload = ConfigResponse::encoder_get_info_ok(12, info).encode_payload();
+        payload[7] = 0xFE;
+
+        assert_eq!(
+            ConfigResponse::decode_payload(&payload).unwrap_err(),
+            PacketError::InvalidConfigStatus(0xFE)
+        );
+    }
+
+    #[test]
+    fn config_get_bindings_response_rejects_invalid_payload() {
+        let bindings = EncoderGetBindings {
+            layer_id: 7,
+            encoder_id: 1,
+            source: EncoderBindingSource::Keymap,
+            flags: EncoderBindingFlags::default(),
+            cw_binding: EncoderBinding {
+                behavior_id: 0,
+                param1: 0,
+                param2: 0,
+            },
+            ccw_binding: EncoderBinding {
+                behavior_id: 0,
+                param1: 0,
+                param2: 0,
+            },
+        };
+
+        let mut payload = ConfigResponse::encoder_get_bindings_ok(12, bindings).encode_payload();
+        payload[PAYLOAD_OFFSET + 7] = 1;
+        assert_eq!(
+            ConfigResponse::decode_payload(&payload).unwrap_err(),
+            PacketError::ReservedNotZero
+        );
+
+        let mut payload = ConfigResponse::encoder_get_bindings_ok(12, bindings).encode_payload();
+        payload[PAYLOAD_OFFSET + 5] = 0xFE;
+        assert_eq!(
+            ConfigResponse::decode_payload(&payload).unwrap_err(),
+            PacketError::InvalidEncoderBindingSource(0xFE)
+        );
+
+        let mut payload = ConfigResponse::encoder_get_bindings_ok(12, bindings).encode_payload();
+        payload[PAYLOAD_OFFSET + 6] = 0x10;
+        assert_eq!(
+            ConfigResponse::decode_payload(&payload).unwrap_err(),
+            PacketError::InvalidEncoderBindingFlags(0x10)
+        );
+
+        let mut payload = ConfigResponse::encoder_get_bindings_ok(12, bindings).encode_payload();
+        payload[8] = 27;
+        payload[PAYLOAD_OFFSET + 27..].fill(0);
+        assert_eq!(
+            ConfigResponse::decode_payload(&payload).unwrap_err(),
+            PacketError::InvalidPayloadLength {
+                max: 28,
+                actual: 27
+            }
         );
     }
 

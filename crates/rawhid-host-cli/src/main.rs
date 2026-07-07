@@ -3,8 +3,8 @@ use std::path::PathBuf;
 use clap::{Parser, Subcommand};
 use rawhid_host_core::{
     config::{load_config, write_default_config, ConfigError, ConfigPaths},
-    ActiveAppProvider, AppConfig, HidConfig, HidDeviceManager, ProbeResult, Runner,
-    SystemActiveAppProvider,
+    ActiveAppProvider, AppConfig, EncoderBinding, HidConfig, HidDeviceManager, ProbeResult, Runner,
+    SystemActiveAppProvider, CAPABILITY_CONFIG_RPC,
 };
 use thiserror::Error;
 use tracing_subscriber::{filter::EnvFilter, fmt};
@@ -35,6 +35,34 @@ enum Command {
     ConfigPath,
     /// List Raw HID candidates and HELLO results.
     ListDevices,
+    /// Probe Config RPC ENCODER GET_INFO on verified Host Link devices.
+    ConfigGetInfo,
+    /// Probe Config RPC ENCODER GET_BINDINGS on verified Host Link devices.
+    ConfigGetBindings {
+        #[arg(long)]
+        layer_id: u32,
+        #[arg(long)]
+        encoder_id: u8,
+    },
+    /// Send Config RPC ENCODER SET_BINDINGS to verified Host Link devices.
+    ConfigSetBindings {
+        #[arg(long)]
+        layer_id: u32,
+        #[arg(long)]
+        encoder_id: u8,
+        #[arg(long)]
+        cw_behavior_id: u16,
+        #[arg(long)]
+        cw_param1: u32,
+        #[arg(long)]
+        cw_param2: u32,
+        #[arg(long)]
+        ccw_behavior_id: u16,
+        #[arg(long)]
+        ccw_param1: u32,
+        #[arg(long)]
+        ccw_param2: u32,
+    },
 }
 
 fn main() -> Result<(), CliError> {
@@ -46,6 +74,35 @@ fn main() -> Result<(), CliError> {
         Command::InitConfig { output, force } => init_config(cli.config, output, force),
         Command::ConfigPath => config_path(cli.config),
         Command::ListDevices => list_devices(cli.config),
+        Command::ConfigGetInfo => config_get_info(cli.config),
+        Command::ConfigGetBindings {
+            layer_id,
+            encoder_id,
+        } => config_get_bindings(cli.config, layer_id, encoder_id),
+        Command::ConfigSetBindings {
+            layer_id,
+            encoder_id,
+            cw_behavior_id,
+            cw_param1,
+            cw_param2,
+            ccw_behavior_id,
+            ccw_param1,
+            ccw_param2,
+        } => config_set_bindings(
+            cli.config,
+            layer_id,
+            encoder_id,
+            EncoderBinding {
+                behavior_id: cw_behavior_id,
+                param1: cw_param1,
+                param2: cw_param2,
+            },
+            EncoderBinding {
+                behavior_id: ccw_behavior_id,
+                param1: ccw_param1,
+                param2: ccw_param2,
+            },
+        ),
     }
 }
 
@@ -108,6 +165,110 @@ fn list_devices(config_path: Option<PathBuf>) -> Result<(), CliError> {
     Ok(())
 }
 
+fn config_get_info(config_path: Option<PathBuf>) -> Result<(), CliError> {
+    let (config, loaded_from) = load_config(config_path)?;
+    print_config_source(&loaded_from);
+
+    let mut manager = HidDeviceManager::real(config.hid)?;
+    let results = manager.probe()?;
+    let mut verified_count = 0usize;
+    let mut config_rpc_count = 0usize;
+
+    for result in results {
+        if !result.verified {
+            continue;
+        }
+        if result.device.capabilities & CAPABILITY_CONFIG_RPC != 0 {
+            config_rpc_count += 1;
+        }
+        verified_count += 1;
+        print_config_get_info_result(&mut manager, result)?;
+    }
+
+    if verified_count == 0 {
+        println!("No verified Host Link devices found.");
+    } else if config_rpc_count == 0 {
+        println!("No verified devices advertise CONFIG_RPC.");
+    }
+
+    Ok(())
+}
+
+fn config_get_bindings(
+    config_path: Option<PathBuf>,
+    layer_id: u32,
+    encoder_id: u8,
+) -> Result<(), CliError> {
+    let (config, loaded_from) = load_config(config_path)?;
+    print_config_source(&loaded_from);
+
+    let mut manager = HidDeviceManager::real(config.hid)?;
+    let results = manager.probe()?;
+    let mut verified_count = 0usize;
+    let mut config_rpc_count = 0usize;
+
+    for result in results {
+        if !result.verified {
+            continue;
+        }
+        if result.device.capabilities & CAPABILITY_CONFIG_RPC != 0 {
+            config_rpc_count += 1;
+        }
+        verified_count += 1;
+        print_config_get_bindings_result(&mut manager, result, layer_id, encoder_id)?;
+    }
+
+    if verified_count == 0 {
+        println!("No verified Host Link devices found.");
+    } else if config_rpc_count == 0 {
+        println!("No verified devices advertise CONFIG_RPC.");
+    }
+
+    Ok(())
+}
+
+fn config_set_bindings(
+    config_path: Option<PathBuf>,
+    layer_id: u32,
+    encoder_id: u8,
+    cw_binding: EncoderBinding,
+    ccw_binding: EncoderBinding,
+) -> Result<(), CliError> {
+    let (config, loaded_from) = load_config(config_path)?;
+    print_config_source(&loaded_from);
+
+    let mut manager = HidDeviceManager::real(config.hid)?;
+    let results = manager.probe()?;
+    let mut verified_count = 0usize;
+    let mut config_rpc_count = 0usize;
+
+    for result in results {
+        if !result.verified {
+            continue;
+        }
+        if result.device.capabilities & CAPABILITY_CONFIG_RPC != 0 {
+            config_rpc_count += 1;
+        }
+        verified_count += 1;
+        print_config_set_bindings_result(
+            &mut manager,
+            result,
+            layer_id,
+            encoder_id,
+            cw_binding,
+            ccw_binding,
+        )?;
+    }
+
+    if verified_count == 0 {
+        println!("No verified Host Link devices found.");
+    } else if config_rpc_count == 0 {
+        println!("No verified devices advertise CONFIG_RPC.");
+    }
+
+    Ok(())
+}
+
 fn print_config_source(path: &Option<PathBuf>) {
     match path {
         Some(path) => eprintln!("Using config: {}", path.display()),
@@ -139,6 +300,139 @@ fn print_probe_result(result: ProbeResult) {
     if let Some(error) = result.error {
         println!("  error: {}", error);
     }
+}
+
+fn print_config_get_info_result(
+    manager: &mut HidDeviceManager,
+    result: ProbeResult,
+) -> Result<(), CliError> {
+    let device = result.device;
+    println!(
+        "verified vid={:04x} pid={:04x} usage_page={:04x} usage={:04x} path={}",
+        device.vendor_id, device.product_id, device.usage_page, device.usage, device.path
+    );
+    if let Some(product) = &device.product {
+        println!("  product: {product}");
+    }
+    if let Some(manufacturer) = &device.manufacturer {
+        println!("  manufacturer: {manufacturer}");
+    }
+    if device.capabilities & CAPABILITY_CONFIG_RPC == 0 {
+        println!("  CONFIG_RPC: unsupported");
+        return Ok(());
+    }
+
+    println!("  CONFIG_RPC: supported");
+    match manager.config_get_encoder_info(&device) {
+        Ok(info) => {
+            println!("  ENCODER GET_INFO: OK");
+            println!("    layer_count: {}", info.layer_count);
+            println!("    encoder_count: {}", info.encoder_count);
+            println!("    capabilities: 0x{:02x}", info.capabilities);
+        }
+        Err(rawhid_host_core::hid::HidError::ConfigRpcStatus(status)) => {
+            println!("  ENCODER GET_INFO: {status:?}");
+        }
+        Err(error) => {
+            println!("  ENCODER GET_INFO: error: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn print_config_get_bindings_result(
+    manager: &mut HidDeviceManager,
+    result: ProbeResult,
+    layer_id: u32,
+    encoder_id: u8,
+) -> Result<(), CliError> {
+    let device = result.device;
+    println!(
+        "verified vid={:04x} pid={:04x} usage_page={:04x} usage={:04x} path={}",
+        device.vendor_id, device.product_id, device.usage_page, device.usage, device.path
+    );
+    if let Some(product) = &device.product {
+        println!("  product: {product}");
+    }
+    if let Some(manufacturer) = &device.manufacturer {
+        println!("  manufacturer: {manufacturer}");
+    }
+    if device.capabilities & CAPABILITY_CONFIG_RPC == 0 {
+        println!("  CONFIG_RPC: unsupported");
+        return Ok(());
+    }
+
+    println!("  CONFIG_RPC: supported");
+    match manager.config_get_encoder_bindings(&device, layer_id, encoder_id) {
+        Ok(bindings) => {
+            println!("  ENCODER GET_BINDINGS: OK");
+            println!("    layer_id: {}", bindings.layer_id);
+            println!("    encoder_id: {}", bindings.encoder_id);
+            println!("    source: {:?}", bindings.source);
+            println!("    flags: 0x{:02x}", bindings.flags.bits());
+            print_binding("cw_binding", bindings.cw_binding);
+            print_binding("ccw_binding", bindings.ccw_binding);
+        }
+        Err(rawhid_host_core::hid::HidError::ConfigRpcStatus(status)) => {
+            println!("  ENCODER GET_BINDINGS: {status:?}");
+        }
+        Err(error) => {
+            println!("  ENCODER GET_BINDINGS: error: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn print_config_set_bindings_result(
+    manager: &mut HidDeviceManager,
+    result: ProbeResult,
+    layer_id: u32,
+    encoder_id: u8,
+    cw_binding: EncoderBinding,
+    ccw_binding: EncoderBinding,
+) -> Result<(), CliError> {
+    let device = result.device;
+    println!(
+        "verified vid={:04x} pid={:04x} usage_page={:04x} usage={:04x} path={}",
+        device.vendor_id, device.product_id, device.usage_page, device.usage, device.path
+    );
+    if let Some(product) = &device.product {
+        println!("  product: {product}");
+    }
+    if let Some(manufacturer) = &device.manufacturer {
+        println!("  manufacturer: {manufacturer}");
+    }
+    if device.capabilities & CAPABILITY_CONFIG_RPC == 0 {
+        println!("  CONFIG_RPC: unsupported");
+        return Ok(());
+    }
+
+    println!("  CONFIG_RPC: supported");
+    match manager.config_set_encoder_bindings(
+        &device,
+        layer_id,
+        encoder_id,
+        cw_binding,
+        ccw_binding,
+    ) {
+        Ok(()) => {
+            println!("  ENCODER SET_BINDINGS: OK");
+        }
+        Err(rawhid_host_core::hid::HidError::ConfigRpcStatus(status)) => {
+            println!("  ENCODER SET_BINDINGS: {status:?}");
+        }
+        Err(error) => {
+            println!("  ENCODER SET_BINDINGS: error: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn print_binding(label: &str, binding: EncoderBinding) {
+    println!(
+        "    {label}: behavior_id=0x{:04x} param1={} param2={}",
+        binding.behavior_id, binding.param1, binding.param2
+    );
 }
 
 #[derive(Debug, Error)]

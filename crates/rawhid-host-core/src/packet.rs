@@ -201,6 +201,10 @@ pub enum ConfigOp {
     GetInfo = 0x01,
     GetBindings = 0x02,
     SetBindings = 0x03,
+    GetDirty = 0x04,
+    Save = 0x05,
+    Discard = 0x06,
+    ClearOverride = 0x07,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -361,6 +365,49 @@ impl ConfigRequest {
         }
     }
 
+    pub fn encoder_get_dirty(seq: u8) -> Self {
+        Self {
+            seq,
+            feature: ConfigFeature::Encoder as u8,
+            op: ConfigOp::GetDirty as u8,
+            payload_len: 0,
+            payload: [0; MAX_PAYLOAD_LEN],
+        }
+    }
+
+    pub fn encoder_save(seq: u8) -> Self {
+        Self {
+            seq,
+            feature: ConfigFeature::Encoder as u8,
+            op: ConfigOp::Save as u8,
+            payload_len: 0,
+            payload: [0; MAX_PAYLOAD_LEN],
+        }
+    }
+
+    pub fn encoder_discard(seq: u8) -> Self {
+        Self {
+            seq,
+            feature: ConfigFeature::Encoder as u8,
+            op: ConfigOp::Discard as u8,
+            payload_len: 0,
+            payload: [0; MAX_PAYLOAD_LEN],
+        }
+    }
+
+    pub fn encoder_clear_override(seq: u8, layer_id: u32, encoder_id: u8) -> Self {
+        let mut payload = [0u8; MAX_PAYLOAD_LEN];
+        payload[0..4].copy_from_slice(&layer_id.to_le_bytes());
+        payload[4] = encoder_id;
+        Self {
+            seq,
+            feature: ConfigFeature::Encoder as u8,
+            op: ConfigOp::ClearOverride as u8,
+            payload_len: 5,
+            payload,
+        }
+    }
+
     pub fn encode_payload(self) -> [u8; PACKET_SIZE] {
         let mut bytes = [0u8; PACKET_SIZE];
         encode_header(
@@ -395,6 +442,7 @@ pub struct ConfigResponse {
     pub status: ConfigStatus,
     pub encoder_get_info: Option<EncoderGetInfo>,
     pub encoder_get_bindings: Option<EncoderGetBindings>,
+    pub encoder_get_dirty: Option<bool>,
 }
 
 impl ConfigResponse {
@@ -406,6 +454,7 @@ impl ConfigResponse {
             status: ConfigStatus::Ok,
             encoder_get_info: Some(info),
             encoder_get_bindings: None,
+            encoder_get_dirty: None,
         }
     }
 
@@ -417,6 +466,19 @@ impl ConfigResponse {
             status: ConfigStatus::Ok,
             encoder_get_info: None,
             encoder_get_bindings: Some(bindings),
+            encoder_get_dirty: None,
+        }
+    }
+
+    pub fn encoder_get_dirty_ok(seq: u8, dirty: bool) -> Self {
+        Self {
+            seq,
+            feature: ConfigFeature::Encoder as u8,
+            op: ConfigOp::GetDirty as u8,
+            status: ConfigStatus::Ok,
+            encoder_get_info: None,
+            encoder_get_bindings: None,
+            encoder_get_dirty: Some(dirty),
         }
     }
 
@@ -428,6 +490,7 @@ impl ConfigResponse {
             status,
             encoder_get_info: None,
             encoder_get_bindings: None,
+            encoder_get_dirty: None,
         }
     }
 
@@ -443,6 +506,11 @@ impl ConfigResponse {
             && self.op == ConfigOp::GetBindings as u8
         {
             28
+        } else if self.status == ConfigStatus::Ok
+            && self.feature == ConfigFeature::Encoder as u8
+            && self.op == ConfigOp::GetDirty as u8
+        {
+            1
         } else {
             0
         };
@@ -474,6 +542,9 @@ impl ConfigResponse {
             encode_encoder_binding(&mut p[8..18], bindings.cw_binding);
             encode_encoder_binding(&mut p[18..28], bindings.ccw_binding);
         }
+        if let Some(dirty) = self.encoder_get_dirty {
+            bytes[PAYLOAD_OFFSET] = u8::from(dirty);
+        }
         bytes
     }
 
@@ -485,6 +556,7 @@ impl ConfigResponse {
         let status = ConfigStatus::try_from(header.status_or_flags)?;
         let mut encoder_get_info = None;
         let mut encoder_get_bindings = None;
+        let mut encoder_get_dirty = None;
         if status == ConfigStatus::Ok
             && header.feature == ConfigFeature::Encoder as u8
             && header.op == ConfigOp::GetInfo as u8
@@ -526,6 +598,22 @@ impl ConfigResponse {
                 cw_binding: decode_encoder_binding(&p[8..18]),
                 ccw_binding: decode_encoder_binding(&p[18..28]),
             });
+        } else if status == ConfigStatus::Ok
+            && header.feature == ConfigFeature::Encoder as u8
+            && header.op == ConfigOp::GetDirty as u8
+        {
+            if header.payload_len != 1 {
+                return Err(PacketError::InvalidPayloadLength {
+                    max: 1,
+                    actual: header.payload_len,
+                });
+            }
+            let dirty = bytes[PAYLOAD_OFFSET];
+            encoder_get_dirty = Some(match dirty {
+                0 => false,
+                1 => true,
+                other => return Err(PacketError::InvalidConfigDirty(other)),
+            });
         } else {
             if header.payload_len != 0 {
                 return Err(PacketError::InvalidPayloadLength {
@@ -542,6 +630,7 @@ impl ConfigResponse {
             status,
             encoder_get_info,
             encoder_get_bindings,
+            encoder_get_dirty,
         })
     }
 
@@ -1244,6 +1333,8 @@ pub enum PacketError {
     InvalidEncoderBindingSource(u8),
     #[error("invalid encoder binding flags {0:#04x}")]
     InvalidEncoderBindingFlags(u8),
+    #[error("invalid Config RPC dirty value {0:#04x}")]
+    InvalidConfigDirty(u8),
 }
 
 #[cfg(test)]
@@ -1758,6 +1849,35 @@ mod tests {
     }
 
     #[test]
+    fn config_lifecycle_requests_encode_payloads() {
+        let get_dirty = ConfigRequest::encoder_get_dirty(21).encode_payload();
+        assert_eq!(get_dirty[3], PacketType::ConfigRequest as u8);
+        assert_eq!(get_dirty[4], 21);
+        assert_eq!(get_dirty[5], ConfigFeature::Encoder as u8);
+        assert_eq!(get_dirty[6], ConfigOp::GetDirty as u8);
+        assert_eq!(get_dirty[8], 0);
+        assert!(get_dirty[PAYLOAD_OFFSET..].iter().all(|b| *b == 0));
+
+        let save = ConfigRequest::encoder_save(22).encode_payload();
+        assert_eq!(save[4], 22);
+        assert_eq!(save[6], ConfigOp::Save as u8);
+        assert_eq!(save[8], 0);
+
+        let discard = ConfigRequest::encoder_discard(23).encode_payload();
+        assert_eq!(discard[4], 23);
+        assert_eq!(discard[6], ConfigOp::Discard as u8);
+        assert_eq!(discard[8], 0);
+
+        let clear = ConfigRequest::encoder_clear_override(24, 0x01020304, 5).encode_payload();
+        assert_eq!(clear[4], 24);
+        assert_eq!(clear[6], ConfigOp::ClearOverride as u8);
+        assert_eq!(clear[8], 5);
+        assert_eq!(&clear[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 4], &[4, 3, 2, 1]);
+        assert_eq!(clear[PAYLOAD_OFFSET + 4], 5);
+        assert!(clear[PAYLOAD_OFFSET + 5..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
     fn config_get_info_response_decodes_ok_payload() {
         let info = EncoderGetInfo {
             layer_count: 4,
@@ -1810,6 +1930,27 @@ mod tests {
     }
 
     #[test]
+    fn config_get_dirty_response_decodes_ok_payload() {
+        let payload = ConfigResponse::encoder_get_dirty_ok(12, true).encode_payload();
+
+        let decoded = ConfigResponse::decode_payload(&payload).unwrap();
+
+        assert_eq!(decoded.seq, 12);
+        assert_eq!(decoded.feature, ConfigFeature::Encoder as u8);
+        assert_eq!(decoded.op, ConfigOp::GetDirty as u8);
+        assert_eq!(decoded.status, ConfigStatus::Ok);
+        assert_eq!(decoded.encoder_get_dirty, Some(true));
+        assert_eq!(payload[8], 1);
+        assert_eq!(payload[PAYLOAD_OFFSET], 1);
+        assert!(payload[PAYLOAD_OFFSET + 1..].iter().all(|b| *b == 0));
+
+        let payload = ConfigResponse::encoder_get_dirty_ok(13, false).encode_payload();
+        let decoded = ConfigResponse::decode_payload(&payload).unwrap();
+        assert_eq!(decoded.encoder_get_dirty, Some(false));
+        assert_eq!(payload[PAYLOAD_OFFSET], 0);
+    }
+
+    #[test]
     fn config_response_decodes_non_ok_status_without_payload() {
         let payload = ConfigResponse::status(
             12,
@@ -1824,6 +1965,7 @@ mod tests {
         assert_eq!(decoded.status, ConfigStatus::UnsupportedOp);
         assert_eq!(decoded.encoder_get_info, None);
         assert_eq!(decoded.encoder_get_bindings, None);
+        assert_eq!(decoded.encoder_get_dirty, None);
     }
 
     #[test]
@@ -1844,7 +1986,32 @@ mod tests {
         assert_eq!(decoded.status, ConfigStatus::Ok);
         assert_eq!(decoded.encoder_get_info, None);
         assert_eq!(decoded.encoder_get_bindings, None);
+        assert_eq!(decoded.encoder_get_dirty, None);
         assert_eq!(payload[8], 0);
+    }
+
+    #[test]
+    fn config_lifecycle_responses_decode_ok_status_without_payload() {
+        for op in [ConfigOp::Save, ConfigOp::Discard, ConfigOp::ClearOverride] {
+            let payload = ConfigResponse::status(
+                12,
+                ConfigFeature::Encoder as u8,
+                op as u8,
+                ConfigStatus::Ok,
+            )
+            .encode_payload();
+
+            let decoded = ConfigResponse::decode_payload(&payload).unwrap();
+
+            assert_eq!(decoded.seq, 12);
+            assert_eq!(decoded.feature, ConfigFeature::Encoder as u8);
+            assert_eq!(decoded.op, op as u8);
+            assert_eq!(decoded.status, ConfigStatus::Ok);
+            assert_eq!(decoded.encoder_get_info, None);
+            assert_eq!(decoded.encoder_get_bindings, None);
+            assert_eq!(decoded.encoder_get_dirty, None);
+            assert_eq!(payload[8], 0);
+        }
     }
 
     #[test]
@@ -1920,6 +2087,24 @@ mod tests {
                 max: 28,
                 actual: 27
             }
+        );
+    }
+
+    #[test]
+    fn config_get_dirty_response_rejects_invalid_payload() {
+        let mut payload = ConfigResponse::encoder_get_dirty_ok(12, true).encode_payload();
+        payload[PAYLOAD_OFFSET] = 2;
+        assert_eq!(
+            ConfigResponse::decode_payload(&payload).unwrap_err(),
+            PacketError::InvalidConfigDirty(2)
+        );
+
+        let mut payload = ConfigResponse::encoder_get_dirty_ok(12, true).encode_payload();
+        payload[8] = 0;
+        payload[PAYLOAD_OFFSET] = 0;
+        assert_eq!(
+            ConfigResponse::decode_payload(&payload).unwrap_err(),
+            PacketError::InvalidPayloadLength { max: 1, actual: 0 }
         );
     }
 

@@ -63,6 +63,19 @@ enum Command {
         #[arg(long)]
         ccw_param2: u32,
     },
+    /// Probe Config RPC ENCODER GET_DIRTY on verified Host Link devices.
+    ConfigGetDirty,
+    /// Send Config RPC ENCODER SAVE to verified Host Link devices.
+    ConfigSave,
+    /// Send Config RPC ENCODER DISCARD to verified Host Link devices.
+    ConfigDiscard,
+    /// Send Config RPC ENCODER CLEAR_OVERRIDE to verified Host Link devices.
+    ConfigClearOverride {
+        #[arg(long)]
+        layer_id: u32,
+        #[arg(long)]
+        encoder_id: u8,
+    },
 }
 
 fn main() -> Result<(), CliError> {
@@ -103,6 +116,13 @@ fn main() -> Result<(), CliError> {
                 param2: ccw_param2,
             },
         ),
+        Command::ConfigGetDirty => config_get_dirty(cli.config),
+        Command::ConfigSave => config_save(cli.config),
+        Command::ConfigDiscard => config_discard(cli.config),
+        Command::ConfigClearOverride {
+            layer_id,
+            encoder_id,
+        } => config_clear_override(cli.config, layer_id, encoder_id),
     }
 }
 
@@ -269,6 +289,126 @@ fn config_set_bindings(
     Ok(())
 }
 
+fn config_get_dirty(config_path: Option<PathBuf>) -> Result<(), CliError> {
+    let (config, loaded_from) = load_config(config_path)?;
+    print_config_source(&loaded_from);
+
+    let mut manager = HidDeviceManager::real(config.hid)?;
+    let results = manager.probe()?;
+    let mut verified_count = 0usize;
+    let mut config_rpc_count = 0usize;
+
+    for result in results {
+        if !result.verified {
+            continue;
+        }
+        if result.device.capabilities & CAPABILITY_CONFIG_RPC != 0 {
+            config_rpc_count += 1;
+        }
+        verified_count += 1;
+        print_config_get_dirty_result(&mut manager, result)?;
+    }
+
+    if verified_count == 0 {
+        println!("No verified Host Link devices found.");
+    } else if config_rpc_count == 0 {
+        println!("No verified devices advertise CONFIG_RPC.");
+    }
+
+    Ok(())
+}
+
+fn config_save(config_path: Option<PathBuf>) -> Result<(), CliError> {
+    let (config, loaded_from) = load_config(config_path)?;
+    print_config_source(&loaded_from);
+
+    let mut manager = HidDeviceManager::real(config.hid)?;
+    let results = manager.probe()?;
+    let mut verified_count = 0usize;
+    let mut config_rpc_count = 0usize;
+
+    for result in results {
+        if !result.verified {
+            continue;
+        }
+        if result.device.capabilities & CAPABILITY_CONFIG_RPC != 0 {
+            config_rpc_count += 1;
+        }
+        verified_count += 1;
+        print_config_save_result(&mut manager, result)?;
+    }
+
+    if verified_count == 0 {
+        println!("No verified Host Link devices found.");
+    } else if config_rpc_count == 0 {
+        println!("No verified devices advertise CONFIG_RPC.");
+    }
+
+    Ok(())
+}
+
+fn config_discard(config_path: Option<PathBuf>) -> Result<(), CliError> {
+    let (config, loaded_from) = load_config(config_path)?;
+    print_config_source(&loaded_from);
+
+    let mut manager = HidDeviceManager::real(config.hid)?;
+    let results = manager.probe()?;
+    let mut verified_count = 0usize;
+    let mut config_rpc_count = 0usize;
+
+    for result in results {
+        if !result.verified {
+            continue;
+        }
+        if result.device.capabilities & CAPABILITY_CONFIG_RPC != 0 {
+            config_rpc_count += 1;
+        }
+        verified_count += 1;
+        print_config_discard_result(&mut manager, result)?;
+    }
+
+    if verified_count == 0 {
+        println!("No verified Host Link devices found.");
+    } else if config_rpc_count == 0 {
+        println!("No verified devices advertise CONFIG_RPC.");
+    }
+
+    Ok(())
+}
+
+fn config_clear_override(
+    config_path: Option<PathBuf>,
+    layer_id: u32,
+    encoder_id: u8,
+) -> Result<(), CliError> {
+    let (config, loaded_from) = load_config(config_path)?;
+    print_config_source(&loaded_from);
+
+    let mut manager = HidDeviceManager::real(config.hid)?;
+    let results = manager.probe()?;
+    let mut verified_count = 0usize;
+    let mut config_rpc_count = 0usize;
+
+    for result in results {
+        if !result.verified {
+            continue;
+        }
+        if result.device.capabilities & CAPABILITY_CONFIG_RPC != 0 {
+            config_rpc_count += 1;
+        }
+        verified_count += 1;
+        print_config_clear_override_result(&mut manager, result, layer_id, encoder_id)?;
+    }
+
+    if verified_count == 0 {
+        println!("No verified Host Link devices found.");
+    } else if config_rpc_count == 0 {
+        println!("No verified devices advertise CONFIG_RPC.");
+    }
+
+    Ok(())
+}
+
 fn print_config_source(path: &Option<PathBuf>) {
     match path {
         Some(path) => eprintln!("Using config: {}", path.display()),
@@ -423,6 +563,149 @@ fn print_config_set_bindings_result(
         }
         Err(error) => {
             println!("  ENCODER SET_BINDINGS: error: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn print_config_get_dirty_result(
+    manager: &mut HidDeviceManager,
+    result: ProbeResult,
+) -> Result<(), CliError> {
+    let device = result.device;
+    println!(
+        "verified vid={:04x} pid={:04x} usage_page={:04x} usage={:04x} path={}",
+        device.vendor_id, device.product_id, device.usage_page, device.usage, device.path
+    );
+    if let Some(product) = &device.product {
+        println!("  product: {product}");
+    }
+    if let Some(manufacturer) = &device.manufacturer {
+        println!("  manufacturer: {manufacturer}");
+    }
+    if device.capabilities & CAPABILITY_CONFIG_RPC == 0 {
+        println!("  CONFIG_RPC: unsupported");
+        return Ok(());
+    }
+
+    println!("  CONFIG_RPC: supported");
+    match manager.config_get_encoder_dirty(&device) {
+        Ok(dirty) => {
+            println!("  ENCODER GET_DIRTY: OK");
+            println!("    dirty: {dirty}");
+        }
+        Err(rawhid_host_core::hid::HidError::ConfigRpcStatus(status)) => {
+            println!("  ENCODER GET_DIRTY: {status:?}");
+        }
+        Err(error) => {
+            println!("  ENCODER GET_DIRTY: error: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn print_config_save_result(
+    manager: &mut HidDeviceManager,
+    result: ProbeResult,
+) -> Result<(), CliError> {
+    let device = result.device;
+    println!(
+        "verified vid={:04x} pid={:04x} usage_page={:04x} usage={:04x} path={}",
+        device.vendor_id, device.product_id, device.usage_page, device.usage, device.path
+    );
+    if let Some(product) = &device.product {
+        println!("  product: {product}");
+    }
+    if let Some(manufacturer) = &device.manufacturer {
+        println!("  manufacturer: {manufacturer}");
+    }
+    if device.capabilities & CAPABILITY_CONFIG_RPC == 0 {
+        println!("  CONFIG_RPC: unsupported");
+        return Ok(());
+    }
+
+    println!("  CONFIG_RPC: supported");
+    match manager.config_save_encoder(&device) {
+        Ok(()) => {
+            println!("  ENCODER SAVE: OK");
+        }
+        Err(rawhid_host_core::hid::HidError::ConfigRpcStatus(status)) => {
+            println!("  ENCODER SAVE: {status:?}");
+        }
+        Err(error) => {
+            println!("  ENCODER SAVE: error: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn print_config_discard_result(
+    manager: &mut HidDeviceManager,
+    result: ProbeResult,
+) -> Result<(), CliError> {
+    let device = result.device;
+    println!(
+        "verified vid={:04x} pid={:04x} usage_page={:04x} usage={:04x} path={}",
+        device.vendor_id, device.product_id, device.usage_page, device.usage, device.path
+    );
+    if let Some(product) = &device.product {
+        println!("  product: {product}");
+    }
+    if let Some(manufacturer) = &device.manufacturer {
+        println!("  manufacturer: {manufacturer}");
+    }
+    if device.capabilities & CAPABILITY_CONFIG_RPC == 0 {
+        println!("  CONFIG_RPC: unsupported");
+        return Ok(());
+    }
+
+    println!("  CONFIG_RPC: supported");
+    match manager.config_discard_encoder(&device) {
+        Ok(()) => {
+            println!("  ENCODER DISCARD: OK");
+        }
+        Err(rawhid_host_core::hid::HidError::ConfigRpcStatus(status)) => {
+            println!("  ENCODER DISCARD: {status:?}");
+        }
+        Err(error) => {
+            println!("  ENCODER DISCARD: error: {error}");
+        }
+    }
+    Ok(())
+}
+
+fn print_config_clear_override_result(
+    manager: &mut HidDeviceManager,
+    result: ProbeResult,
+    layer_id: u32,
+    encoder_id: u8,
+) -> Result<(), CliError> {
+    let device = result.device;
+    println!(
+        "verified vid={:04x} pid={:04x} usage_page={:04x} usage={:04x} path={}",
+        device.vendor_id, device.product_id, device.usage_page, device.usage, device.path
+    );
+    if let Some(product) = &device.product {
+        println!("  product: {product}");
+    }
+    if let Some(manufacturer) = &device.manufacturer {
+        println!("  manufacturer: {manufacturer}");
+    }
+    if device.capabilities & CAPABILITY_CONFIG_RPC == 0 {
+        println!("  CONFIG_RPC: unsupported");
+        return Ok(());
+    }
+
+    println!("  CONFIG_RPC: supported");
+    match manager.config_clear_encoder_override(&device, layer_id, encoder_id) {
+        Ok(()) => {
+            println!("  ENCODER CLEAR_OVERRIDE: OK");
+        }
+        Err(rawhid_host_core::hid::HidError::ConfigRpcStatus(status)) => {
+            println!("  ENCODER CLEAR_OVERRIDE: {status:?}");
+        }
+        Err(error) => {
+            println!("  ENCODER CLEAR_OVERRIDE: error: {error}");
         }
     }
     Ok(())

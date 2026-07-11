@@ -18,7 +18,7 @@ use rawhid_host_core::{
     hid::{HidDeviceManager, HidError, ProbeResult},
     packet::{
         ConfigStatus, EncoderBinding, EncoderBindingFlags, EncoderBindingSource,
-        EncoderGetBindings, UplinkPacket,
+        EncoderGetBindings, EncoderGetInfo, UplinkPacket,
     },
     runner::{uplink_device_key, RunEvent, Runner},
     stats::{KeyStatsSummary, SharedKeyStatsStore, StatsPeriod},
@@ -1319,6 +1319,18 @@ pub struct DiscardChangesDto {
     pub snapshot: Option<StudioKeymapSnapshot>,
 }
 
+/// Result of restoring the editable Studio and Keylink encoder state to the
+/// firmware `.keymap`. The two transports are independent, so callers must
+/// expose a partial success rather than flattening it into one error.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ResetToKeymapDto {
+    pub overall_success: bool,
+    pub studio: SaveOrDiscardTargetDto,
+    pub config: ConfigSaveOrDiscardDto,
+    pub snapshot: Option<StudioKeymapSnapshot>,
+    pub refresh_error: Option<String>,
+}
+
 fn config_save_or_discard_from_feature(feature: ConfigFeatureResultDto) -> ConfigSaveOrDiscardDto {
     ConfigSaveOrDiscardDto {
         attempted: feature.attempted,
@@ -1389,6 +1401,69 @@ fn run_encoder_feature(
         },
         Ok(_) => fail("hostlink_invalid_response".to_string()),
         Err(err) => fail(err),
+    }
+}
+
+fn run_encoder_reset_to_keymap(
+    tx: mpsc::Sender<MonitorCommand>,
+    timeout: Duration,
+    host_link_uid: String,
+    encoder_info: EncoderGetInfo,
+    snapshot: &StudioKeymapSnapshot,
+) -> ConfigFeatureResultDto {
+    let fail = |error: String| ConfigFeatureResultDto {
+        feature: "ENCODER".to_string(),
+        attempted: true,
+        skipped: false,
+        success: false,
+        error: Some(error),
+    };
+    let target_uid = match parse_host_link_uid(&host_link_uid) {
+        Ok(uid) => uid,
+        Err(err) => return fail(err),
+    };
+
+    // `Layer.id` is the stable firmware ID. It is explicitly not the UI index
+    // nor the 0..layer_count range reported by GET_INFO.
+    let layer_ids: BTreeSet<u32> = snapshot.layers.iter().map(|layer| layer.id).collect();
+    for layer_id in layer_ids {
+        for encoder_id in 0..encoder_info.encoder_count {
+            match host_link_call(
+                &tx,
+                timeout,
+                target_uid,
+                HostLinkRequest::EncoderClearOverride {
+                    layer_id,
+                    encoder_id,
+                },
+            ) {
+                Ok(HostLinkResponse::Done) => {}
+                Ok(_) => {
+                    let _ =
+                        host_link_call(&tx, timeout, target_uid, HostLinkRequest::EncoderDiscard);
+                    return fail("hostlink_invalid_response".to_string());
+                }
+                Err(error) => {
+                    let _ =
+                        host_link_call(&tx, timeout, target_uid, HostLinkRequest::EncoderDiscard);
+                    return fail(error);
+                }
+            }
+        }
+    }
+
+    // SAVE also removes stale/orphan persisted entries that no longer have a
+    // layer in the reset stock keymap, even when encoder_count is zero.
+    match host_link_call(&tx, timeout, target_uid, HostLinkRequest::EncoderSave) {
+        Ok(HostLinkResponse::Done) => ConfigFeatureResultDto {
+            feature: "ENCODER".to_string(),
+            attempted: true,
+            skipped: false,
+            success: true,
+            error: None,
+        },
+        Ok(_) => fail("hostlink_invalid_response".to_string()),
+        Err(error) => fail(error),
     }
 }
 
@@ -1748,6 +1823,185 @@ pub async fn studio_discard_changes(
             config,
         },
         snapshot,
+    })
+}
+
+#[tauri::command]
+pub async fn studio_reset_to_keymap(
+    device_id: String,
+    host_link_uid: Option<String>,
+    state: State<'_, AppState>,
+) -> Result<ResetToKeymapDto, String> {
+    // Verify the optional encoder transport before touching the Studio state.
+    // A paired Host Link device means this command promises to reset both
+    // editable surfaces, so a preflight failure must be fail-closed.
+    let preflight = match host_link_uid.clone() {
+        None => Ok(None),
+        Some(uid) => match host_link_sender(state.inner()) {
+            Err(error) => Err(failed_encoder_feature(error)),
+            Ok(tx) => {
+                let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+                match tauri::async_runtime::spawn_blocking(move || {
+                    let target_uid = parse_host_link_uid(&uid)?;
+                    match host_link_call(&tx, timeout, target_uid, HostLinkRequest::EncoderGetInfo)?
+                    {
+                        HostLinkResponse::EncoderInfo(info) => Ok((uid, info)),
+                        _ => Err("hostlink_invalid_response".to_string()),
+                    }
+                })
+                .await
+                {
+                    Ok(Ok(value)) => Ok(Some(value)),
+                    Ok(Err(error)) => Err(failed_encoder_feature(error)),
+                    Err(_) => Err(failed_encoder_feature(
+                        "studio_encoder_reset_preflight_failed",
+                    )),
+                }
+            }
+        },
+    };
+
+    let skipped_studio = || SaveOrDiscardTargetDto {
+        attempted: false,
+        skipped: true,
+        success: true,
+        error: None,
+    };
+    let preflight = match preflight {
+        Ok(value) => value,
+        Err(feature) => {
+            let config = config_save_or_discard_from_feature(feature);
+            return Ok(ResetToKeymapDto {
+                overall_success: false,
+                studio: skipped_studio(),
+                config,
+                snapshot: None,
+                refresh_error: None,
+            });
+        }
+    };
+
+    let edit = Arc::clone(&state.studio_edit);
+    let edit_device_id = device_id.clone();
+    let (studio, snapshot, refresh_error) = tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = edit.lock().unwrap();
+        let session = match guard.as_mut() {
+            Some(session) => session,
+            None => {
+                return (
+                    SaveOrDiscardTargetDto {
+                        attempted: true,
+                        skipped: false,
+                        success: false,
+                        error: Some(studio_error_code(StudioError::NoEditSession)),
+                    },
+                    None,
+                    None,
+                );
+            }
+        };
+        if session.device_id != edit_device_id {
+            return (
+                SaveOrDiscardTargetDto {
+                    attempted: true,
+                    skipped: false,
+                    success: false,
+                    error: Some(studio_error_code(StudioError::SessionDeviceMismatch)),
+                },
+                None,
+                None,
+            );
+        }
+
+        match session.reset_settings() {
+            Err(error) => (
+                SaveOrDiscardTargetDto {
+                    attempted: true,
+                    skipped: false,
+                    success: false,
+                    error: Some(studio_error_code(error)),
+                },
+                None,
+                None,
+            ),
+            Ok(()) => match session.refresh_after_reset() {
+                Ok(snapshot) => (
+                    SaveOrDiscardTargetDto {
+                        attempted: true,
+                        skipped: false,
+                        success: true,
+                        error: None,
+                    },
+                    Some(snapshot),
+                    None,
+                ),
+                Err(error) => (
+                    // The device acknowledged reset_settings. Preserve that
+                    // fact and ask the UI to re-read rather than claiming the
+                    // destructive action itself failed.
+                    SaveOrDiscardTargetDto {
+                        attempted: true,
+                        skipped: false,
+                        success: true,
+                        error: None,
+                    },
+                    None,
+                    Some(studio_error_code(error)),
+                ),
+            },
+        }
+    })
+    .await
+    .map_err(|_| "studio_reset_to_keymap_failed".to_string())?;
+
+    let config = if !studio.success || refresh_error.is_some() {
+        config_save_or_discard_from_feature(ConfigFeatureResultDto {
+            feature: "ENCODER".to_string(),
+            attempted: false,
+            skipped: true,
+            success: true,
+            error: None,
+        })
+    } else if let (Some((uid, encoder_info)), Some(snapshot)) = (preflight, snapshot.clone()) {
+        match host_link_sender(state.inner()) {
+            Ok(tx) => {
+                let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+                let feature = tauri::async_runtime::spawn_blocking(move || {
+                    run_encoder_reset_to_keymap(tx, timeout, uid, encoder_info, &snapshot)
+                })
+                .await
+                .unwrap_or_else(|_| failed_encoder_feature("studio_encoder_reset_failed"));
+                config_save_or_discard_from_feature(feature)
+            }
+            Err(error) => config_save_or_discard_from_feature(failed_encoder_feature(error)),
+        }
+    } else {
+        config_save_or_discard_from_feature(ConfigFeatureResultDto {
+            feature: "ENCODER".to_string(),
+            attempted: false,
+            skipped: true,
+            success: true,
+            error: None,
+        })
+    };
+
+    let overall_success = studio.success && refresh_error.is_none() && config.success;
+    if overall_success {
+        if let Some(uid) = host_link_uid.and_then(|uid| parse_host_link_uid(&uid).ok()) {
+            state
+                .encoder_restore_rollbacks
+                .lock()
+                .unwrap()
+                .remove(&(device_id, uid));
+        }
+    }
+
+    Ok(ResetToKeymapDto {
+        overall_success,
+        studio,
+        config,
+        snapshot,
+        refresh_error,
     })
 }
 
@@ -2472,6 +2726,7 @@ fn studio_error_code(error: StudioError) -> String {
         StudioError::SaveNotSupported => "save_not_supported",
         StudioError::SaveNoSpace => "save_no_space",
         StudioError::SaveResultUnknown => "save_result_unknown",
+        StudioError::ResetSettingsRejected => "reset_settings_rejected",
         StudioError::NoEditSession => "no_edit_session",
         StudioError::EditSessionExists => "edit_session_exists",
         StudioError::UnsavedChangesExist => "unsaved_changes_exist",
@@ -3447,6 +3702,7 @@ fn refresh_error_code(error: AiUsageRefreshError) -> String {
 mod tests {
     use super::*;
     use rawhid_host_core::runner::{DeviceBatterySource, DeviceBatteryStatus};
+    use rawhid_host_core::studio::{StudioLayer, StudioLayoutSource};
 
     fn encoder_get_bindings(
         source: EncoderBindingSource,
@@ -3481,6 +3737,31 @@ mod tests {
             updated_unix: 0,
         }];
         status
+    }
+
+    fn reset_snapshot(layer_ids: &[u32]) -> StudioKeymapSnapshot {
+        StudioKeymapSnapshot {
+            device_id: "serial:test".to_string(),
+            device_name: "Test Keyboard".to_string(),
+            connection_type: "usb".to_string(),
+            lock_state: rawhid_host_core::studio::StudioLockState::Unlocked,
+            physical_layouts: Vec::new(),
+            selected_physical_layout_index: None,
+            selected_physical_layout_name: None,
+            layout_source: StudioLayoutSource::GridFallback,
+            selected_layout_keys: Vec::new(),
+            layers: layer_ids
+                .iter()
+                .enumerate()
+                .map(|(index, id)| StudioLayer {
+                    index,
+                    id: *id,
+                    name: format!("Layer {id}"),
+                    bindings: Vec::new(),
+                })
+                .collect(),
+            updated_ms: 0,
+        }
     }
 
     #[test]
@@ -3639,6 +3920,51 @@ mod tests {
             Duration::from_secs(1),
             "uid:00000000000000aa".to_string(),
             BTreeMap::from([((10, 0), baseline)]),
+        );
+
+        assert!(result.success);
+        assert!(result.attempted);
+        assert!(!result.skipped);
+        worker.join().unwrap();
+    }
+
+    #[test]
+    fn encoder_reset_uses_stable_layer_ids_then_saves_once() {
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let expected = [(3, 0), (3, 1), (7, 0), (7, 1)];
+            for (step, expected_target) in expected.into_iter().enumerate() {
+                let MonitorCommand::Config(call) = rx.recv().unwrap() else {
+                    panic!("expected config call");
+                };
+                match call.request {
+                    HostLinkRequest::EncoderClearOverride {
+                        layer_id,
+                        encoder_id,
+                    } => {
+                        assert_eq!((layer_id, encoder_id), expected_target, "step {step}");
+                    }
+                    request => panic!("unexpected reset request: {request:?}"),
+                }
+                call.reply.send(Ok(HostLinkResponse::Done)).unwrap();
+            }
+            let MonitorCommand::Config(call) = rx.recv().unwrap() else {
+                panic!("expected encoder save");
+            };
+            assert!(matches!(call.request, HostLinkRequest::EncoderSave));
+            call.reply.send(Ok(HostLinkResponse::Done)).unwrap();
+        });
+
+        let result = run_encoder_reset_to_keymap(
+            tx,
+            Duration::from_secs(1),
+            "uid:00000000000000aa".to_string(),
+            EncoderGetInfo {
+                layer_count: 2,
+                encoder_count: 2,
+                capabilities: 0,
+            },
+            &reset_snapshot(&[7, 3]),
         );
 
         assert!(result.success);

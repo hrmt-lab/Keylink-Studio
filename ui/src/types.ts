@@ -511,6 +511,14 @@ export interface DiscardChangesDto {
   snapshot: StudioKeymapSnapshot | null;
 }
 
+export interface ResetToKeymapDto {
+  overall_success: boolean;
+  studio: SaveOrDiscardTargetDto;
+  config: ConfigSaveOrDiscardDto;
+  snapshot: StudioKeymapSnapshot | null;
+  refresh_error: string | null;
+}
+
 export interface StudioResyncEditStateDto {
   snapshot: StudioKeymapSnapshot;
   has_unsaved: boolean;
@@ -519,7 +527,7 @@ export interface StudioResyncEditStateDto {
 export interface EditState {
   mode: "viewing" | "editing";
   dirty: boolean;
-  operation: "idle" | "setting" | "saving" | "discarding" | "ending";
+  operation: "idle" | "setting" | "saving" | "discarding" | "resetting" | "ending";
   problem: null | "save_failed" | "save_unknown" | "locked_again" | "disconnected";
 }
 export interface ProbeResult {

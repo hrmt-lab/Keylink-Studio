@@ -185,6 +185,8 @@ Keymap Viewer の編集モードでは、ZMK Studio RPC を使って実機上の
 
 ZMK Studio で保存されるキーマップは firmware の `.keymap` ソースではなく、デバイスの settings / NVS 側の状態です。firmware をフルイレース、または settings reset 付きで焼き直すと Studio で編集したキーマップは戻ることがあります。
 
+編集モードの `.keymap に戻す` は、ZMK Studio で保存したキー、レイヤー、物理レイアウトを削除して firmware の `.keymap` 状態へ戻します。Host Link が同じ UID で接続されている場合は、Keylink Studio のエンコーダ override も削除して `.keymap` の `sensor-bindings` へ戻します。この操作は Bluetooth pairing、Host Link identity、アプリ設定、キー統計を削除しません。Studio RPC と Host Link は別経路のため、片方だけ失敗した場合は結果を表示して再試行できます。
+
 Keymap Viewer の `Export` は、現在デバイス上にある ZMK Studio/NVS 状態を `-keymap.json` として書き出します。`Restore` は現在キーボードにも存在する layer index と key position の raw binding だけを未保存変更として読み込みます。backup にしかない layer / position は書き込まず、現在キーボードにしかない layer / position は変更しません。復元対象の差分がない場合は、その旨を画面上に表示し、未保存変更は作りません。復元直後はまだ永続化されていないため、実機へ保存するには既存の `保存` を押してください。取り消す場合は `変更を破棄` を使います。
 
 このバックアップは運用復旧用であり、`.keymap` 生成や firmware ソースへの反映は行いません。レイヤー名、レイヤー数、レイヤー順、物理レイアウト選択は復元対象外です。behavior 名検証ができない接続では強警告を出し、同一 firmware / 近い構成への復元を前提に raw binding を復元します。BLE Studio 由来のバックアップも復元対象ですが、検証できない場合は USB より安全確認が弱くなります。復元または手動編集で変更したキーは、編集セッション中に色付きで表示されます。

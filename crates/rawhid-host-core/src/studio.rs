@@ -11,8 +11,6 @@ use strum::IntoEnumIterator;
 use thiserror::Error;
 use zmk_studio_api::{
     proto::zmk::{self, core::LockState},
-    transport::serial::SerialTransport,
-    transport::serial::SerialTransportError,
     transport::PlatformBleTransport,
     Behavior, ClientError, HidUsage, Keycode, StudioClient,
 };
@@ -397,6 +395,8 @@ pub enum StudioError {
     SaveNoSpace,
     #[error("save result is unknown")]
     SaveResultUnknown,
+    #[error("settings reset was rejected by the device")]
+    ResetSettingsRejected,
     #[error("no edit session")]
     NoEditSession,
     #[error("edit session already exists")]
@@ -531,8 +531,35 @@ impl StudioDeviceRef {
 }
 
 enum StudioTransport {
-    Serial(SerialTransport),
+    Serial(StudioSerialTransport),
     Ble(PlatformBleTransport),
+}
+
+struct StudioSerialTransport {
+    inner: Box<dyn serialport::SerialPort>,
+}
+
+impl StudioSerialTransport {
+    fn open(path: &str, timeout: Duration) -> Result<Self, serialport::Error> {
+        let inner = serialport::new(path, 12_500).timeout(timeout).open()?;
+        Ok(Self { inner })
+    }
+}
+
+impl Read for StudioSerialTransport {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.inner.read(buf)
+    }
+}
+
+impl Write for StudioSerialTransport {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 impl Read for StudioTransport {
@@ -1219,7 +1246,9 @@ impl StudioEditSession {
         let device_ref = StudioDeviceRef::parse(device_id)?;
         let candidate = resolve_device_candidate(device_ref)?;
         let snapshot_mode = snapshot_mode_for_candidate(&candidate);
-        let mut client = open_studio_client(&candidate).map_err(|_| StudioError::Disconnected)?;
+        let mut client =
+            open_studio_client_with_serial_timeout(&candidate, Duration::from_secs(10))
+                .map_err(|_| StudioError::Disconnected)?;
         let lock_state = client
             .get_lock_state()
             .map_err(map_client_to_studio_error)?;
@@ -1455,6 +1484,41 @@ impl StudioEditSession {
         Ok(snapshot)
     }
 
+    /// Removes the ZMK Studio-persisted keymap state so the device falls back
+    /// to the firmware's stock `.keymap`. The caller must re-read the snapshot
+    /// afterwards because layer metadata and physical-layout selection can also
+    /// change as part of the reset.
+    pub fn reset_settings(&mut self) -> Result<(), StudioError> {
+        let accepted = self
+            .client
+            .reset_settings()
+            .map_err(map_client_to_studio_error)?;
+        if !accepted {
+            return Err(StudioError::ResetSettingsRejected);
+        }
+        self.restore_rollback_snapshot = None;
+        self.encoder_resolver = None;
+        Ok(())
+    }
+
+    /// Re-fetches all snapshot inputs after a settings reset. `snapshot()` is
+    /// intentionally not enough here because it keeps cached layout metadata.
+    pub fn refresh_after_reset(&mut self) -> Result<StudioKeymapSnapshot, StudioError> {
+        let (keymap, layout_selection, behavior_names) =
+            fetch_snapshot_data(&mut self.client, self.snapshot_mode)?;
+        self.layout_selection = layout_selection.clone();
+        self.behavior_names = behavior_names.clone();
+        Ok(snapshot_from_parts(
+            self.device_id.clone(),
+            self.fallback_name.clone(),
+            self.connection_type.clone(),
+            StudioLockState::Unlocked,
+            keymap,
+            layout_selection,
+            behavior_names,
+        ))
+    }
+
     pub fn add_layer(&mut self, name: String) -> Result<StudioKeymapSnapshot, StudioError> {
         let details = self
             .client
@@ -1533,7 +1597,7 @@ fn probe_candidate(candidate: StudioPortCandidate, timeout_ms: u64) -> StudioDev
 
 fn probe_candidate_rpc(candidate: StudioPortCandidate) -> StudioDeviceStatus {
     let mut status = base_status(&candidate);
-    let mut client = match open_serial_client(&candidate.port_name) {
+    let mut client = match open_serial_client(&candidate.port_name, Duration::from_millis(500)) {
         Ok(client) => client,
         Err(error) => {
             status.rpc_status = StudioRpcStatus::Failed;
@@ -1827,9 +1891,17 @@ fn resolve_device_candidate(
 fn open_studio_client(
     candidate: &StudioDeviceCandidate,
 ) -> Result<StudioClient<StudioTransport>, StudioOpenError> {
+    open_studio_client_with_serial_timeout(candidate, Duration::from_millis(500))
+}
+
+fn open_studio_client_with_serial_timeout(
+    candidate: &StudioDeviceCandidate,
+    serial_timeout: Duration,
+) -> Result<StudioClient<StudioTransport>, StudioOpenError> {
     match candidate {
         StudioDeviceCandidate::Serial(candidate) => {
-            open_serial_client(&candidate.port_name).map_err(|_| StudioOpenError::Serial)
+            open_serial_client(&candidate.port_name, serial_timeout)
+                .map_err(|_| StudioOpenError::Serial)
         }
         StudioDeviceCandidate::Ble(candidate) => {
             open_ble_client(&candidate.device_id_json).map_err(|_| StudioOpenError::Ble)
@@ -1837,8 +1909,11 @@ fn open_studio_client(
     }
 }
 
-fn open_serial_client(path: &str) -> Result<StudioClient<StudioTransport>, SerialTransportError> {
-    let transport = SerialTransport::open(path)?;
+fn open_serial_client(
+    path: &str,
+    timeout: Duration,
+) -> Result<StudioClient<StudioTransport>, serialport::Error> {
+    let transport = StudioSerialTransport::open(path, timeout)?;
     Ok(StudioClient::new(StudioTransport::Serial(transport)))
 }
 
@@ -3108,7 +3183,7 @@ fn lock_state_to_status(lock_state: LockState) -> StudioLockState {
     }
 }
 
-fn map_serial_error(_error: &SerialTransportError) -> StudioErrorCode {
+fn map_serial_error(_error: &serialport::Error) -> StudioErrorCode {
     StudioErrorCode::OpenFailed
 }
 

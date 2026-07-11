@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type Dispatch, type SetStateAction } from "react";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { Crosshair, AlertCircle, BarChart3, Keyboard, Lock, RefreshCw, XCircle, Pencil, Save, Trash2, LogOut, Search, Plus, Usb, Bluetooth, Download, Upload } from "lucide-react";
+import { Crosshair, AlertCircle, BarChart3, Keyboard, Lock, RefreshCw, RotateCcw, XCircle, Pencil, Save, Trash2, LogOut, Search, Plus, Usb, Bluetooth, Download, Upload } from "lucide-react";
 import {
   getKeyStats,
   onKeyPressEvent,
@@ -21,6 +21,7 @@ import {
   studioPreviewKeymapRestore,
   studioRemoveLayer,
   studioRenameLayer,
+  studioResetToKeymap,
   studioResyncEditState,
   studioSaveChanges,
   studioSetEncoderBindings,
@@ -41,6 +42,7 @@ import type {
   KeyStatsSummary,
   MonitorStatus,
   RestoreReport,
+  ResetToKeymapDto,
   SaveOrDiscardResultDto,
   StatsPeriod,
   StudioBinding,
@@ -514,7 +516,7 @@ export default function KeymapViewer({
     operation: "idle",
     problem: null,
   });
-  const [editNotice, setEditNotice] = useState<"saved" | "discarded" | null>(null);
+  const [editNotice, setEditNotice] = useState<"saved" | "discarded" | "reset_to_keymap" | null>(null);
   const [keymapFileBusy, setKeymapFileBusy] = useState<"export" | "restore" | null>(null);
   const [restoreReport, setRestoreReport] = useState<RestoreReport | null>(null);
   const [restoreNotice, setRestoreNotice] = useState<"no_targets" | null>(null);
@@ -1152,6 +1154,71 @@ export default function KeymapViewer({
     return false;
   }, [configRpcCapable, editHostLinkUid, encoderDirty, hostLinkUid, selected, setSnapshotsByDeviceId, t]);
 
+  const resetToKeymap = useCallback(async () => {
+    if (!selected) return false;
+    const pairedHostLinkUid = editHostLinkUid ?? (configRpcCapable ? hostLinkUid : null);
+    const confirmation = pairedHostLinkUid
+      ? t("keymap.reset.confirm")
+      : `${t("keymap.reset.confirm")}\n\n${t("keymap.reset.hostlink_missing")}`;
+    if (!window.confirm(confirmation)) return false;
+
+    setEditNotice(null);
+    setKeyWriteErrorCode(null);
+    setEncoderWriteErrorCode(null);
+    setEditState((current) => ({ ...current, operation: "resetting", problem: null }));
+    let result: ResetToKeymapDto;
+    try {
+      result = await studioResetToKeymap(selected.id, pairedHostLinkUid);
+    } catch (e) {
+      setEditState((current) => ({ ...current, operation: "idle" }));
+      setError(errorLabel(String(e), t));
+      return false;
+    }
+
+    if (result.snapshot) {
+      setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result.snapshot! }));
+      setActiveLayer(0);
+      setPicker(null);
+      setEncoderPanel(null);
+      setChangedKeys(new Set());
+      setChangedEncoderTiles(new Set());
+      setFlashEncoderTiles(new Map());
+      encoderBaselineRef.current.clear();
+    }
+
+    const encoderFeature = result.config.results.find((item) => item.feature === "ENCODER");
+    if (encoderFeature?.success) {
+      setEncoderDirty(false);
+    }
+    if (encoderFeature?.attempted) {
+      setEncoderRefreshNonce((nonce) => nonce + 1);
+    }
+    if (result.studio.success && result.snapshot) {
+      setEditState((current) => ({ ...current, dirty: false }));
+    }
+
+    if (result.overall_success) {
+      setEditState((current) => ({ ...current, operation: "idle", problem: null }));
+      setRestoreReport(null);
+      setRestoreNotice(null);
+      setEditNotice("reset_to_keymap");
+      return true;
+    }
+
+    setEditState((current) => ({ ...current, operation: "idle" }));
+    const messages = [
+      !result.studio.success
+        ? errorLabel(result.studio.error ?? "reset_settings_failed", t)
+        : null,
+      result.refresh_error ? t("keymap.error.reset_refresh_failed") : null,
+      encoderFeature && !encoderFeature.success
+        ? `${t("keymap.error.encoder_reset_failed")} (${errorLabel(encoderFeature.error ?? "reset_failed", t)})`
+        : null,
+    ].filter((message): message is string => message !== null);
+    setError(messages.length > 0 ? messages.join(" / ") : t("keymap.error.reset_partial"));
+    return false;
+  }, [configRpcCapable, editHostLinkUid, hostLinkUid, selected, setSnapshotsByDeviceId, t]);
+
   const endEdit = useCallback(async () => {
     if (!selected) return;
     let studioDirty = editState.dirty;
@@ -1784,6 +1851,7 @@ export default function KeymapViewer({
           onResyncEncoder={resyncEncoderState}
           onSave={saveEdit}
           onDiscard={discardEdit}
+          onResetToKeymap={resetToKeymap}
           onEnd={endEdit}
         />
       )}
@@ -1792,7 +1860,7 @@ export default function KeymapViewer({
           catalog={catalog}
           layers={snapshot?.layers ?? []}
           rect={picker.rect}
-          busy={editState.operation === "saving" || editState.operation === "discarding" || editState.operation === "ending"}
+          busy={editState.operation !== "idle"}
           onClose={() => setPicker(null)}
           onSelect={(behavior) => void setKey(picker.key, picker.layer, behavior)}
         />
@@ -2209,18 +2277,19 @@ function KeymapContent({
   );
 }
 
-function EditBar({ dirty, operation, pendingCount, problem, keyWriteError, encoderWriteError, notice, onResyncKey, onResyncEncoder, onSave, onDiscard, onEnd }: {
+function EditBar({ dirty, operation, pendingCount, problem, keyWriteError, encoderWriteError, notice, onResyncKey, onResyncEncoder, onSave, onDiscard, onResetToKeymap, onEnd }: {
   dirty: boolean;
   operation: EditState["operation"];
   pendingCount: number;
   problem: EditState["problem"];
   keyWriteError: string | null;
   encoderWriteError: string | null;
-  notice: "saved" | "discarded" | null;
+  notice: "saved" | "discarded" | "reset_to_keymap" | null;
   onResyncKey: () => void;
   onResyncEncoder: () => void;
   onSave: () => void;
   onDiscard: () => void;
+  onResetToKeymap: () => void;
   onEnd: () => void;
 }) {
   const { t } = useLang();
@@ -2289,6 +2358,14 @@ function EditBar({ dirty, operation, pendingCount, problem, keyWriteError, encod
         >
           <Trash2 size={14} />
           {t("keymap.edit.discard")}
+        </button>
+        <button
+          onClick={onResetToKeymap}
+          disabled={busy}
+          className="flex items-center gap-1.5 rounded-pill bg-red-50 px-3 py-1.5 text-sm font-medium text-red-700 ring-1 ring-red-100 disabled:opacity-50"
+        >
+          <RotateCcw size={14} />
+          {operation === "resetting" ? t("keymap.reset.resetting") : t("keymap.reset.action")}
         </button>
         <button
           onClick={onEnd}
@@ -3631,7 +3708,7 @@ function errorLabel(code: string, t: (key: TranslationKey, vars?: Record<string,
     "hostlink_invalid_response", "locked", "timeout", "rpc_failed", "studio_read_failed",
     "disconnected", "invalid_location", "invalid_behavior", "invalid_parameters",
     "missing_behavior_role", "save_failed", "save_not_supported", "save_no_space",
-    "save_result_unknown", "no_edit_session", "edit_session_exists", "unsaved_changes_exist",
+    "save_result_unknown", "reset_settings_rejected", "no_edit_session", "edit_session_exists", "unsaved_changes_exist",
     "session_device_mismatch", "port_busy", "editing_unsupported_for_ble", "add_layer_failed",
     "add_layer_no_space", "remove_layer_failed", "invalid_layer", "rename_layer_failed",
     "keymap_invalid_file", "keymap_unsupported_version", "keymap_file_too_large",

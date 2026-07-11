@@ -3,6 +3,7 @@ import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppConfig,
   DiscardChangesDto,
+  ResetToKeymapDto,
   EditBehavior,
   EncoderBindingsDto,
   EncoderInfoDto,
@@ -106,6 +107,8 @@ export const studioSaveChanges = (deviceId: string, hostLinkUid: string | null) 
   invoke<SaveOrDiscardResultDto>("studio_save_changes", { deviceId, hostLinkUid });
 export const studioDiscardChanges = (deviceId: string, hostLinkUid: string | null) =>
   invoke<DiscardChangesDto>("studio_discard_changes", { deviceId, hostLinkUid });
+export const studioResetToKeymap = (deviceId: string, hostLinkUid: string | null) =>
+  invoke<ResetToKeymapDto>("studio_reset_to_keymap", { deviceId, hostLinkUid });
 export const studioHasUnsaved = (deviceId: string) =>
   invoke<boolean>("studio_has_unsaved", { deviceId });
 export const studioResyncEditState = (deviceId: string) =>

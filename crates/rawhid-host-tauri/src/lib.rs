@@ -53,6 +53,7 @@ pub fn run() {
             commands::studio_remove_layer,
             commands::studio_save_changes,
             commands::studio_discard_changes,
+            commands::studio_reset_to_keymap,
             commands::studio_has_unsaved,
             commands::studio_resync_edit_state,
             commands::read_encoder_info,

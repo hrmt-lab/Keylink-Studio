@@ -341,6 +341,20 @@ impl ConfigRequest {
         }
     }
 
+    /// Requested (layer_id, encoder_id) when this is an ENCODER GET_BINDINGS
+    /// request; used by `ConfigResponse::is_response_to` to verify that an OK
+    /// response echoes the same target.
+    pub fn encoder_bindings_target(&self) -> Option<(u32, u8)> {
+        if self.feature != ConfigFeature::Encoder as u8
+            || self.op != ConfigOp::GetBindings as u8
+            || self.payload_len < 5
+        {
+            return None;
+        }
+        let layer_id = u32::from_le_bytes(self.payload[0..4].try_into().expect("4-byte slice"));
+        Some((layer_id, self.payload[4]))
+    }
+
     pub fn encoder_set_bindings(
         seq: u8,
         layer_id: u32,
@@ -635,7 +649,24 @@ impl ConfigResponse {
     }
 
     pub fn is_response_to(self, request: ConfigRequest) -> bool {
-        self.seq == request.seq && self.feature == request.feature && self.op == request.op
+        if self.seq != request.seq || self.feature != request.feature || self.op != request.op {
+            return false;
+        }
+        // (seq, feature, op) alone cannot distinguish two GET_BINDINGS requests
+        // issued by independent manager instances (each starts its seq at 0),
+        // so an OK response must also echo the requested layer/encoder target.
+        // Error-status responses carry no echo payload and are accepted as-is.
+        if self.status == ConfigStatus::Ok {
+            if let Some((layer_id, encoder_id)) = request.encoder_bindings_target() {
+                return match self.encoder_get_bindings {
+                    Some(bindings) => {
+                        bindings.layer_id == layer_id && bindings.encoder_id == encoder_id
+                    }
+                    None => false,
+                };
+            }
+        }
+        true
     }
 }
 

@@ -2,13 +2,18 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppConfig,
+  DiscardChangesDto,
   EditBehavior,
+  EncoderBindingsDto,
+  EncoderInfoDto,
   KeyPressEvent,
   KeyCatalogEntry,
   KeyStatsSummary,
   LogEntry,
   MonitorStatus,
   ProbeResult,
+  SaveOrDiscardResultDto,
+  StudioResyncEditStateDto,
   StatsPeriod,
   StudioDeviceStatus,
   StudioBindingLabelPatch,
@@ -63,12 +68,12 @@ export const probeDevices = () => invoke<ProbeResult[]>("probe_devices");
 export const probeStudioDevices = () => invoke<StudioDeviceStatus[]>("probe_studio_devices");
 export const readStudioKeymap = (deviceId: string) =>
   invoke<StudioKeymapSnapshot>("read_studio_keymap", { deviceId });
-export const studioExportKeymap = (deviceId: string, path: string) =>
-  invoke<void>("studio_export_keymap", { deviceId, path });
-export const studioPreviewKeymapRestore = (deviceId: string, path: string) =>
-  invoke<RestoreReport>("studio_preview_keymap_restore", { deviceId, path });
-export const studioApplyKeymapRestore = (deviceId: string, path: string) =>
-  invoke<[StudioKeymapSnapshot, RestoreReport]>("studio_apply_keymap_restore", { deviceId, path });
+export const studioExportKeymap = (deviceId: string, path: string, hostLinkUid: string | null) =>
+  invoke<void>("studio_export_keymap", { deviceId, path, hostLinkUid });
+export const studioPreviewKeymapRestore = (deviceId: string, path: string, hostLinkUid: string | null) =>
+  invoke<RestoreReport>("studio_preview_keymap_restore", { deviceId, path, hostLinkUid });
+export const studioApplyKeymapRestore = (deviceId: string, path: string, hostLinkUid: string | null) =>
+  invoke<[StudioKeymapSnapshot, RestoreReport]>("studio_apply_keymap_restore", { deviceId, path, hostLinkUid });
 export const studioKeyCatalog = () =>
   invoke<KeyCatalogEntry[]>("studio_key_catalog");
 export const resolveStudioBehaviorLabels = (deviceId: string, rawBindings: StudioRawBinding[]) =>
@@ -97,16 +102,78 @@ export const studioRenameLayer = (deviceId: string, layerId: number, name: strin
   invoke<StudioKeymapSnapshot>("studio_rename_layer", { deviceId, layerId, name });
 export const studioRemoveLayer = (deviceId: string, layerIndex: number) =>
   invoke<StudioKeymapSnapshot>("studio_remove_layer", { deviceId, layerIndex });
-export const studioSaveChanges = (deviceId: string) =>
-  invoke<void>("studio_save_changes", { deviceId });
-export const studioDiscardChanges = (deviceId: string) =>
-  invoke<StudioKeymapSnapshot>("studio_discard_changes", { deviceId });
+export const studioSaveChanges = (deviceId: string, hostLinkUid: string | null) =>
+  invoke<SaveOrDiscardResultDto>("studio_save_changes", { deviceId, hostLinkUid });
+export const studioDiscardChanges = (deviceId: string, hostLinkUid: string | null) =>
+  invoke<DiscardChangesDto>("studio_discard_changes", { deviceId, hostLinkUid });
 export const studioHasUnsaved = (deviceId: string) =>
   invoke<boolean>("studio_has_unsaved", { deviceId });
+export const studioResyncEditState = (deviceId: string) =>
+  invoke<StudioResyncEditStateDto>("studio_resync_edit_state", { deviceId });
 export const studioEndEdit = (deviceId: string) =>
   invoke<void>("studio_end_edit", { deviceId });
 export const studioAbortEdit = (deviceId: string) =>
   invoke<void>("studio_abort_edit", { deviceId });
+
+// ─── Encoder Config RPC ───────────────────────────────────────────────────────
+
+export const readEncoderInfo = (hostLinkUid: string) =>
+  invoke<EncoderInfoDto>("read_encoder_info", { hostLinkUid });
+export const readEncoderBindings = (
+  deviceId: string,
+  hostLinkUid: string,
+  layerId: number,
+  encoderId: number
+) =>
+  invoke<EncoderBindingsDto>("read_encoder_bindings", {
+    deviceId,
+    hostLinkUid,
+    layerId,
+    encoderId,
+  });
+export const readEncoderLayerBindings = (
+  deviceId: string,
+  hostLinkUid: string,
+  layerId: number,
+  encoderCount: number
+) =>
+  invoke<EncoderBindingsDto[]>("read_encoder_layer_bindings", {
+    deviceId,
+    hostLinkUid,
+    layerId,
+    encoderCount,
+  });
+// Either side may be null to keep the current runtime override binding for that
+// direction. Both sides are required for the first edit of a `source=keymap`
+// encoder (the backend rejects a partial initial edit).
+export const studioSetEncoderBindings = (
+  deviceId: string,
+  hostLinkUid: string,
+  layerId: number,
+  encoderId: number,
+  cw: EditBehavior | null,
+  ccw: EditBehavior | null
+) =>
+  invoke<EncoderBindingsDto>("studio_set_encoder_bindings", {
+    deviceId,
+    hostLinkUid,
+    layerId,
+    encoderId,
+    cw,
+    ccw,
+  });
+export const studioEncoderHasUnsaved = (hostLinkUid: string) =>
+  invoke<boolean>("studio_encoder_has_unsaved", { hostLinkUid });
+export const studioEncoderSave = (hostLinkUid: string) =>
+  invoke<void>("studio_encoder_save", { hostLinkUid });
+export const studioEncoderDiscard = (hostLinkUid: string) =>
+  invoke<void>("studio_encoder_discard", { hostLinkUid });
+export const studioEncoderClearOverride = (
+  hostLinkUid: string,
+  layerId: number,
+  encoderId: number
+) =>
+  invoke<void>("studio_encoder_clear_override", { hostLinkUid, layerId, encoderId });
 
 // ─── Monitoring ───────────────────────────────────────────────────────────────
 

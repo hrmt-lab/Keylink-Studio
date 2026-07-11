@@ -18,6 +18,7 @@ use zmk_studio_api::{
 };
 
 use crate::config::StudioConfig;
+use crate::packet::{EncoderBinding, EncoderBindingSource, EncoderGetBindings};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -159,6 +160,8 @@ pub struct KeymapBackup {
     pub layout: BackupLayout,
     pub behavior_catalog: BTreeMap<i32, String>,
     pub layers: Vec<BackupLayer>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoders: Option<BackupEncoders>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -191,6 +194,30 @@ pub struct BackupBinding {
     pub label: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupEncoders {
+    pub encoder_count: u8,
+    pub overrides: Vec<BackupEncoderOverride>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupEncoderOverride {
+    pub layer_index: usize,
+    pub layer_id: u32,
+    pub encoder_id: u8,
+    pub cw: BackupEncoderBinding,
+    pub ccw: BackupEncoderBinding,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupEncoderBinding {
+    pub behavior_id: u16,
+    pub param1: u32,
+    pub param2: u32,
+    pub behavior: String,
+    pub label: String,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RestorePlan {
     pub report: RestoreReport,
@@ -209,12 +236,39 @@ pub struct RestoreReport {
     pub changed_keys: Vec<RestoreChangedKey>,
     pub warnings: Vec<RestoreIssue>,
     pub errors: Vec<RestoreIssue>,
+    #[serde(default)]
+    pub encoder_will_write: usize,
+    #[serde(default)]
+    pub encoder_unchanged_skipped: usize,
+    #[serde(default)]
+    pub encoder_blocked: usize,
+    #[serde(default)]
+    pub changed_encoders: Vec<RestoreChangedEncoder>,
+    pub apply_status: RestoreApplyStatus,
+    #[serde(default)]
+    pub applied_keys: Vec<RestoreChangedKey>,
+    #[serde(default)]
+    pub applied_encoders: Vec<RestoreChangedEncoder>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum RestoreApplyStatus {
+    Preview,
+    Complete,
+    Partial,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RestoreChangedKey {
     pub layer_index: usize,
     pub position: usize,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RestoreChangedEncoder {
+    pub layer_index: usize,
+    pub encoder_id: u8,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -240,6 +294,24 @@ pub struct RawBindingWrite {
     pub behavior_id: i32,
     pub param1: u32,
     pub param2: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncoderRestoreWrite {
+    pub layer_id: u32,
+    pub encoder_id: u8,
+    pub cw: EncoderBinding,
+    pub ccw: EncoderBinding,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EncoderRestorePlan {
+    pub writes: Vec<EncoderRestoreWrite>,
+    pub will_write: usize,
+    pub unchanged_skipped: usize,
+    pub blocked: usize,
+    pub changed_encoders: Vec<RestoreChangedEncoder>,
+    pub warnings: Vec<RestoreIssue>,
 }
 
 #[derive(Debug, Error)]
@@ -546,10 +618,149 @@ pub fn resolve_behavior_labels_for_device(
     ))
 }
 
+#[derive(Debug, Error)]
+pub enum EncoderResolveError {
+    #[error("behavior is not eligible for encoder override")]
+    Ineligible,
+    #[error("behavior role is not supported by the connected firmware")]
+    UnsupportedByFirmware,
+    #[error("{0}")]
+    Studio(#[from] StudioError),
+}
+
+/// Maps `EditBehavior` roles eligible for MVP encoder override to the connected
+/// firmware's ZMK Studio RPC `display_name` for that role. Roles not listed here
+/// (ModTap, LayerTap, StickyKey/Layer, MomentaryLayer/ToggleLayer/ToLayer,
+/// Transparent, CapsWord, KeyRepeat, Reset, Bootloader, StudioUnlock, GraveEscape)
+/// are never sent over Host Link Config RPC.
+///
+/// `KeyPress` additionally excludes modifier-only keycodes (Ctrl/Shift/Alt/GUI),
+/// which are meaningless as a single detent tap.
+fn encoder_role_display_name(behavior: &EditBehavior) -> Option<&'static str> {
+    match behavior {
+        EditBehavior::KeyPress(encoded) => {
+            let is_modifier_only = HidUsage::from_encoded(*encoded)
+                .known_base_keycode()
+                .and_then(|keycode| modifier_name(&normalize_key_name(keycode.to_name()), true))
+                .is_some();
+            if is_modifier_only {
+                None
+            } else {
+                Some("Key Press")
+            }
+        }
+        EditBehavior::None => Some("None"),
+        EditBehavior::OutputSelection(_) => Some("Output Selection"),
+        EditBehavior::MouseKeyPress(_) => Some("Mouse Key Press"),
+        EditBehavior::MouseMove(_) => Some("mouse_move"),
+        EditBehavior::MouseScroll(_) => Some("mouse_scroll"),
+        EditBehavior::Bluetooth { .. } => Some("Bluetooth"),
+        _ => None,
+    }
+}
+
+/// Finds the `constant` value of a named param1 entry within a behavior's metadata.
+/// Used for `Bluetooth`, whose single behavior_id multiplexes several commands
+/// (select/clear/disconnect/...) via the param1 value rather than distinct ids.
+fn find_param1_constant(
+    entry: &zmk::behaviors::GetBehaviorDetailsResponse,
+    param_name: &str,
+) -> Option<u32> {
+    entry.metadata.iter().find_map(|set| {
+        set.param1.iter().find_map(|value| {
+            if value.name != param_name {
+                return None;
+            }
+            match value.value_type {
+                Some(
+                    zmk::behaviors::behavior_parameter_value_description::ValueType::Constant(
+                        constant,
+                    ),
+                ) => Some(constant),
+                _ => None,
+            }
+        })
+    })
+}
+
+/// Resolves `EditBehavior` values into Host Link Config RPC `EncoderBinding`s using the
+/// connected firmware's ZMK Studio RPC behavior catalog. `behavior_id` is never a fixed
+/// value in Keylink Studio: it is assigned by ZMK per devicetree registration order and
+/// can differ across firmware builds and keyboards, so it must be resolved per connection.
+///
+/// Built once per `StudioEditSession` and held in memory only; never persisted, and
+/// discarded on disconnect together with the session.
+struct BehaviorResolver {
+    catalog: Vec<zmk::behaviors::GetBehaviorDetailsResponse>,
+}
+
+impl BehaviorResolver {
+    fn build(client: &mut StudioClient<StudioTransport>) -> Result<Self, StudioError> {
+        let ids = client
+            .list_all_behaviors()
+            .map_err(map_client_to_studio_error)?;
+        let mut catalog = Vec::with_capacity(ids.len());
+        for id in ids {
+            let details = client
+                .get_behavior_details(id)
+                .map_err(map_client_to_studio_error)?;
+            catalog.push(details);
+        }
+        Ok(Self { catalog })
+    }
+
+    fn resolve(&self, behavior: &EditBehavior) -> Result<EncoderBinding, EncoderResolveError> {
+        let display_name =
+            encoder_role_display_name(behavior).ok_or(EncoderResolveError::Ineligible)?;
+
+        let mut matches = self
+            .catalog
+            .iter()
+            .filter(|entry| entry.display_name == display_name);
+        let entry = match (matches.next(), matches.next()) {
+            (Some(entry), None) => entry,
+            _ => return Err(EncoderResolveError::UnsupportedByFirmware),
+        };
+        let behavior_id =
+            u16::try_from(entry.id).map_err(|_| EncoderResolveError::UnsupportedByFirmware)?;
+
+        match behavior {
+            EditBehavior::Bluetooth { command, value } => {
+                let select_constant = find_param1_constant(entry, "Select Profile")
+                    .ok_or(EncoderResolveError::UnsupportedByFirmware)?;
+                if *command != select_constant {
+                    return Err(EncoderResolveError::Ineligible);
+                }
+                Ok(EncoderBinding {
+                    behavior_id,
+                    param1: *command,
+                    param2: *value,
+                })
+            }
+            EditBehavior::None => Ok(EncoderBinding {
+                behavior_id,
+                param1: 0,
+                param2: 0,
+            }),
+            EditBehavior::KeyPress(value)
+            | EditBehavior::OutputSelection(value)
+            | EditBehavior::MouseKeyPress(value)
+            | EditBehavior::MouseMove(value)
+            | EditBehavior::MouseScroll(value) => Ok(EncoderBinding {
+                behavior_id,
+                param1: *value,
+                param2: 0,
+            }),
+            _ => Err(EncoderResolveError::Ineligible),
+        }
+    }
+}
+
 pub fn keymap_backup_from_snapshot(
     snapshot: &StudioKeymapSnapshot,
     behavior_catalog: BTreeMap<i32, String>,
     app_version: &str,
+    encoders: Option<BackupEncoders>,
 ) -> KeymapBackup {
     let positions = snapshot
         .selected_layout_keys
@@ -563,6 +774,17 @@ pub fn keymap_backup_from_snapshot(
                 catalog
                     .entry(binding.raw.behavior_id)
                     .or_insert_with(|| binding.behavior.clone());
+            }
+        }
+    }
+    if let Some(backup_encoders) = &encoders {
+        for override_ in &backup_encoders.overrides {
+            for side in [&override_.cw, &override_.ccw] {
+                if !is_placeholder_behavior_name(&side.behavior) {
+                    catalog
+                        .entry(i32::from(side.behavior_id))
+                        .or_insert_with(|| side.behavior.clone());
+                }
             }
         }
     }
@@ -602,6 +824,7 @@ pub fn keymap_backup_from_snapshot(
                     .collect(),
             })
             .collect(),
+        encoders,
     }
 }
 
@@ -743,15 +966,194 @@ pub fn plan_keymap_restore(
             changed_keys,
             warnings,
             errors,
+            encoder_will_write: 0,
+            encoder_unchanged_skipped: 0,
+            encoder_blocked: 0,
+            changed_encoders: Vec::new(),
+            apply_status: RestoreApplyStatus::Preview,
+            applied_keys: Vec::new(),
+            applied_encoders: Vec::new(),
         },
         writes,
     }
+}
+
+pub fn plan_encoder_restore(
+    current_layers: &[StudioLayer],
+    backup_layers: &[BackupLayer],
+    encoder_count: u8,
+    current_bindings: &BTreeMap<(u32, u8), EncoderGetBindings>,
+    target_behavior_names: Option<&BTreeMap<i32, String>>,
+    backup: &BackupEncoders,
+) -> EncoderRestorePlan {
+    let mut warnings = Vec::new();
+    let mut writes = Vec::new();
+    let mut changed_encoders = Vec::new();
+    let mut unchanged_skipped = 0usize;
+    let mut blocked = 0usize;
+
+    for override_ in &backup.overrides {
+        let backup_layer = backup_layers
+            .iter()
+            .find(|layer| layer.id == override_.layer_id)
+            .or_else(|| backup_layers.get(override_.layer_index));
+        let layer = current_layers
+            .iter()
+            .find(|layer| layer.id == override_.layer_id)
+            .or_else(|| {
+                let source = backup_layer?;
+                let candidate = current_layers.get(override_.layer_index)?;
+                (normalize_behavior_name(&source.name) == normalize_behavior_name(&candidate.name))
+                    .then_some(candidate)
+            });
+        let Some(layer) = layer else {
+            blocked += 1;
+            warnings.push(issue(
+                "encoder_layer_mismatch",
+                Some(override_.layer_index),
+                None,
+                &format!(
+                    "encoder {} layer could not be matched safely",
+                    override_.encoder_id
+                ),
+            ));
+            continue;
+        };
+        if override_.encoder_id >= encoder_count {
+            blocked += 1;
+            warnings.push(issue(
+                "encoder_out_of_range",
+                Some(override_.layer_index),
+                None,
+                &format!("encoder {} does not exist on target", override_.encoder_id),
+            ));
+            continue;
+        }
+        let layer_id = layer.id;
+        let current = current_bindings.get(&(layer_id, override_.encoder_id));
+
+        let unchanged = current.is_some_and(|current| {
+            current.source == EncoderBindingSource::Override
+                && same_encoder_side(&current.cw_binding, &override_.cw)
+                && same_encoder_side(&current.ccw_binding, &override_.ccw)
+        });
+        if unchanged {
+            unchanged_skipped += 1;
+            continue;
+        }
+
+        let mut override_blocked = false;
+        for (side_label, side) in [("CW", &override_.cw), ("CCW", &override_.ccw)] {
+            let backup_name = if is_placeholder_behavior_name(&side.behavior) {
+                None
+            } else {
+                Some(&side.behavior)
+            };
+            match (
+                backup_name,
+                target_behavior_names.and_then(|names| names.get(&i32::from(side.behavior_id))),
+            ) {
+                (_, None) => {
+                    override_blocked = true;
+                    warnings.push(issue(
+                        "behavior_missing",
+                        Some(override_.layer_index),
+                        None,
+                        &format!(
+                            "target behavior id was not found for encoder {} {}",
+                            override_.encoder_id, side_label
+                        ),
+                    ));
+                }
+                (None, Some(_)) => {
+                    override_blocked = true;
+                    warnings.push(issue(
+                        "behavior_unverified",
+                        Some(override_.layer_index),
+                        None,
+                        &format!(
+                            "backup behavior name is unresolved for encoder {} {}",
+                            override_.encoder_id, side_label
+                        ),
+                    ));
+                }
+                (Some(source), Some(target))
+                    if normalize_behavior_name(source) != normalize_behavior_name(target) =>
+                {
+                    override_blocked = true;
+                    warnings.push(issue(
+                        "behavior_conflict",
+                        Some(override_.layer_index),
+                        None,
+                        &format!(
+                            "behavior name differs for the same id for encoder {} {}",
+                            override_.encoder_id, side_label
+                        ),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        if override_blocked {
+            blocked += 1;
+            continue;
+        }
+
+        writes.push(EncoderRestoreWrite {
+            layer_id,
+            encoder_id: override_.encoder_id,
+            cw: EncoderBinding {
+                behavior_id: override_.cw.behavior_id,
+                param1: override_.cw.param1,
+                param2: override_.cw.param2,
+            },
+            ccw: EncoderBinding {
+                behavior_id: override_.ccw.behavior_id,
+                param1: override_.ccw.param1,
+                param2: override_.ccw.param2,
+            },
+        });
+        changed_encoders.push(RestoreChangedEncoder {
+            layer_index: layer.index,
+            encoder_id: override_.encoder_id,
+        });
+    }
+
+    EncoderRestorePlan {
+        will_write: writes.len(),
+        unchanged_skipped,
+        blocked,
+        changed_encoders,
+        warnings,
+        writes,
+    }
+}
+
+fn same_encoder_side(current: &EncoderBinding, backup: &BackupEncoderBinding) -> bool {
+    current.behavior_id == backup.behavior_id
+        && current.param1 == backup.param1
+        && current.param2 == backup.param2
 }
 
 fn same_raw(current: &StudioRawBinding, backup: &BackupBinding) -> bool {
     current.behavior_id == backup.behavior_id
         && current.param1 == backup.param1
         && current.param2 == backup.param2
+}
+
+fn same_keymap_content(left: &StudioKeymapSnapshot, right: &StudioKeymapSnapshot) -> bool {
+    left.selected_physical_layout_name == right.selected_physical_layout_name
+        && left.layers.len() == right.layers.len()
+        && left.layers.iter().zip(&right.layers).all(|(left, right)| {
+            left.id == right.id
+                && left.name == right.name
+                && left.bindings.len() == right.bindings.len()
+                && left
+                    .bindings
+                    .iter()
+                    .zip(&right.bindings)
+                    .all(|(left, right)| left.position == right.position && left.raw == right.raw)
+        })
 }
 
 fn is_placeholder_behavior_name(name: &str) -> bool {
@@ -798,6 +1200,11 @@ pub struct StudioEditSession {
     layout_selection: LayoutSelection,
     behavior_names: BTreeMap<i32, String>,
     snapshot_mode: StudioSnapshotMode,
+    encoder_resolver: Option<BehaviorResolver>,
+    /// Set only while applying a keymap backup. It protects the user-visible
+    /// "discard" action even if the device reports DISCARD success without
+    /// restoring the pre-import runtime keymap.
+    restore_rollback_snapshot: Option<StudioKeymapSnapshot>,
 }
 
 impl StudioEditSession {
@@ -844,6 +1251,8 @@ impl StudioEditSession {
                 layout_selection,
                 behavior_names,
                 snapshot_mode,
+                encoder_resolver: None,
+                restore_rollback_snapshot: None,
             },
             snapshot,
         ))
@@ -853,6 +1262,24 @@ impl StudioEditSession {
         self.client
             .check_unsaved_changes()
             .map_err(map_client_to_studio_error)
+    }
+
+    /// Resolves an `EditBehavior` into a Host Link Config RPC `EncoderBinding`.
+    ///
+    /// The behavior catalog is fetched from ZMK Studio RPC on first use and cached in
+    /// memory for the lifetime of this session; it is never persisted and is re-fetched
+    /// on the next connection.
+    pub fn resolve_encoder_binding(
+        &mut self,
+        behavior: &EditBehavior,
+    ) -> Result<EncoderBinding, EncoderResolveError> {
+        if self.encoder_resolver.is_none() {
+            self.encoder_resolver = Some(BehaviorResolver::build(&mut self.client)?);
+        }
+        self.encoder_resolver
+            .as_ref()
+            .expect("encoder_resolver was just initialized")
+            .resolve(behavior)
     }
 
     pub fn snapshot(&mut self) -> Result<StudioKeymapSnapshot, StudioError> {
@@ -968,22 +1395,64 @@ impl StudioEditSession {
         self.snapshot()
     }
 
+    pub fn begin_backup_restore(&mut self, snapshot: &StudioKeymapSnapshot) {
+        if self.restore_rollback_snapshot.is_none() {
+            self.restore_rollback_snapshot = Some(snapshot.clone());
+        }
+    }
+
     pub fn save(&mut self) -> Result<(), StudioError> {
-        match self.client.save_changes() {
+        let result = match self.client.save_changes() {
             Ok(()) => Ok(()),
             Err(save_error) => match self.client.check_unsaved_changes() {
                 Ok(false) => Ok(()),
                 Ok(true) => Err(map_client_to_studio_error(save_error)),
                 Err(_) => Err(StudioError::SaveResultUnknown),
             },
+        };
+        if result.is_ok() {
+            self.restore_rollback_snapshot = None;
         }
+        result
     }
 
     pub fn discard(&mut self) -> Result<StudioKeymapSnapshot, StudioError> {
         self.client
             .discard_changes()
             .map_err(map_client_to_studio_error)?;
-        self.snapshot()
+        let mut snapshot = self.snapshot()?;
+        if let Some(rollback) = self.restore_rollback_snapshot.clone() {
+            if !same_keymap_content(&snapshot, &rollback) {
+                tracing::warn!(
+                    device_id = %self.device_id,
+                    "Studio discard did not restore the pre-import keymap; applying host rollback"
+                );
+                for layer in &rollback.layers {
+                    for binding in &layer.bindings {
+                        self.client
+                            .set_key_at(
+                                layer.id,
+                                binding.position as i32,
+                                Behavior::Unknown {
+                                    behavior_id: binding.raw.behavior_id,
+                                    param1: binding.raw.param1,
+                                    param2: binding.raw.param2,
+                                },
+                            )
+                            .map_err(map_client_to_studio_error)?;
+                    }
+                }
+                self.client
+                    .save_changes()
+                    .map_err(map_client_to_studio_error)?;
+                snapshot = self.snapshot()?;
+                if !same_keymap_content(&snapshot, &rollback) {
+                    return Err(StudioError::SaveResultUnknown);
+                }
+            }
+        }
+        self.restore_rollback_snapshot = None;
+        Ok(snapshot)
     }
 
     pub fn add_layer(&mut self, name: String) -> Result<StudioKeymapSnapshot, StudioError> {
@@ -2734,6 +3203,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::packet::EncoderBindingFlags;
 
     #[test]
     fn stable_id_distinguishes_same_named_devices_by_port() {
@@ -2901,9 +3371,30 @@ mod tests {
     }
 
     #[test]
+    fn same_keymap_content_ignores_display_metadata() {
+        let original = test_snapshot();
+        let mut refreshed = original.clone();
+        refreshed.device_name = "Renamed Keyboard".to_string();
+        refreshed.updated_ms += 1;
+        refreshed.layers[0].bindings[0].binding_label = "A".to_string();
+        refreshed.layers[0].bindings[0].primary_label = "Key A".to_string();
+
+        assert!(same_keymap_content(&original, &refreshed));
+    }
+
+    #[test]
+    fn same_keymap_content_detects_raw_binding_change() {
+        let original = test_snapshot();
+        let mut changed = original.clone();
+        changed.layers[0].bindings[0].raw.param1 = 0x0007_0005;
+
+        assert!(!same_keymap_content(&original, &changed));
+    }
+
+    #[test]
     fn keymap_backup_round_trips_raw_bindings() {
         let snapshot = test_snapshot();
-        let backup = keymap_backup_from_snapshot(&snapshot, BTreeMap::new(), "0.0.0-test");
+        let backup = keymap_backup_from_snapshot(&snapshot, BTreeMap::new(), "0.0.0-test", None);
         let text = serialize_keymap_backup(&backup).unwrap();
         let parsed = parse_keymap_backup(&text).unwrap();
 
@@ -2916,7 +3407,7 @@ mod tests {
     #[test]
     fn keymap_restore_plans_one_changed_raw_write_and_skips_unchanged() {
         let current = test_snapshot();
-        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test");
+        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test", None);
         backup.layers[0].bindings[0].param1 = 0x0007_0005;
         let target_names =
             BTreeMap::from([(1, "key press".to_string()), (2, "mod_tap".to_string())]);
@@ -2940,7 +3431,7 @@ mod tests {
     #[test]
     fn keymap_restore_placeholder_catalog_skips_behavior_verification_but_writes_raw() {
         let current = test_snapshot();
-        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test");
+        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test", None);
         backup.behavior_catalog.clear();
         backup.layers[0].bindings[0].behavior = "behavior 1".to_string();
         backup.layers[0].bindings[1].behavior = "behavior 2".to_string();
@@ -2959,7 +3450,7 @@ mod tests {
     #[test]
     fn keymap_restore_uses_common_positions_for_structure_mismatch() {
         let current = test_snapshot();
-        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test");
+        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test", None);
         backup.layers.push(backup.layers[0].clone());
         backup.layers[1].index = 1;
         backup.layers[0].bindings.pop();
@@ -2990,7 +3481,7 @@ mod tests {
         current.layers[1].index = 1;
         current.layers[1].id = 11;
         current.layers[1].name = "Fn".to_string();
-        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test");
+        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test", None);
         backup.device.name = "Other".to_string();
         backup.device.connection_type = "ble_studio".to_string();
         backup.layout.selected_physical_layout_name = Some("Other layout".to_string());
@@ -3014,7 +3505,7 @@ mod tests {
             Err(KeymapFileError::FileTooLarge)
         ));
         let mut backup =
-            keymap_backup_from_snapshot(&test_snapshot(), BTreeMap::new(), "0.0.0-test");
+            keymap_backup_from_snapshot(&test_snapshot(), BTreeMap::new(), "0.0.0-test", None);
         backup.schema_version = 999;
         let text = serialize_keymap_backup(&backup).unwrap();
         assert!(matches!(
@@ -3045,7 +3536,7 @@ mod tests {
     #[test]
     fn verified_behavior_conflicts_are_blocked() {
         let current = test_snapshot();
-        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test");
+        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test", None);
         backup.layers[0].bindings[0].param1 = 0x0007_0005;
         let target_names =
             BTreeMap::from([(1, "sticky key".to_string()), (2, "mod-tap".to_string())]);
@@ -3060,6 +3551,313 @@ mod tests {
             .warnings
             .iter()
             .any(|issue| issue.code == "behavior_conflict"));
+    }
+
+    fn test_encoder_override(
+        layer_index: usize,
+        layer_id: u32,
+        encoder_id: u8,
+        cw_behavior_id: u16,
+        cw_behavior: &str,
+    ) -> BackupEncoderOverride {
+        BackupEncoderOverride {
+            layer_index,
+            layer_id,
+            encoder_id,
+            cw: BackupEncoderBinding {
+                behavior_id: cw_behavior_id,
+                param1: 1,
+                param2: 0,
+                behavior: cw_behavior.to_string(),
+                label: "&kp VOL_UP".to_string(),
+            },
+            ccw: BackupEncoderBinding {
+                behavior_id: cw_behavior_id,
+                param1: 2,
+                param2: 0,
+                behavior: cw_behavior.to_string(),
+                label: "&kp VOL_DOWN".to_string(),
+            },
+        }
+    }
+
+    fn test_encoder_get_bindings(
+        layer_id: u32,
+        encoder_id: u8,
+        source: EncoderBindingSource,
+        cw_param1: u32,
+        ccw_param1: u32,
+    ) -> EncoderGetBindings {
+        EncoderGetBindings {
+            layer_id,
+            encoder_id,
+            source,
+            flags: EncoderBindingFlags::default(),
+            cw_binding: EncoderBinding {
+                behavior_id: 5,
+                param1: cw_param1,
+                param2: 0,
+            },
+            ccw_binding: EncoderBinding {
+                behavior_id: 5,
+                param1: ccw_param1,
+                param2: 0,
+            },
+        }
+    }
+
+    fn test_backup_layers(layers: &[StudioLayer]) -> Vec<BackupLayer> {
+        layers
+            .iter()
+            .map(|layer| BackupLayer {
+                index: layer.index,
+                id: layer.id,
+                name: layer.name.clone(),
+                bindings: Vec::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn keymap_backup_round_trips_with_encoders_and_legacy_json_has_none() {
+        let snapshot = test_snapshot();
+        let encoders = BackupEncoders {
+            encoder_count: 2,
+            overrides: vec![test_encoder_override(0, 10, 0, 5, "key press")],
+        };
+        let backup =
+            keymap_backup_from_snapshot(&snapshot, BTreeMap::new(), "0.0.0-test", Some(encoders));
+        assert_eq!(
+            backup.behavior_catalog.get(&5),
+            Some(&"key press".to_string())
+        );
+        let text = serialize_keymap_backup(&backup).unwrap();
+        let parsed = parse_keymap_backup(&text).unwrap();
+        let parsed_encoders = parsed.encoders.expect("encoders should round trip");
+        assert_eq!(parsed_encoders.encoder_count, 2);
+        assert_eq!(parsed_encoders.overrides[0].encoder_id, 0);
+        assert_eq!(parsed_encoders.overrides[0].cw.behavior_id, 5);
+        assert_eq!(parsed_encoders.overrides[0].cw.param1, 1);
+        assert_eq!(parsed_encoders.overrides[0].ccw.param1, 2);
+
+        // Legacy JSON without an `encoders` field must still parse.
+        let mut legacy =
+            keymap_backup_from_snapshot(&snapshot, BTreeMap::new(), "0.0.0-test", None);
+        legacy.encoders = None;
+        let legacy_text = serialize_keymap_backup(&legacy).unwrap();
+        assert!(!legacy_text.contains("\"encoders\""));
+        let legacy_parsed = parse_keymap_backup(&legacy_text).unwrap();
+        assert!(legacy_parsed.encoders.is_none());
+    }
+
+    #[test]
+    fn plan_encoder_restore_skips_unchanged_override() {
+        let current_layers = test_snapshot().layers;
+        let backup = BackupEncoders {
+            encoder_count: 2,
+            overrides: vec![test_encoder_override(0, 10, 0, 5, "key press")],
+        };
+        let mut current_bindings = BTreeMap::new();
+        current_bindings.insert(
+            (10, 0),
+            test_encoder_get_bindings(10, 0, EncoderBindingSource::Override, 1, 2),
+        );
+
+        let backup_layers = test_backup_layers(&current_layers);
+        let plan = plan_encoder_restore(
+            &current_layers,
+            &backup_layers,
+            2,
+            &current_bindings,
+            None,
+            &backup,
+        );
+
+        assert_eq!(plan.will_write, 0);
+        assert_eq!(plan.unchanged_skipped, 1);
+        assert_eq!(plan.blocked, 0);
+        assert!(plan.writes.is_empty());
+    }
+
+    #[test]
+    fn plan_encoder_restore_blocks_on_behavior_name_conflict() {
+        let current_layers = test_snapshot().layers;
+        let backup = BackupEncoders {
+            encoder_count: 2,
+            overrides: vec![test_encoder_override(0, 10, 0, 5, "key press")],
+        };
+        let mut current_bindings = BTreeMap::new();
+        current_bindings.insert(
+            (10, 0),
+            test_encoder_get_bindings(10, 0, EncoderBindingSource::Override, 9, 9),
+        );
+        let target_names = BTreeMap::from([(5, "mouse move".to_string())]);
+
+        let plan = plan_encoder_restore(
+            &current_layers,
+            &test_backup_layers(&current_layers),
+            2,
+            &current_bindings,
+            Some(&target_names),
+            &backup,
+        );
+
+        assert_eq!(plan.will_write, 0);
+        assert_eq!(plan.blocked, 1);
+        assert!(plan.writes.is_empty());
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|issue| issue.code == "behavior_conflict"));
+    }
+
+    #[test]
+    fn plan_encoder_restore_writes_when_current_source_is_keymap() {
+        let current_layers = test_snapshot().layers;
+        let backup = BackupEncoders {
+            encoder_count: 2,
+            overrides: vec![test_encoder_override(0, 10, 0, 5, "key press")],
+        };
+        let mut current_bindings = BTreeMap::new();
+        current_bindings.insert(
+            (10, 0),
+            test_encoder_get_bindings(10, 0, EncoderBindingSource::Keymap, 1, 2),
+        );
+
+        let target_names = BTreeMap::from([(5, "key press".to_string())]);
+        let plan = plan_encoder_restore(
+            &current_layers,
+            &test_backup_layers(&current_layers),
+            2,
+            &current_bindings,
+            Some(&target_names),
+            &backup,
+        );
+
+        assert_eq!(plan.will_write, 1);
+        assert_eq!(plan.unchanged_skipped, 0);
+        assert_eq!(plan.blocked, 0);
+        assert_eq!(plan.writes[0].layer_id, 10);
+        assert_eq!(plan.writes[0].encoder_id, 0);
+        assert_eq!(plan.changed_encoders[0].layer_index, 0);
+        assert_eq!(plan.changed_encoders[0].encoder_id, 0);
+    }
+
+    #[test]
+    fn plan_encoder_restore_blocks_when_behavior_catalog_is_unavailable() {
+        let current_layers = test_snapshot().layers;
+        let backup = BackupEncoders {
+            encoder_count: 1,
+            overrides: vec![test_encoder_override(0, 10, 0, 5, "key press")],
+        };
+
+        let plan = plan_encoder_restore(
+            &current_layers,
+            &test_backup_layers(&current_layers),
+            1,
+            &BTreeMap::new(),
+            None,
+            &backup,
+        );
+
+        assert_eq!(plan.will_write, 0);
+        assert_eq!(plan.blocked, 1);
+        assert!(plan
+            .warnings
+            .iter()
+            .any(|issue| issue.code == "behavior_missing"));
+    }
+
+    #[test]
+    fn plan_encoder_restore_uses_stable_layer_id_before_index() {
+        let mut current_layers = test_snapshot().layers;
+        let original = current_layers[0].clone();
+        current_layers.insert(
+            0,
+            StudioLayer {
+                index: 0,
+                id: 99,
+                name: "Inserted".to_string(),
+                bindings: original.bindings.clone(),
+            },
+        );
+        current_layers[1].index = 1;
+        let backup_layers = vec![BackupLayer {
+            index: 0,
+            id: 10,
+            name: original.name,
+            bindings: Vec::new(),
+        }];
+        let backup = BackupEncoders {
+            encoder_count: 1,
+            overrides: vec![test_encoder_override(0, 10, 0, 5, "key press")],
+        };
+        let target_names = BTreeMap::from([(5, "key press".to_string())]);
+
+        let plan = plan_encoder_restore(
+            &current_layers,
+            &backup_layers,
+            1,
+            &BTreeMap::new(),
+            Some(&target_names),
+            &backup,
+        );
+
+        assert_eq!(plan.will_write, 1);
+        assert_eq!(plan.writes[0].layer_id, 10);
+    }
+
+    #[test]
+    fn plan_encoder_restore_falls_back_to_same_index_and_name() {
+        let mut current_layers = test_snapshot().layers;
+        current_layers[0].id = 77;
+        let backup_layers = vec![BackupLayer {
+            index: 0,
+            id: 10,
+            name: current_layers[0].name.clone(),
+            bindings: Vec::new(),
+        }];
+        let backup = BackupEncoders {
+            encoder_count: 1,
+            overrides: vec![test_encoder_override(0, 10, 0, 5, "key press")],
+        };
+        let target_names = BTreeMap::from([(5, "key press".to_string())]);
+
+        let plan = plan_encoder_restore(
+            &current_layers,
+            &backup_layers,
+            1,
+            &BTreeMap::new(),
+            Some(&target_names),
+            &backup,
+        );
+
+        assert_eq!(plan.will_write, 1);
+        assert_eq!(plan.writes[0].layer_id, 77);
+    }
+
+    #[test]
+    fn plan_encoder_restore_skips_encoder_id_out_of_range() {
+        let current_layers = test_snapshot().layers;
+        let backup = BackupEncoders {
+            encoder_count: 2,
+            overrides: vec![test_encoder_override(0, 10, 5, 5, "key press")],
+        };
+        let current_bindings = BTreeMap::new();
+
+        let plan = plan_encoder_restore(
+            &current_layers,
+            &test_backup_layers(&current_layers),
+            2,
+            &current_bindings,
+            None,
+            &backup,
+        );
+
+        assert_eq!(plan.will_write, 0);
+        assert_eq!(plan.unchanged_skipped, 0);
+        assert_eq!(plan.blocked, 1);
+        assert!(plan.writes.is_empty());
     }
 
     #[test]
@@ -3694,5 +4492,218 @@ mod tests {
         assert_eq!(selection.selected_physical_layout_index, None);
         assert_eq!(selection.selected_physical_layout_name, None);
         assert_eq!(selection.selected_layout_keys.len(), 2);
+    }
+
+    fn behavior_details(
+        id: u32,
+        display_name: &str,
+        metadata: Vec<zmk::behaviors::BehaviorBindingParametersSet>,
+    ) -> zmk::behaviors::GetBehaviorDetailsResponse {
+        zmk::behaviors::GetBehaviorDetailsResponse {
+            id,
+            display_name: display_name.to_string(),
+            metadata,
+        }
+    }
+
+    fn constant_param(
+        name: &str,
+        constant: u32,
+    ) -> zmk::behaviors::BehaviorParameterValueDescription {
+        zmk::behaviors::BehaviorParameterValueDescription {
+            name: name.to_string(),
+            value_type: Some(
+                zmk::behaviors::behavior_parameter_value_description::ValueType::Constant(constant),
+            ),
+        }
+    }
+
+    // Mirrors the Cornix real-device dump (2026-07-09): a single Bluetooth behavior_id
+    // multiplexes select/clear/disconnect commands via the param1 constant value.
+    fn cornix_bluetooth_metadata() -> Vec<zmk::behaviors::BehaviorBindingParametersSet> {
+        vec![
+            zmk::behaviors::BehaviorBindingParametersSet {
+                param1: vec![
+                    constant_param("Next Profile", 1),
+                    constant_param("Previous Profile", 2),
+                    constant_param("Clear All Profiles", 4),
+                    constant_param("Clear Selected Profile", 0),
+                ],
+                param2: vec![],
+            },
+            zmk::behaviors::BehaviorBindingParametersSet {
+                param1: vec![
+                    constant_param("Select Profile", 3),
+                    constant_param("Disconnect Profile", 5),
+                ],
+                param2: vec![zmk::behaviors::BehaviorParameterValueDescription {
+                    name: "Profile".to_string(),
+                    value_type: Some(
+                        zmk::behaviors::behavior_parameter_value_description::ValueType::Range(
+                            zmk::behaviors::BehaviorParameterValueDescriptionRange {
+                                min: 0,
+                                max: 3,
+                            },
+                        ),
+                    ),
+                }],
+            },
+        ]
+    }
+
+    #[test]
+    fn encoder_resolver_resolves_key_press() {
+        let resolver = BehaviorResolver {
+            catalog: vec![behavior_details(6, "Key Press", vec![])],
+        };
+        let binding = resolver
+            .resolve(&EditBehavior::KeyPress(0x0007_0004))
+            .unwrap();
+        assert_eq!(binding.behavior_id, 6);
+        assert_eq!(binding.param1, 0x0007_0004);
+        assert_eq!(binding.param2, 0);
+    }
+
+    #[test]
+    fn encoder_resolver_rejects_modifier_only_key_press() {
+        let resolver = BehaviorResolver {
+            catalog: vec![behavior_details(6, "Key Press", vec![])],
+        };
+        let err = resolver
+            .resolve(&EditBehavior::KeyPress(0x0007_00E1))
+            .unwrap_err();
+        assert!(matches!(err, EncoderResolveError::Ineligible));
+    }
+
+    #[test]
+    fn encoder_resolver_resolves_none() {
+        let resolver = BehaviorResolver {
+            catalog: vec![behavior_details(27, "None", vec![])],
+        };
+        let binding = resolver.resolve(&EditBehavior::None).unwrap();
+        assert_eq!(binding.behavior_id, 27);
+        assert_eq!(binding.param1, 0);
+        assert_eq!(binding.param2, 0);
+    }
+
+    #[test]
+    fn encoder_resolver_resolves_mouse_move_and_scroll_by_passthrough_value() {
+        let resolver = BehaviorResolver {
+            catalog: vec![
+                behavior_details(2, "mouse_move", vec![]),
+                behavior_details(3, "mouse_scroll", vec![]),
+            ],
+        };
+        let mv = resolver
+            .resolve(&EditBehavior::MouseMove(0x0000_FDA8))
+            .unwrap();
+        assert_eq!(mv.behavior_id, 2);
+        assert_eq!(mv.param1, 0x0000_FDA8);
+        assert_eq!(mv.param2, 0);
+
+        let scrl = resolver
+            .resolve(&EditBehavior::MouseScroll(0x0000_FFF6))
+            .unwrap();
+        assert_eq!(scrl.behavior_id, 3);
+        assert_eq!(scrl.param1, 0x0000_FFF6);
+    }
+
+    #[test]
+    fn encoder_resolver_resolves_bluetooth_select_profile() {
+        let resolver = BehaviorResolver {
+            catalog: vec![behavior_details(
+                22,
+                "Bluetooth",
+                cornix_bluetooth_metadata(),
+            )],
+        };
+        let binding = resolver
+            .resolve(&EditBehavior::Bluetooth {
+                command: 3,
+                value: 2,
+            })
+            .unwrap();
+        assert_eq!(binding.behavior_id, 22);
+        assert_eq!(binding.param1, 3);
+        assert_eq!(binding.param2, 2);
+    }
+
+    #[test]
+    fn encoder_resolver_rejects_bluetooth_non_select_commands() {
+        let resolver = BehaviorResolver {
+            catalog: vec![behavior_details(
+                22,
+                "Bluetooth",
+                cornix_bluetooth_metadata(),
+            )],
+        };
+        for command in [0u32, 1, 2, 4, 5] {
+            let err = resolver
+                .resolve(&EditBehavior::Bluetooth { command, value: 0 })
+                .unwrap_err();
+            assert!(matches!(err, EncoderResolveError::Ineligible));
+        }
+    }
+
+    #[test]
+    fn encoder_resolver_rejects_ineligible_roles_without_touching_catalog() {
+        let resolver = BehaviorResolver { catalog: vec![] };
+        let err = resolver
+            .resolve(&EditBehavior::ModTap {
+                hold: 0x0007_00E1,
+                tap: 0x0007_0004,
+            })
+            .unwrap_err();
+        assert!(matches!(err, EncoderResolveError::Ineligible));
+        let err = resolver.resolve(&EditBehavior::Transparent).unwrap_err();
+        assert!(matches!(err, EncoderResolveError::Ineligible));
+        let err = resolver.resolve(&EditBehavior::Reset).unwrap_err();
+        assert!(matches!(err, EncoderResolveError::Ineligible));
+    }
+
+    #[test]
+    fn encoder_resolver_rejects_role_missing_from_firmware_catalog() {
+        let resolver = BehaviorResolver { catalog: vec![] };
+        let err = resolver.resolve(&EditBehavior::None).unwrap_err();
+        assert!(matches!(err, EncoderResolveError::UnsupportedByFirmware));
+    }
+
+    #[test]
+    fn encoder_resolver_rejects_ambiguous_display_name_matches() {
+        let resolver = BehaviorResolver {
+            catalog: vec![
+                behavior_details(6, "Key Press", vec![]),
+                behavior_details(99, "Key Press", vec![]),
+            ],
+        };
+        let err = resolver
+            .resolve(&EditBehavior::KeyPress(0x0007_0004))
+            .unwrap_err();
+        assert!(matches!(err, EncoderResolveError::UnsupportedByFirmware));
+    }
+
+    #[test]
+    fn encoder_resolver_rejects_behavior_id_beyond_u16_range() {
+        let resolver = BehaviorResolver {
+            catalog: vec![behavior_details(70_000, "None", vec![])],
+        };
+        let err = resolver.resolve(&EditBehavior::None).unwrap_err();
+        assert!(matches!(err, EncoderResolveError::UnsupportedByFirmware));
+    }
+
+    #[test]
+    fn encoder_resolver_does_not_match_same_named_user_defined_hold_tap() {
+        // A user-defined hold-tap (e.g. "hm_shift_l") shares Mod-Tap's param shape but
+        // must never be resolved for a Mod-Tap request; Mod-Tap itself is ineligible.
+        let resolver = BehaviorResolver {
+            catalog: vec![behavior_details(26, "Mod-Tap", vec![])],
+        };
+        let err = resolver
+            .resolve(&EditBehavior::ModTap {
+                hold: 0x0007_00E1,
+                tap: 0x0007_0004,
+            })
+            .unwrap_err();
+        assert!(matches!(err, EncoderResolveError::Ineligible));
     }
 }

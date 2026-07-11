@@ -26,6 +26,30 @@ import type {
 import { LangProvider, useLang } from "./i18n";
 
 const MAX_LOGS = 200;
+const STUDIO_STARTUP_RETRY_DELAYS_MS = [750, 1250] as const;
+
+function isTransientStudioResult(device: StudioDeviceStatus): boolean {
+  return device.error_code === "open_failed" ||
+    device.error_code === "rpc_failed" ||
+    device.error_code === "rpc_timeout";
+}
+
+function mergeStartupStudioResults(
+  current: StudioDeviceStatus[],
+  incoming: StudioDeviceStatus[],
+): StudioDeviceStatus[] {
+  const merged = new Map(current.map((device) => [device.id, device]));
+  for (const device of incoming) {
+    const previous = merged.get(device.id);
+    if (previous?.rpc_status === "ok" && isTransientStudioResult(device)) continue;
+    merged.set(device.id, device);
+  }
+  return [...merged.values()];
+}
+
+function wait(ms: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
+}
 
 type PendingNavigationAction = "save" | "discard";
 
@@ -77,6 +101,8 @@ function AppInner() {
   const [studioError, setStudioError] = useState<string | null>(null);
   const [keymapSnapshotsByDeviceId, setKeymapSnapshotsByDeviceId] = useState<Record<string, StudioKeymapSnapshot>>({});
   const [loading, setLoading] = useState(true);
+  const studioScanPromiseRef = useRef<Promise<StudioDeviceStatus[]> | null>(null);
+  const startupStudioScanStartedRef = useRef(false);
 
   const addLog = useCallback((entry: LogEntry) => {
     setLogs((prev) => {
@@ -86,11 +112,28 @@ function AppInner() {
     });
   }, []);
 
-  const refreshStudioDevices = useCallback(async () => {
+  const scanStudioDevices = useCallback((startup: boolean) => {
+    if (studioScanPromiseRef.current) return studioScanPromiseRef.current;
+
     setStudioScanning(true);
     setStudioError(null);
-    try {
-      const devices = await probeStudioDevices();
+    const scan = (async () => {
+      let devices: StudioDeviceStatus[] = [];
+      const attempts = startup ? STUDIO_STARTUP_RETRY_DELAYS_MS.length + 1 : 1;
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        if (attempt > 0) await wait(STUDIO_STARTUP_RETRY_DELAYS_MS[attempt - 1]);
+        let probed: StudioDeviceStatus[];
+        try {
+          probed = await probeStudioDevices();
+        } catch (error) {
+          if (!startup || attempt === attempts - 1) throw error;
+          continue;
+        }
+        devices = startup ? mergeStartupStudioResults(devices, probed) : probed;
+        const hasTransientResult = devices.length === 0 || devices.some(isTransientStudioResult);
+        if (!hasTransientResult) break;
+      }
+
       const ids = new Set(devices.map((device) => device.id));
       setStudioDevices(devices);
       setKeymapSnapshotsByDeviceId((current) => {
@@ -101,13 +144,21 @@ function AppInner() {
         return next;
       });
       return devices;
-    } catch (e) {
+    })();
+    studioScanPromiseRef.current = scan;
+    void scan.catch((e) => {
       setStudioError(String(e));
-      throw e;
-    } finally {
+    }).finally(() => {
+      studioScanPromiseRef.current = null;
       setStudioScanning(false);
-    }
+    });
+    return scan;
   }, []);
+
+  const refreshStudioDevices = useCallback(
+    () => scanStudioDevices(false),
+    [scanStudioDevices],
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -152,8 +203,10 @@ function AppInner() {
   }, [addLog]);
 
   useEffect(() => {
-    void refreshStudioDevices().catch(() => {});
-  }, [refreshStudioDevices]);
+    if (loading || startupStudioScanStartedRef.current) return;
+    startupStudioScanStartedRef.current = true;
+    void scanStudioDevices(true).catch(() => {});
+  }, [loading, scanStudioDevices]);
 
   useEffect(() => {
     if (!pendingNavigation) return undefined;

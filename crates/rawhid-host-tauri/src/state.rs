@@ -1,15 +1,15 @@
 use std::{
-    collections::VecDeque,
+    collections::{BTreeMap, HashMap, VecDeque},
     path::PathBuf,
     sync::{atomic::AtomicBool, Arc, Mutex},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use rawhid_host_core::{
     ai_usage::{AiUsageProviderStatus, AiUsageRuntime, AiUsageShared},
     config::AppConfig,
-    hid::DeviceInfo,
-    packet::UplinkPacket,
+    hid::{DeviceInfo, ProbeResult},
+    packet::{EncoderBinding, EncoderGetBindings, EncoderGetInfo, UplinkPacket},
     runner::{DeviceBatteryStatus, DeviceLayerState},
     stats::{default_stats_dir, KeyStatsStore, SharedKeyStatsStore},
     studio::StudioEditSession,
@@ -62,21 +62,64 @@ pub struct AppState {
     pub status: Arc<Mutex<MonitorStatus>>,
     pub log_entries: Arc<Mutex<VecDeque<LogEntry>>>,
     pub log_counter: Arc<Mutex<u64>>,
-    pub stop_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<MonitorCommand>>>>,
+    pub monitor_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<MonitorCommand>>>>,
     pub ai_usage_refreshing: Arc<AtomicBool>,
     pub ai_usage_runtime: Arc<Mutex<Option<AiUsageRuntime>>>,
     pub key_stats: SharedKeyStatsStore,
     pub studio_edit: Arc<Mutex<Option<StudioEditSession>>>,
+    pub encoder_restore_rollbacks:
+        Arc<Mutex<HashMap<(String, u64), BTreeMap<(u32, u8), EncoderGetBindings>>>>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub enum MonitorCommand {
-    Stop,
+    SetAutomationEnabled(bool, std::sync::mpsc::Sender<Result<(), String>>),
+    Probe(std::sync::mpsc::Sender<Result<Vec<ProbeResult>, String>>),
+    Config(HostLinkCall),
+    Shutdown,
     UpdateConfig(AppConfig, Option<AiUsageShared>),
     /// The OS foreground window changed; wake the loop to re-evaluate immediately.
     ForegroundChanged,
     /// Debug-only: feed a synthetic uplink packet through the normal path.
     InjectUplink(DeviceInfo, UplinkPacket),
+}
+
+#[derive(Debug)]
+pub struct HostLinkCall {
+    pub uid: u64,
+    pub request: HostLinkRequest,
+    pub deadline: Instant,
+    pub reply: std::sync::mpsc::Sender<Result<HostLinkResponse, String>>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum HostLinkRequest {
+    EncoderGetInfo,
+    EncoderGetBindings {
+        layer_id: u32,
+        encoder_id: u8,
+    },
+    EncoderSetBindings {
+        layer_id: u32,
+        encoder_id: u8,
+        cw: EncoderBinding,
+        ccw: EncoderBinding,
+    },
+    EncoderGetDirty,
+    EncoderSave,
+    EncoderDiscard,
+    EncoderClearOverride {
+        layer_id: u32,
+        encoder_id: u8,
+    },
+}
+
+#[derive(Debug)]
+pub enum HostLinkResponse {
+    EncoderInfo(EncoderGetInfo),
+    EncoderBindings(EncoderGetBindings),
+    Dirty(bool),
+    Done,
 }
 
 impl AppState {
@@ -100,11 +143,12 @@ impl AppState {
             status: Arc::new(Mutex::new(status)),
             log_entries: Arc::new(Mutex::new(VecDeque::new())),
             log_counter: Arc::new(Mutex::new(0)),
-            stop_tx: Arc::new(Mutex::new(None)),
+            monitor_tx: Arc::new(Mutex::new(None)),
             ai_usage_refreshing: Arc::new(AtomicBool::new(false)),
             ai_usage_runtime: Arc::new(Mutex::new(ai_usage_runtime)),
             key_stats,
             studio_edit: Arc::new(Mutex::new(None)),
+            encoder_restore_rollbacks: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }

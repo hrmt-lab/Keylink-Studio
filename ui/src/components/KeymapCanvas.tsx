@@ -11,13 +11,15 @@ interface KeymapCanvasProps {
   keyTitle?: (key: StudioPhysicalKey) => string | undefined;
   /** Optional click handler used by keymap editing. */
   onKeyClick?: (key: StudioPhysicalKey, element: HTMLDivElement) => void;
+  /** Optional content rendered inside the same plate frame, below the key grid (e.g. encoders). */
+  footer?: ReactNode;
 }
 
 /**
  * Renders ZMK Studio physical-layout keys at their x/y positions.
  * Shared between the keymap view and the typing-stats heatmap.
  */
-export function KeymapCanvas({ keys, keyContent, keyStyle, keyTitle, onKeyClick }: KeymapCanvasProps) {
+export function KeymapCanvas({ keys, keyContent, keyStyle, keyTitle, onKeyClick, footer }: KeymapCanvasProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [containerWidth, setContainerWidth] = useState(0);
   const metrics = useMemo(() => layoutMetrics(keys, containerWidth), [keys, containerWidth]);
@@ -79,6 +81,7 @@ export function KeymapCanvas({ keys, keyContent, keyStyle, keyTitle, onKeyClick 
           );
         })}
       </div>
+      {footer}
     </div>
   );
 }

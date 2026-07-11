@@ -13,8 +13,10 @@ use crate::{
     },
     app_match::{match_action, LayerAction},
     config::{AppConfig, UnmatchedAction},
-    hid::{DeviceInfo, HidDeviceManager, HidError, HidTransport},
-    packet::UplinkPacket,
+    hid::{DeviceInfo, HidDeviceManager, HidError, HidTransport, ProbeResult},
+    packet::{
+        EncoderBinding, EncoderGetBindings, EncoderGetInfo, UplinkPacket, CAPABILITY_CONFIG_RPC,
+    },
     stats::SharedKeyStatsStore,
     time::{Clock, SystemClock, TimeError, TimeSnapshot, TimeSyncState},
 };
@@ -164,6 +166,108 @@ where
         let event = self.sync_app_layers(&app, device_generation)?;
         self.last_device_generation = self.hid.device_generation();
         Ok(event)
+    }
+
+    /// Keep Host Link discovery alive while automatic monitoring is disabled.
+    /// Normal uplink packets are drained without mutating status or executing
+    /// host-side actions.
+    pub fn tick_transport_only(&mut self) -> Result<(), HidError> {
+        self.hid.ensure_verified()?;
+        self.discard_uplink_only();
+        self.pending_uplink_events.clear();
+        Ok(())
+    }
+
+    pub fn discard_uplink_only(&mut self) {
+        let _ = self.hid.drain_uplink();
+        self.pending_uplink_events.clear();
+    }
+
+    pub fn probe_host_link_devices(&mut self) -> Result<Vec<ProbeResult>, HidError> {
+        self.hid.probe()
+    }
+
+    pub fn update_config(&mut self, config: AppConfig, ai_usage_shared: Option<AiUsageShared>) {
+        self.hid.update_config(config.hid.clone());
+        self.config = config;
+        self.ai_usage_shared = ai_usage_shared;
+        self.time_sync = TimeSyncState::default();
+        self.ai_usage_send = AiUsageSendState::default();
+        self.managed_layers.clear();
+        self.last_device_generation = 0;
+    }
+
+    fn config_device(&mut self, uid: u64) -> Result<DeviceInfo, HidError> {
+        self.hid.ensure_verified()?;
+        let find = |devices: &[DeviceInfo]| {
+            devices
+                .iter()
+                .find(|device| {
+                    device.device_uid_hash == Some(uid)
+                        && device.capabilities & CAPABILITY_CONFIG_RPC != 0
+                })
+                .cloned()
+        };
+        if let Some(device) = find(self.hid.verified_devices()) {
+            return Ok(device);
+        }
+        let _ = self.hid.probe()?;
+        find(self.hid.verified_devices()).ok_or(HidError::DeviceNotFound)
+    }
+
+    pub fn config_get_encoder_info(&mut self, uid: u64) -> Result<EncoderGetInfo, HidError> {
+        let device = self.config_device(uid)?;
+        self.hid.config_get_encoder_info(&device)
+    }
+
+    pub fn config_get_encoder_bindings(
+        &mut self,
+        uid: u64,
+        layer_id: u32,
+        encoder_id: u8,
+    ) -> Result<EncoderGetBindings, HidError> {
+        let device = self.config_device(uid)?;
+        self.hid
+            .config_get_encoder_bindings(&device, layer_id, encoder_id)
+    }
+
+    pub fn config_set_encoder_bindings(
+        &mut self,
+        uid: u64,
+        layer_id: u32,
+        encoder_id: u8,
+        cw: EncoderBinding,
+        ccw: EncoderBinding,
+    ) -> Result<(), HidError> {
+        let device = self.config_device(uid)?;
+        self.hid
+            .config_set_encoder_bindings(&device, layer_id, encoder_id, cw, ccw)
+    }
+
+    pub fn config_get_encoder_dirty(&mut self, uid: u64) -> Result<bool, HidError> {
+        let device = self.config_device(uid)?;
+        self.hid.config_get_encoder_dirty(&device)
+    }
+
+    pub fn config_save_encoder(&mut self, uid: u64) -> Result<(), HidError> {
+        let device = self.config_device(uid)?;
+        self.hid.config_save_encoder(&device)
+    }
+
+    pub fn config_discard_encoder(&mut self, uid: u64) -> Result<(), HidError> {
+        let device = self.config_device(uid)?;
+        self.hid.config_discard_encoder(&device)
+    }
+
+    pub fn config_clear_encoder_override(
+        &mut self,
+        uid: u64,
+        layer_id: u32,
+        encoder_id: u8,
+    ) -> Result<(), HidError> {
+        let device = self.config_device(uid)?;
+        self.hid
+            .config_clear_encoder_override(&device, layer_id, encoder_id)
     }
 
     /// Attach the shared key-stats store fed by KEY_STATS uplink packets.

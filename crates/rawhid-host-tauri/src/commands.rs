@@ -1,9 +1,9 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc,
+        mpsc, Arc, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -15,23 +15,31 @@ use rawhid_host_core::{
     active_app::SystemActiveAppProvider,
     ai_usage::{AiUsageRefreshError, AiUsageRuntime, AiUsageShared},
     config::{load_config, ActionsConfig, AppConfig, ConfigPaths},
-    hid::{HidDeviceManager, ProbeResult},
-    packet::UplinkPacket,
+    hid::{HidDeviceManager, HidError, ProbeResult},
+    packet::{
+        ConfigStatus, EncoderBinding, EncoderBindingFlags, EncoderBindingSource,
+        EncoderGetBindings, UplinkPacket,
+    },
     runner::{uplink_device_key, RunEvent, Runner},
     stats::{KeyStatsSummary, SharedKeyStatsStore, StatsPeriod},
     studio::{
-        key_catalog, keymap_backup_from_snapshot, parse_keymap_backup,
-        probe_studio_devices as probe_all_studio_devices, read_keymap_for_device,
-        resolve_behavior_labels_for_device, serialize_keymap_backup, EditBehavior, KeyCatalogEntry,
-        KeymapFileError, RestoreReport, StudioBindingLabelPatch, StudioDeviceStatus,
-        StudioEditSession, StudioError, StudioKeymapSnapshot, StudioRawBinding,
-        KEYMAP_BACKUP_MAX_BYTES,
+        key_catalog, keymap_backup_from_snapshot, parse_keymap_backup, plan_encoder_restore,
+        plan_keymap_restore, probe_studio_devices as probe_all_studio_devices,
+        read_keymap_for_device, resolve_behavior_labels_for_device, serialize_keymap_backup,
+        BackupEncoderBinding, BackupEncoderOverride, BackupEncoders, EditBehavior,
+        EncoderResolveError, EncoderRestoreWrite, KeyCatalogEntry, KeymapFileError,
+        RestoreApplyStatus, RestoreChangedKey, RestoreIssue, RestoreReport,
+        StudioBindingLabelPatch, StudioDeviceStatus, StudioEditSession, StudioError,
+        StudioKeymapSnapshot, StudioRawBinding, KEYMAP_BACKUP_MAX_BYTES,
     },
 };
 use tauri::{AppHandle, Emitter, State};
 
 use crate::foreground::ForegroundWatcher;
-use crate::state::{add_log, AppState, LogEntry, MonitorCommand, MonitorStatus};
+use crate::state::{
+    add_log, AppState, HostLinkCall, HostLinkRequest, HostLinkResponse, LogEntry, MonitorCommand,
+    MonitorStatus,
+};
 use crate::{actions, icon, startup};
 
 type MonitorRunner = Runner<SystemActiveAppProvider, rawhid_host_core::hid::RealHidTransport>;
@@ -269,7 +277,7 @@ pub fn save_config(config: AppConfig, state: State<AppState>) -> Result<(), Stri
 
     let ai_usage_shared = restart_ai_usage_runtime(&state, &config);
 
-    if let Some(tx) = state.stop_tx.lock().unwrap().as_ref() {
+    if let Some(tx) = state.monitor_tx.lock().unwrap().as_ref() {
         let _ = tx.send(MonitorCommand::UpdateConfig(config, ai_usage_shared));
     } else {
         update_ai_usage_status(&state);
@@ -337,10 +345,15 @@ pub fn get_log_entries(state: State<AppState>) -> Vec<LogEntry> {
 
 #[tauri::command]
 pub async fn probe_devices(state: State<'_, AppState>) -> Result<Vec<ProbeResult>, String> {
-    let hid_config = state.config.lock().unwrap().hid.clone();
+    let tx = host_link_sender(state.inner())?;
+    let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
     tauri::async_runtime::spawn_blocking(move || {
-        let mut manager = HidDeviceManager::real(hid_config).map_err(|e| e.to_string())?;
-        manager.probe().map_err(|e| e.to_string())
+        let (reply, receiver) = mpsc::channel();
+        tx.send(MonitorCommand::Probe(reply))
+            .map_err(|_| "hostlink_worker_unavailable".to_string())?;
+        receiver
+            .recv_timeout(timeout)
+            .map_err(|_| "hostlink_result_unknown".to_string())?
     })
     .await
     .map_err(|e| e.to_string())?
@@ -386,65 +399,220 @@ pub async fn read_studio_keymap(
 pub async fn studio_export_keymap(
     device_id: String,
     path: String,
+    host_link_uid: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let edit = Arc::clone(&state.studio_edit);
     let studio_config = state.config.lock().unwrap().studio.clone();
+    let host_link_tx = host_link_sender(state.inner())?;
+    let host_link_timeout = host_link_reply_timeout(&state.config.lock().unwrap());
     tauri::async_runtime::spawn_blocking(move || {
-        let snapshot = {
-            let mut guard = edit.lock().unwrap();
-            if let Some(session) = guard.as_mut() {
-                if session.device_id == device_id {
-                    session.snapshot().map_err(studio_error_code)?
+        let prepared = (|| {
+            let snapshot = {
+                let mut guard = edit.lock().unwrap();
+                if let Some(session) = guard.as_mut() {
+                    if session.device_id == device_id {
+                        session.snapshot().map_err(studio_error_code)?
+                    } else {
+                        return Err(studio_error_code(StudioError::PortBusy));
+                    }
                 } else {
-                    return Err(studio_error_code(StudioError::PortBusy));
+                    read_keymap_for_device(&device_id, &studio_config).map_err(studio_error_code)?
                 }
-            } else {
-                read_keymap_for_device(&device_id, &studio_config).map_err(studio_error_code)?
-            }
-        };
-        let backup =
-            keymap_backup_from_snapshot(&snapshot, Default::default(), env!("CARGO_PKG_VERSION"));
-        let text = serialize_keymap_backup(&backup).map_err(keymap_file_error_code)?;
-        write_keymap_backup_file(&PathBuf::from(path), &text)
+            };
+
+            let encoders = match host_link_uid {
+                None => None,
+                Some(uid) => Some(export_encoder_overrides(
+                    &device_id,
+                    &uid,
+                    &edit,
+                    &studio_config,
+                    host_link_tx,
+                    host_link_timeout,
+                    &snapshot,
+                )?),
+            };
+
+            let backup = keymap_backup_from_snapshot(
+                &snapshot,
+                Default::default(),
+                env!("CARGO_PKG_VERSION"),
+                encoders,
+            );
+            serialize_keymap_backup(&backup).map_err(keymap_file_error_code)
+        })();
+
+        write_completed_keymap_export(&PathBuf::from(path), prepared)
     })
     .await
     .map_err(|_| "keymap_export_failed".to_string())?
+}
+
+/// Writes an export only after every data source has completed successfully.
+/// Keeping the preparation result explicit prevents a future partial-export
+/// path from truncating or replacing the destination before encoder reads end.
+fn write_completed_keymap_export(
+    path: &std::path::Path,
+    prepared: Result<String, String>,
+) -> Result<(), String> {
+    let text = prepared?;
+    write_keymap_backup_file(path, &text)
+}
+
+/// Reads every runtime encoder override for `device_id` over Host Link Config
+/// RPC and labels each one exactly like normal keys, so the export mirrors the
+/// key backup format 1:1. Any failure here (uid parse, device lookup, GET_INFO,
+/// GET_BINDINGS, label resolution) fails the whole export -- callers must never
+/// write a backup file that silently dropped the encoder section.
+fn export_encoder_overrides(
+    device_id: &str,
+    host_link_uid: &str,
+    edit: &Arc<Mutex<Option<StudioEditSession>>>,
+    studio_config: &rawhid_host_core::config::StudioConfig,
+    host_link_tx: mpsc::Sender<MonitorCommand>,
+    host_link_timeout: Duration,
+    snapshot: &StudioKeymapSnapshot,
+) -> Result<BackupEncoders, String> {
+    let target_uid = parse_host_link_uid(host_link_uid)?;
+    let info = match host_link_call(
+        &host_link_tx,
+        host_link_timeout,
+        target_uid,
+        HostLinkRequest::EncoderGetInfo,
+    )? {
+        HostLinkResponse::EncoderInfo(info) => info,
+        _ => return Err("hostlink_invalid_response".to_string()),
+    };
+    let timeout = Duration::from_millis(studio_config.keymap_read_timeout_ms.max(1));
+
+    let mut overrides = Vec::new();
+    for layer in &snapshot.layers {
+        for encoder_id in 0..info.encoder_count {
+            let bindings = match host_link_call(
+                &host_link_tx,
+                host_link_timeout,
+                target_uid,
+                HostLinkRequest::EncoderGetBindings {
+                    layer_id: layer.id,
+                    encoder_id,
+                },
+            )? {
+                HostLinkResponse::EncoderBindings(bindings) => bindings,
+                _ => return Err("hostlink_invalid_response".to_string()),
+            };
+            if bindings.source != EncoderBindingSource::Override {
+                continue;
+            }
+            let [cw_label, ccw_label] = label_encoder_bindings_for_device(
+                device_id,
+                edit,
+                studio_config,
+                bindings.source,
+                bindings.cw_binding,
+                bindings.ccw_binding,
+                timeout,
+            )?;
+            overrides.push(BackupEncoderOverride {
+                layer_index: layer.index,
+                layer_id: layer.id,
+                encoder_id,
+                cw: backup_encoder_binding(bindings.cw_binding, cw_label),
+                ccw: backup_encoder_binding(bindings.ccw_binding, ccw_label),
+            });
+        }
+    }
+
+    Ok(BackupEncoders {
+        encoder_count: info.encoder_count,
+        overrides,
+    })
+}
+
+fn backup_encoder_binding(
+    binding: EncoderBinding,
+    label: Option<StudioBindingLabelPatch>,
+) -> BackupEncoderBinding {
+    match label {
+        Some(patch) => BackupEncoderBinding {
+            behavior_id: binding.behavior_id,
+            param1: binding.param1,
+            param2: binding.param2,
+            behavior: patch.behavior,
+            label: patch.full_label,
+        },
+        None => BackupEncoderBinding {
+            behavior_id: binding.behavior_id,
+            param1: binding.param1,
+            param2: binding.param2,
+            behavior: format!("behavior {}", binding.behavior_id),
+            label: String::new(),
+        },
+    }
 }
 
 #[tauri::command]
 pub async fn studio_preview_keymap_restore(
     device_id: String,
     path: String,
+    host_link_uid: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<RestoreReport, String> {
     let edit = Arc::clone(&state.studio_edit);
     let studio_config = state.config.lock().unwrap().studio.clone();
+    let host_link_tx = host_link_sender(state.inner())?;
+    let host_link_timeout = host_link_reply_timeout(&state.config.lock().unwrap());
     tauri::async_runtime::spawn_blocking(move || {
         let backup = read_keymap_backup_file(&PathBuf::from(path))?;
-        let mut guard = edit.lock().unwrap();
-        let session = guard
-            .as_mut()
-            .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
-        if session.device_id != device_id {
-            return Err(studio_error_code(StudioError::SessionDeviceMismatch));
-        }
-        let snapshot = session.snapshot().map_err(studio_error_code)?;
-        let ids = backup_behavior_ids(&backup);
-        let target_names = session
-            .resolve_behavior_names(
-                &ids,
-                Duration::from_millis(studio_config.keymap_read_timeout_ms.max(1)),
-            )
-            .map_err(studio_error_code)?;
-        Ok(
-            rawhid_host_core::studio::plan_keymap_restore(
-                &snapshot,
-                target_names.as_ref(),
-                &backup,
-            )
-            .report,
-        )
+
+        let snapshot = {
+            let mut guard = edit.lock().unwrap();
+            let session = guard
+                .as_mut()
+                .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+            if session.device_id != device_id {
+                return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+            }
+            session.snapshot().map_err(studio_error_code)?
+        };
+
+        let mut ids = backup_behavior_ids(&backup);
+        let encoder_ctx = prepare_encoder_restore_context(
+            &backup,
+            host_link_uid.as_deref(),
+            host_link_tx,
+            host_link_timeout,
+            &snapshot,
+            &mut ids,
+        )?;
+
+        let target_names = {
+            let mut guard = edit.lock().unwrap();
+            let session = guard
+                .as_mut()
+                .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+            if session.device_id != device_id {
+                return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+            }
+            session
+                .resolve_behavior_names(
+                    &ids,
+                    Duration::from_millis(studio_config.keymap_read_timeout_ms.max(1)),
+                )
+                .map_err(studio_error_code)?
+        };
+
+        let mut report = plan_keymap_restore(&snapshot, target_names.as_ref(), &backup).report;
+        merge_encoder_restore_into_report(
+            &mut report,
+            &backup,
+            &snapshot,
+            encoder_ctx.as_ref(),
+            target_names.as_ref(),
+            host_link_uid.is_some(),
+        );
+
+        Ok(report)
     })
     .await
     .map_err(|_| "keymap_restore_preview_failed".to_string())?
@@ -454,39 +622,178 @@ pub async fn studio_preview_keymap_restore(
 pub async fn studio_apply_keymap_restore(
     device_id: String,
     path: String,
+    host_link_uid: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(StudioKeymapSnapshot, RestoreReport), String> {
     let edit = Arc::clone(&state.studio_edit);
     let studio_config = state.config.lock().unwrap().studio.clone();
+    let host_link_tx = host_link_sender(state.inner())?;
+    let host_link_timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+    let encoder_rollbacks = Arc::clone(&state.encoder_restore_rollbacks);
     tauri::async_runtime::spawn_blocking(move || {
         let backup = read_keymap_backup_file(&PathBuf::from(path))?;
-        let mut guard = edit.lock().unwrap();
-        let session = guard
-            .as_mut()
-            .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
-        if session.device_id != device_id {
-            return Err(studio_error_code(StudioError::SessionDeviceMismatch));
-        }
-        let snapshot = session.snapshot().map_err(studio_error_code)?;
-        let ids = backup_behavior_ids(&backup);
-        let target_names = session
-            .resolve_behavior_names(
-                &ids,
-                Duration::from_millis(studio_config.keymap_read_timeout_ms.max(1)),
-            )
-            .map_err(studio_error_code)?;
-        let plan = rawhid_host_core::studio::plan_keymap_restore(
-            &snapshot,
-            target_names.as_ref(),
+
+        let snapshot = {
+            let mut guard = edit.lock().unwrap();
+            let session = guard
+                .as_mut()
+                .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+            if session.device_id != device_id {
+                return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+            }
+            session.snapshot().map_err(studio_error_code)?
+        };
+
+        let mut ids = backup_behavior_ids(&backup);
+        let mut encoder_ctx = prepare_encoder_restore_context(
             &backup,
-        );
-        if !plan.report.can_apply {
-            return Err("restore_structure_mismatch".to_string());
+            host_link_uid.as_deref(),
+            host_link_tx,
+            host_link_timeout,
+            &snapshot,
+            &mut ids,
+        )?;
+
+        let (mut next, mut report, encoder_writes, key_failed) = {
+            let mut guard = edit.lock().unwrap();
+            let session = guard
+                .as_mut()
+                .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+            if session.device_id != device_id {
+                return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+            }
+            let target_names = session
+                .resolve_behavior_names(
+                    &ids,
+                    Duration::from_millis(studio_config.keymap_read_timeout_ms.max(1)),
+                )
+                .map_err(studio_error_code)?;
+
+            let key_plan = plan_keymap_restore(&snapshot, target_names.as_ref(), &backup);
+            let mut report = key_plan.report;
+            let encoder_writes = merge_encoder_restore_into_report(
+                &mut report,
+                &backup,
+                &snapshot,
+                encoder_ctx.as_ref(),
+                target_names.as_ref(),
+                host_link_uid.is_some(),
+            );
+
+            if !report.can_apply {
+                return Err("restore_structure_mismatch".to_string());
+            }
+
+            session.begin_backup_restore(&snapshot);
+            let mut next = snapshot.clone();
+            let mut key_failed = false;
+            for write in &key_plan.writes {
+                match session.apply_raw_writes(std::slice::from_ref(write)) {
+                    Ok(updated) => {
+                        next = updated;
+                        report.applied_keys.push(RestoreChangedKey {
+                            layer_index: write.layer_index,
+                            position: write.position.max(0) as usize,
+                        });
+                    }
+                    Err(error) => {
+                        key_failed = true;
+                        report.apply_status = RestoreApplyStatus::Partial;
+                        report.errors.push(RestoreIssue {
+                            code: "key_apply_failed".to_string(),
+                            layer_index: Some(write.layer_index),
+                            position: Some(write.position.max(0) as usize),
+                            message: studio_error_code(error),
+                        });
+                        break;
+                    }
+                }
+            }
+            (next, report, encoder_writes, key_failed)
+        };
+
+        if !key_failed {
+            if let Some(ctx) = encoder_ctx.as_mut() {
+                if !encoder_writes.is_empty() {
+                    let mut rollbacks = encoder_rollbacks.lock().unwrap();
+                    let rollback = rollbacks.entry((device_id.clone(), ctx.uid)).or_default();
+                    for write in &encoder_writes {
+                        if let Some(current) = ctx
+                            .current_bindings
+                            .get(&(write.layer_id, write.encoder_id))
+                        {
+                            rollback
+                                .entry((write.layer_id, write.encoder_id))
+                                .or_insert(*current);
+                        }
+                    }
+                }
+                for write in &encoder_writes {
+                    let result = host_link_call(
+                        &ctx.tx,
+                        ctx.timeout,
+                        ctx.uid,
+                        HostLinkRequest::EncoderSetBindings {
+                            layer_id: write.layer_id,
+                            encoder_id: write.encoder_id,
+                            cw: write.cw,
+                            ccw: write.ccw,
+                        },
+                    );
+                    match result {
+                        Ok(HostLinkResponse::Done) => {
+                            if let Some(changed) = report.changed_encoders.iter().find(|changed| {
+                                changed.encoder_id == write.encoder_id
+                                    && snapshot
+                                        .layers
+                                        .get(changed.layer_index)
+                                        .is_some_and(|layer| layer.id == write.layer_id)
+                            }) {
+                                report.applied_encoders.push(changed.clone());
+                            }
+                        }
+                        other => {
+                            let message = match other {
+                                Err(error) => error,
+                                Ok(_) => "hostlink_invalid_response".to_string(),
+                            };
+                            report.apply_status = RestoreApplyStatus::Partial;
+                            report.errors.push(RestoreIssue {
+                                code: "encoder_apply_failed".to_string(),
+                                layer_index: snapshot
+                                    .layers
+                                    .iter()
+                                    .position(|layer| layer.id == write.layer_id),
+                                position: None,
+                                message,
+                            });
+                            break;
+                        }
+                    }
+                }
+            }
         }
-        let next = session
-            .apply_raw_writes(&plan.writes)
-            .map_err(studio_error_code)?;
-        Ok((next, plan.report))
+
+        if report.apply_status != RestoreApplyStatus::Partial {
+            report.apply_status = RestoreApplyStatus::Complete;
+        } else {
+            let refresh = {
+                let mut guard = edit.lock().unwrap();
+                guard.as_mut().and_then(|session| session.snapshot().ok())
+            };
+            if let Some(refreshed) = refresh {
+                next = refreshed;
+            } else {
+                report.errors.push(RestoreIssue {
+                    code: "state_refresh_failed".to_string(),
+                    layer_index: None,
+                    position: None,
+                    message: "failed to refresh Studio keymap after partial restore".to_string(),
+                });
+            }
+        }
+
+        Ok((next, report))
     })
     .await
     .map_err(|_| "keymap_restore_apply_failed".to_string())?
@@ -498,6 +805,168 @@ fn backup_behavior_ids(backup: &rawhid_host_core::studio::KeymapBackup) -> BTree
         .iter()
         .flat_map(|layer| layer.bindings.iter().map(|binding| binding.behavior_id))
         .collect()
+}
+
+/// Holds an already-open Config RPC connection plus the current encoder state
+/// relevant to the backup being restored, gathered *before* the Studio edit
+/// session lock is (re-)acquired. `manager`/`device` are kept open so `apply`
+/// can reuse them for the SET calls after the key-side writes succeed, without
+/// ever touching Host Link while `state.studio_edit` is locked.
+struct EncoderRestoreContext {
+    tx: mpsc::Sender<MonitorCommand>,
+    timeout: Duration,
+    uid: u64,
+    encoder_count: u8,
+    current_bindings: BTreeMap<(u32, u8), EncoderGetBindings>,
+}
+
+/// Builds the encoder restore context for a backup, if applicable, and folds
+/// every encoder behavior id referenced by the backup into `ids` so a single
+/// `resolve_behavior_names` call (done later, under the session lock) covers
+/// both keys and encoders. Returns `Ok(None)` when the backup has no encoder
+/// section, or when it does but no Host Link uid was supplied (handled later
+/// by `merge_encoder_restore_into_report` as an all-blocked warning).
+fn prepare_encoder_restore_context(
+    backup: &rawhid_host_core::studio::KeymapBackup,
+    host_link_uid: Option<&str>,
+    host_link_tx: mpsc::Sender<MonitorCommand>,
+    host_link_timeout: Duration,
+    snapshot: &StudioKeymapSnapshot,
+    ids: &mut BTreeSet<i32>,
+) -> Result<Option<EncoderRestoreContext>, String> {
+    let (Some(backup_encoders), Some(uid)) = (backup.encoders.as_ref(), host_link_uid) else {
+        return Ok(None);
+    };
+
+    let target_uid = parse_host_link_uid(uid)?;
+    let info = match host_link_call(
+        &host_link_tx,
+        host_link_timeout,
+        target_uid,
+        HostLinkRequest::EncoderGetInfo,
+    )? {
+        HostLinkResponse::EncoderInfo(info) => info,
+        _ => return Err("hostlink_invalid_response".to_string()),
+    };
+    let encoder_count = info.encoder_count;
+
+    let mut current_bindings = BTreeMap::new();
+    for override_ in &backup_encoders.overrides {
+        ids.insert(i32::from(override_.cw.behavior_id));
+        ids.insert(i32::from(override_.ccw.behavior_id));
+        let Some(layer) = resolve_encoder_restore_layer(snapshot, backup, override_) else {
+            continue;
+        };
+        if override_.encoder_id >= encoder_count {
+            continue;
+        }
+        let key = (layer.id, override_.encoder_id);
+        if current_bindings.contains_key(&key) {
+            continue;
+        }
+        let bindings = match host_link_call(
+            &host_link_tx,
+            host_link_timeout,
+            target_uid,
+            HostLinkRequest::EncoderGetBindings {
+                layer_id: layer.id,
+                encoder_id: override_.encoder_id,
+            },
+        )? {
+            HostLinkResponse::EncoderBindings(bindings) => bindings,
+            _ => return Err("hostlink_invalid_response".to_string()),
+        };
+        current_bindings.insert(key, bindings);
+    }
+
+    Ok(Some(EncoderRestoreContext {
+        tx: host_link_tx,
+        timeout: host_link_timeout,
+        uid: target_uid,
+        encoder_count,
+        current_bindings,
+    }))
+}
+
+fn resolve_encoder_restore_layer<'a>(
+    snapshot: &'a StudioKeymapSnapshot,
+    backup: &rawhid_host_core::studio::KeymapBackup,
+    override_: &BackupEncoderOverride,
+) -> Option<&'a rawhid_host_core::studio::StudioLayer> {
+    if let Some(layer) = snapshot
+        .layers
+        .iter()
+        .find(|layer| layer.id == override_.layer_id)
+    {
+        return Some(layer);
+    }
+    let source = backup
+        .layers
+        .iter()
+        .find(|layer| layer.id == override_.layer_id)
+        .or_else(|| backup.layers.get(override_.layer_index))?;
+    let candidate = snapshot.layers.get(override_.layer_index)?;
+    (normalize_restore_name(&source.name) == normalize_restore_name(&candidate.name))
+        .then_some(candidate)
+}
+
+fn normalize_restore_name(value: &str) -> String {
+    value
+        .trim()
+        .to_ascii_lowercase()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Merges the encoder side of a restore plan into `report` and returns the
+/// writes to apply (empty unless called from `studio_apply_keymap_restore`
+/// with `can_apply` about to be checked by the caller). When the backup has
+/// an encoder section but no Host Link uid was supplied, every override is
+/// counted as blocked with a dedicated warning instead of being silently
+/// dropped.
+fn merge_encoder_restore_into_report(
+    report: &mut RestoreReport,
+    backup: &rawhid_host_core::studio::KeymapBackup,
+    snapshot: &StudioKeymapSnapshot,
+    encoder_ctx: Option<&EncoderRestoreContext>,
+    target_names: Option<&BTreeMap<i32, String>>,
+    host_link_uid_present: bool,
+) -> Vec<EncoderRestoreWrite> {
+    let Some(backup_encoders) = backup.encoders.as_ref() else {
+        return Vec::new();
+    };
+
+    match encoder_ctx {
+        Some(ctx) => {
+            let encoder_plan = plan_encoder_restore(
+                &snapshot.layers,
+                &backup.layers,
+                ctx.encoder_count,
+                &ctx.current_bindings,
+                target_names,
+                backup_encoders,
+            );
+            report.encoder_will_write = encoder_plan.will_write;
+            report.encoder_unchanged_skipped = encoder_plan.unchanged_skipped;
+            report.encoder_blocked = encoder_plan.blocked;
+            report.changed_encoders = encoder_plan.changed_encoders;
+            report.warnings.extend(encoder_plan.warnings);
+            encoder_plan.writes
+        }
+        None => {
+            if !host_link_uid_present {
+                report.encoder_blocked = backup_encoders.overrides.len();
+                report.warnings.push(RestoreIssue {
+                    code: "encoder_hostlink_missing".to_string(),
+                    layer_index: None,
+                    position: None,
+                    message: "Host Link is not connected; encoder overrides in the backup were not restored".to_string(),
+                });
+            }
+            Vec::new()
+        }
+    }
 }
 
 fn read_keymap_backup_file(
@@ -804,44 +1273,482 @@ pub async fn studio_remove_layer(
     .map_err(|_| "studio_remove_layer_failed".to_string())?
 }
 
+/// Outcome of attempting a save-or-discard operation on a single target
+/// (Studio RPC keys, or a Config RPC feature). `skipped` implies `success:
+/// true`: there was nothing to do (no dirty state) or the target was not
+/// connected at all. `attempted` means the underlying RPC call actually ran.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SaveOrDiscardTargetDto {
+    pub attempted: bool,
+    pub skipped: bool,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+/// Per-feature Config RPC result (currently only "ENCODER"; COMBO/TAP_DANCE
+/// will add more entries to `ConfigSaveOrDiscardDto::results` without changing
+/// this shape).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConfigFeatureResultDto {
+    pub feature: String,
+    pub attempted: bool,
+    pub skipped: bool,
+    pub success: bool,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ConfigSaveOrDiscardDto {
+    pub attempted: bool,
+    pub skipped: bool,
+    pub success: bool,
+    pub results: Vec<ConfigFeatureResultDto>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct SaveOrDiscardResultDto {
+    pub overall_success: bool,
+    pub studio: SaveOrDiscardTargetDto,
+    pub config: ConfigSaveOrDiscardDto,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DiscardChangesDto {
+    pub result: SaveOrDiscardResultDto,
+    /// Present when the studio-side discard ran successfully (the re-read snapshot).
+    pub snapshot: Option<StudioKeymapSnapshot>,
+}
+
+fn config_save_or_discard_from_feature(feature: ConfigFeatureResultDto) -> ConfigSaveOrDiscardDto {
+    ConfigSaveOrDiscardDto {
+        attempted: feature.attempted,
+        skipped: feature.skipped,
+        success: feature.success,
+        results: vec![feature],
+    }
+}
+
+fn failed_encoder_feature(error: impl Into<String>) -> ConfigFeatureResultDto {
+    ConfigFeatureResultDto {
+        feature: "ENCODER".to_string(),
+        attempted: true,
+        skipped: false,
+        success: false,
+        error: Some(error.into()),
+    }
+}
+
+enum EncoderFeatureOp {
+    Save,
+    Discard,
+}
+
+fn run_encoder_feature(
+    tx: mpsc::Sender<MonitorCommand>,
+    timeout: Duration,
+    host_link_uid: String,
+    op: EncoderFeatureOp,
+) -> ConfigFeatureResultDto {
+    let fail = |error: String| ConfigFeatureResultDto {
+        feature: "ENCODER".to_string(),
+        attempted: true,
+        skipped: false,
+        success: false,
+        error: Some(error),
+    };
+    let target_uid = match parse_host_link_uid(&host_link_uid) {
+        Ok(uid) => uid,
+        Err(err) => return fail(err),
+    };
+    let dirty = match host_link_call(&tx, timeout, target_uid, HostLinkRequest::EncoderGetDirty) {
+        Ok(HostLinkResponse::Dirty(dirty)) => dirty,
+        Ok(_) => return fail("hostlink_invalid_response".to_string()),
+        Err(err) => return fail(err),
+    };
+    if !dirty {
+        return ConfigFeatureResultDto {
+            feature: "ENCODER".to_string(),
+            attempted: false,
+            skipped: true,
+            success: true,
+            error: None,
+        };
+    }
+    let request = match op {
+        EncoderFeatureOp::Save => HostLinkRequest::EncoderSave,
+        EncoderFeatureOp::Discard => HostLinkRequest::EncoderDiscard,
+    };
+    let result = host_link_call(&tx, timeout, target_uid, request);
+    match result {
+        Ok(HostLinkResponse::Done) => ConfigFeatureResultDto {
+            feature: "ENCODER".to_string(),
+            attempted: true,
+            skipped: false,
+            success: true,
+            error: None,
+        },
+        Ok(_) => fail("hostlink_invalid_response".to_string()),
+        Err(err) => fail(err),
+    }
+}
+
+fn same_encoder_binding_content(left: &EncoderGetBindings, right: &EncoderGetBindings) -> bool {
+    left.layer_id == right.layer_id
+        && left.encoder_id == right.encoder_id
+        && left.source == right.source
+        && left.cw_binding == right.cw_binding
+        && left.ccw_binding == right.ccw_binding
+}
+
+fn run_encoder_discard_with_rollback(
+    tx: mpsc::Sender<MonitorCommand>,
+    timeout: Duration,
+    host_link_uid: String,
+    rollback: BTreeMap<(u32, u8), EncoderGetBindings>,
+) -> ConfigFeatureResultDto {
+    let fail = |error: String| ConfigFeatureResultDto {
+        feature: "ENCODER".to_string(),
+        attempted: true,
+        skipped: false,
+        success: false,
+        error: Some(error),
+    };
+    let target_uid = match parse_host_link_uid(&host_link_uid) {
+        Ok(uid) => uid,
+        Err(err) => return fail(err),
+    };
+    let dirty = match host_link_call(&tx, timeout, target_uid, HostLinkRequest::EncoderGetDirty) {
+        Ok(HostLinkResponse::Dirty(dirty)) => dirty,
+        Ok(_) => return fail("hostlink_invalid_response".to_string()),
+        Err(err) => return fail(err),
+    };
+
+    if dirty {
+        match host_link_call(&tx, timeout, target_uid, HostLinkRequest::EncoderDiscard) {
+            Ok(HostLinkResponse::Done) => {}
+            Ok(_) => return fail("hostlink_invalid_response".to_string()),
+            Err(err) => return fail(err),
+        }
+    }
+
+    let mut repaired = false;
+    for baseline in rollback.values() {
+        let current = match host_link_call(
+            &tx,
+            timeout,
+            target_uid,
+            HostLinkRequest::EncoderGetBindings {
+                layer_id: baseline.layer_id,
+                encoder_id: baseline.encoder_id,
+            },
+        ) {
+            Ok(HostLinkResponse::EncoderBindings(bindings)) => bindings,
+            Ok(_) => return fail("hostlink_invalid_response".to_string()),
+            Err(err) => return fail(err),
+        };
+        if same_encoder_binding_content(&current, baseline) {
+            continue;
+        }
+
+        let request = match baseline.source {
+            EncoderBindingSource::Override => HostLinkRequest::EncoderSetBindings {
+                layer_id: baseline.layer_id,
+                encoder_id: baseline.encoder_id,
+                cw: baseline.cw_binding,
+                ccw: baseline.ccw_binding,
+            },
+            EncoderBindingSource::Keymap => HostLinkRequest::EncoderClearOverride {
+                layer_id: baseline.layer_id,
+                encoder_id: baseline.encoder_id,
+            },
+        };
+        match host_link_call(&tx, timeout, target_uid, request) {
+            Ok(HostLinkResponse::Done) => repaired = true,
+            Ok(_) => return fail("hostlink_invalid_response".to_string()),
+            Err(err) => return fail(err),
+        }
+    }
+
+    if repaired {
+        match host_link_call(&tx, timeout, target_uid, HostLinkRequest::EncoderSave) {
+            Ok(HostLinkResponse::Done) => {}
+            Ok(_) => return fail("hostlink_invalid_response".to_string()),
+            Err(err) => return fail(err),
+        }
+    }
+
+    for baseline in rollback.values() {
+        let current = match host_link_call(
+            &tx,
+            timeout,
+            target_uid,
+            HostLinkRequest::EncoderGetBindings {
+                layer_id: baseline.layer_id,
+                encoder_id: baseline.encoder_id,
+            },
+        ) {
+            Ok(HostLinkResponse::EncoderBindings(bindings)) => bindings,
+            Ok(_) => return fail("hostlink_invalid_response".to_string()),
+            Err(err) => return fail(err),
+        };
+        if !same_encoder_binding_content(&current, baseline) {
+            return fail("encoder_discard_restore_mismatch".to_string());
+        }
+    }
+
+    ConfigFeatureResultDto {
+        feature: "ENCODER".to_string(),
+        // A rollback baseline means the device was re-read even when no write
+        // was necessary. Report it as attempted so the UI refreshes values
+        // that may still be showing the imported backup.
+        attempted: true,
+        skipped: false,
+        success: true,
+        error: None,
+    }
+}
+
 #[tauri::command]
 pub async fn studio_save_changes(
     device_id: String,
+    host_link_uid: Option<String>,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<SaveOrDiscardResultDto, String> {
     let edit = Arc::clone(&state.studio_edit);
-    tauri::async_runtime::spawn_blocking(move || {
+    let edit_device_id = device_id.clone();
+    let studio = tauri::async_runtime::spawn_blocking(move || {
         let mut guard = edit.lock().unwrap();
-        let session = guard
-            .as_mut()
-            .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
-        if session.device_id != device_id {
-            return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+        let session = match guard.as_mut() {
+            Some(session) => session,
+            None => {
+                return SaveOrDiscardTargetDto {
+                    attempted: true,
+                    skipped: false,
+                    success: false,
+                    error: Some(studio_error_code(StudioError::NoEditSession)),
+                };
+            }
+        };
+        if session.device_id != edit_device_id {
+            return SaveOrDiscardTargetDto {
+                attempted: true,
+                skipped: false,
+                success: false,
+                error: Some(studio_error_code(StudioError::SessionDeviceMismatch)),
+            };
         }
-        session.save().map_err(studio_error_code)
+        let has_unsaved = match session.has_unsaved() {
+            Ok(has_unsaved) => has_unsaved,
+            Err(err) => {
+                return SaveOrDiscardTargetDto {
+                    attempted: true,
+                    skipped: false,
+                    success: false,
+                    error: Some(studio_error_code(err)),
+                };
+            }
+        };
+        if !has_unsaved {
+            return SaveOrDiscardTargetDto {
+                attempted: false,
+                skipped: true,
+                success: true,
+                error: None,
+            };
+        }
+        match session.save() {
+            Ok(()) => SaveOrDiscardTargetDto {
+                attempted: true,
+                skipped: false,
+                success: true,
+                error: None,
+            },
+            Err(err) => SaveOrDiscardTargetDto {
+                attempted: true,
+                skipped: false,
+                success: false,
+                error: Some(studio_error_code(err)),
+            },
+        }
     })
     .await
-    .map_err(|_| "studio_save_failed".to_string())?
+    .map_err(|_| "studio_save_failed".to_string())?;
+
+    let saved_uid = host_link_uid.clone();
+    let config = match host_link_uid {
+        None => config_save_or_discard_from_feature(ConfigFeatureResultDto {
+            feature: "ENCODER".to_string(),
+            attempted: false,
+            skipped: true,
+            success: true,
+            error: None,
+        }),
+        Some(uid) => {
+            let feature = match host_link_sender(state.inner()) {
+                Ok(tx) => {
+                    let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+                    match tauri::async_runtime::spawn_blocking(move || {
+                        run_encoder_feature(tx, timeout, uid, EncoderFeatureOp::Save)
+                    })
+                    .await
+                    {
+                        Ok(feature) => feature,
+                        Err(_) => failed_encoder_feature("studio_encoder_save_failed"),
+                    }
+                }
+                Err(error) => failed_encoder_feature(error),
+            };
+            config_save_or_discard_from_feature(feature)
+        }
+    };
+
+    if config.success {
+        if let Some(uid) = saved_uid {
+            if let Ok(uid) = parse_host_link_uid(&uid) {
+                state
+                    .encoder_restore_rollbacks
+                    .lock()
+                    .unwrap()
+                    .remove(&(device_id, uid));
+            }
+        }
+    }
+
+    // `skipped` always carries `success: true`, so this is exactly "no
+    // attempted target failed".
+    let overall_success = studio.success && config.success;
+    Ok(SaveOrDiscardResultDto {
+        overall_success,
+        studio,
+        config,
+    })
 }
 
 #[tauri::command]
 pub async fn studio_discard_changes(
     device_id: String,
+    host_link_uid: Option<String>,
     state: State<'_, AppState>,
-) -> Result<StudioKeymapSnapshot, String> {
+) -> Result<DiscardChangesDto, String> {
     let edit = Arc::clone(&state.studio_edit);
-    tauri::async_runtime::spawn_blocking(move || {
+    let edit_device_id = device_id.clone();
+    let (studio, snapshot) = tauri::async_runtime::spawn_blocking(move || {
         let mut guard = edit.lock().unwrap();
-        let session = guard
-            .as_mut()
-            .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
-        if session.device_id != device_id {
-            return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+        let session = match guard.as_mut() {
+            Some(session) => session,
+            None => {
+                return (
+                    SaveOrDiscardTargetDto {
+                        attempted: true,
+                        skipped: false,
+                        success: false,
+                        error: Some(studio_error_code(StudioError::NoEditSession)),
+                    },
+                    None,
+                );
+            }
+        };
+        if session.device_id != edit_device_id {
+            return (
+                SaveOrDiscardTargetDto {
+                    attempted: true,
+                    skipped: false,
+                    success: false,
+                    error: Some(studio_error_code(StudioError::SessionDeviceMismatch)),
+                },
+                None,
+            );
         }
-        session.discard().map_err(studio_error_code)
+        // Preserving the current implementation's behavior: discard runs
+        // unconditionally (there is no "nothing to discard" skip path in the
+        // pre-refactor command either).
+        match session.discard() {
+            Ok(snapshot) => (
+                SaveOrDiscardTargetDto {
+                    attempted: true,
+                    skipped: false,
+                    success: true,
+                    error: None,
+                },
+                Some(snapshot),
+            ),
+            Err(err) => (
+                SaveOrDiscardTargetDto {
+                    attempted: true,
+                    skipped: false,
+                    success: false,
+                    error: Some(studio_error_code(err)),
+                },
+                None,
+            ),
+        }
     })
     .await
-    .map_err(|_| "studio_discard_failed".to_string())?
+    .map_err(|_| "studio_discard_failed".to_string())?;
+
+    let discarded_uid = host_link_uid.clone();
+    let rollback = discarded_uid
+        .as_deref()
+        .and_then(|uid| parse_host_link_uid(uid).ok())
+        .and_then(|uid| {
+            state
+                .encoder_restore_rollbacks
+                .lock()
+                .unwrap()
+                .get(&(device_id.clone(), uid))
+                .cloned()
+        });
+    let config = match host_link_uid {
+        None => config_save_or_discard_from_feature(ConfigFeatureResultDto {
+            feature: "ENCODER".to_string(),
+            attempted: false,
+            skipped: true,
+            success: true,
+            error: None,
+        }),
+        Some(uid) => {
+            let feature = match host_link_sender(state.inner()) {
+                Ok(tx) => {
+                    let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+                    match tauri::async_runtime::spawn_blocking(move || match rollback {
+                        Some(rollback) => {
+                            run_encoder_discard_with_rollback(tx, timeout, uid, rollback)
+                        }
+                        None => run_encoder_feature(tx, timeout, uid, EncoderFeatureOp::Discard),
+                    })
+                    .await
+                    {
+                        Ok(feature) => feature,
+                        Err(_) => failed_encoder_feature("studio_encoder_discard_failed"),
+                    }
+                }
+                Err(error) => failed_encoder_feature(error),
+            };
+            config_save_or_discard_from_feature(feature)
+        }
+    };
+
+    if config.success {
+        if let Some(uid) = discarded_uid {
+            if let Ok(uid) = parse_host_link_uid(&uid) {
+                state
+                    .encoder_restore_rollbacks
+                    .lock()
+                    .unwrap()
+                    .remove(&(device_id, uid));
+            }
+        }
+    }
+
+    let overall_success = studio.success && config.success;
+    Ok(DiscardChangesDto {
+        result: SaveOrDiscardResultDto {
+            overall_success,
+            studio,
+            config,
+        },
+        snapshot,
+    })
 }
 
 #[tauri::command]
@@ -862,6 +1769,641 @@ pub async fn studio_has_unsaved(
     })
     .await
     .map_err(|_| "studio_has_unsaved_failed".to_string())?
+}
+
+/// A consistent view of the active Studio edit session after a write whose
+/// outcome may be unknown. This command only reads device state: it never
+/// saves, discards, or clears pending edits.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StudioEditResyncDto {
+    pub snapshot: StudioKeymapSnapshot,
+    pub has_unsaved: bool,
+}
+
+#[tauri::command]
+pub async fn studio_resync_edit_state(
+    device_id: String,
+    state: State<'_, AppState>,
+) -> Result<StudioEditResyncDto, String> {
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut guard = edit.lock().unwrap();
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+        if session.device_id != device_id {
+            return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+        }
+
+        let snapshot = session.snapshot().map_err(studio_error_code)?;
+        let has_unsaved = session.has_unsaved().map_err(studio_error_code)?;
+        Ok(StudioEditResyncDto {
+            snapshot,
+            has_unsaved,
+        })
+    })
+    .await
+    .map_err(|_| "studio_resync_failed".to_string())?
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EncoderBindingDto {
+    pub behavior_id: u16,
+    pub param1: u32,
+    pub param2: u32,
+    /// Only populated when `source == "override"`. A `source == "keymap"` encoder
+    /// must never reveal its concrete `.keymap` binding (see keymap-encoder-editing-plan.md).
+    pub label: Option<StudioBindingLabelPatch>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EncoderBindingsDto {
+    pub layer_id: u32,
+    pub encoder_id: u8,
+    pub source: String,
+    pub stale_saved_exists: bool,
+    pub saved_exists: bool,
+    pub runtime_dirty: bool,
+    pub invalid_saved_exists: bool,
+    pub cw: EncoderBindingDto,
+    pub ccw: EncoderBindingDto,
+}
+
+fn hid_error_code(error: HidError) -> String {
+    match error {
+        HidError::Hid(_) => "hid_error",
+        HidError::Packet(_) => "packet_error",
+        HidError::InvalidDevicePath => "invalid_device_path",
+        HidError::ConfigRpcUnsupported => "config_rpc_unsupported",
+        HidError::DeviceNotFound => "device_not_found",
+        HidError::ConfigRpcTimeout => "config_rpc_timeout",
+        HidError::ConfigRpcStatus(status) => match status {
+            ConfigStatus::Ok => "config_rpc_status_ok",
+            ConfigStatus::BadPacket => "config_rpc_status_bad_packet",
+            ConfigStatus::UnsupportedFeature => "config_rpc_status_unsupported_feature",
+            ConfigStatus::UnsupportedOp => "config_rpc_status_unsupported_op",
+            ConfigStatus::InvalidArgument => "config_rpc_status_invalid_argument",
+            ConfigStatus::Busy => "config_rpc_status_busy",
+            ConfigStatus::NotFound => "config_rpc_status_not_found",
+            ConfigStatus::StorageError => "config_rpc_status_storage_error",
+            ConfigStatus::InternalError => "config_rpc_status_internal_error",
+        },
+        HidError::ConfigRpcMissingPayload => "config_rpc_missing_payload",
+    }
+    .to_string()
+}
+
+fn encoder_resolve_error_code(error: EncoderResolveError) -> String {
+    match error {
+        EncoderResolveError::Ineligible => "encoder_behavior_ineligible".to_string(),
+        EncoderResolveError::UnsupportedByFirmware => {
+            "encoder_behavior_unsupported_by_firmware".to_string()
+        }
+        EncoderResolveError::Studio(err) => studio_error_code(err),
+    }
+}
+
+/// Parses the `device_uid_hash` string the UI already carries (see
+/// `ui/src/lib/deviceCards.ts` `uidStringsMatch`), e.g. `"uid:7a91c3e4d102ab55"`.
+fn parse_host_link_uid(value: &str) -> Result<u64, String> {
+    let hex = value.strip_prefix("uid:").unwrap_or(value);
+    u64::from_str_radix(hex, 16).map_err(|_| "invalid_host_link_uid".to_string())
+}
+
+fn host_link_reply_timeout(config: &AppConfig) -> Duration {
+    let rpc_budget = config.hid.hello_timeout_ms.max(1) as u64 * 2 + 1_000;
+    Duration::from_millis(rpc_budget.max(5_000))
+}
+
+fn host_link_call(
+    tx: &mpsc::Sender<MonitorCommand>,
+    timeout: Duration,
+    uid: u64,
+    request: HostLinkRequest,
+) -> Result<HostLinkResponse, String> {
+    let (reply, receiver) = mpsc::channel();
+    tx.send(MonitorCommand::Config(HostLinkCall {
+        uid,
+        request,
+        deadline: Instant::now() + timeout,
+        reply,
+    }))
+    .map_err(|_| "hostlink_worker_unavailable".to_string())?;
+    receiver
+        .recv_timeout(timeout)
+        .map_err(|_| "hostlink_result_unknown".to_string())?
+}
+
+fn host_link_sender(state: &AppState) -> Result<mpsc::Sender<MonitorCommand>, String> {
+    state
+        .monitor_tx
+        .lock()
+        .unwrap()
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| "hostlink_worker_unavailable".to_string())
+}
+
+fn encoder_binding_dto(
+    binding: EncoderBinding,
+    label: Option<StudioBindingLabelPatch>,
+) -> EncoderBindingDto {
+    EncoderBindingDto {
+        behavior_id: binding.behavior_id,
+        param1: binding.param1,
+        param2: binding.param2,
+        label,
+    }
+}
+
+/// Labels CW/CCW bindings for passive display (viewing, not editing). Reuses an
+/// already-open edit session for this device if one exists; otherwise opens a
+/// short-lived Studio RPC connection just for the label lookup, exactly like
+/// `read_studio_keymap` falls back to `read_keymap_for_device` when not editing.
+/// Encoder display must work without entering edit mode.
+fn label_encoder_bindings_for_device(
+    device_id: &str,
+    edit: &Arc<Mutex<Option<StudioEditSession>>>,
+    studio_config: &rawhid_host_core::config::StudioConfig,
+    source: EncoderBindingSource,
+    cw: EncoderBinding,
+    ccw: EncoderBinding,
+    timeout: Duration,
+) -> Result<[Option<StudioBindingLabelPatch>; 2], String> {
+    if source == EncoderBindingSource::Keymap {
+        return Ok([None, None]);
+    }
+    let raw = vec![
+        StudioRawBinding {
+            behavior_id: i32::from(cw.behavior_id),
+            param1: cw.param1,
+            param2: cw.param2,
+        },
+        StudioRawBinding {
+            behavior_id: i32::from(ccw.behavior_id),
+            param1: ccw.param1,
+            param2: ccw.param2,
+        },
+    ];
+    let patches = {
+        let mut guard = edit.lock().unwrap();
+        match guard.as_mut() {
+            Some(session) if session.device_id == device_id => {
+                session.resolve_behavior_labels(raw, timeout)
+            }
+            _ => {
+                drop(guard);
+                resolve_behavior_labels_for_device(device_id, raw, studio_config)
+            }
+        }
+    }
+    .map_err(studio_error_code)?;
+    let mut patches = patches.into_iter();
+    Ok([patches.next(), patches.next()])
+}
+
+fn label_encoder_bindings_batch_for_device(
+    device_id: &str,
+    edit: &Arc<Mutex<Option<StudioEditSession>>>,
+    studio_config: &rawhid_host_core::config::StudioConfig,
+    bindings: &[EncoderGetBindings],
+    timeout: Duration,
+) -> Result<Vec<[Option<StudioBindingLabelPatch>; 2]>, String> {
+    let raw: Vec<StudioRawBinding> = bindings
+        .iter()
+        .filter(|binding| binding.source == EncoderBindingSource::Override)
+        .flat_map(|binding| {
+            [binding.cw_binding, binding.ccw_binding].map(|side| StudioRawBinding {
+                behavior_id: i32::from(side.behavior_id),
+                param1: side.param1,
+                param2: side.param2,
+            })
+        })
+        .collect();
+    let patches = if raw.is_empty() {
+        Vec::new()
+    } else {
+        let mut guard = edit.lock().unwrap();
+        match guard.as_mut() {
+            Some(session) if session.device_id == device_id => {
+                session.resolve_behavior_labels(raw, timeout)
+            }
+            _ => {
+                drop(guard);
+                resolve_behavior_labels_for_device(device_id, raw, studio_config)
+            }
+        }
+        .map_err(studio_error_code)?
+    };
+    let mut patches = patches.into_iter();
+    Ok(bindings
+        .iter()
+        .map(|binding| {
+            if binding.source == EncoderBindingSource::Keymap {
+                [None, None]
+            } else {
+                [patches.next(), patches.next()]
+            }
+        })
+        .collect())
+}
+
+fn encoder_bindings_dto_from(
+    bindings: EncoderGetBindings,
+    labels: [Option<StudioBindingLabelPatch>; 2],
+) -> EncoderBindingsDto {
+    let [cw_label, ccw_label] = labels;
+    EncoderBindingsDto {
+        layer_id: bindings.layer_id,
+        encoder_id: bindings.encoder_id,
+        source: match bindings.source {
+            EncoderBindingSource::Keymap => "keymap".to_string(),
+            EncoderBindingSource::Override => "override".to_string(),
+        },
+        stale_saved_exists: bindings.flags.bits() & EncoderBindingFlags::STALE_SAVED_EXISTS != 0,
+        saved_exists: bindings.flags.bits() & EncoderBindingFlags::SAVED_EXISTS != 0,
+        runtime_dirty: bindings.flags.bits() & EncoderBindingFlags::RUNTIME_DIRTY != 0,
+        invalid_saved_exists: bindings.flags.bits() & EncoderBindingFlags::INVALID_SAVED_EXISTS
+            != 0,
+        cw: encoder_binding_dto(bindings.cw_binding, cw_label),
+        ccw: encoder_binding_dto(bindings.ccw_binding, ccw_label),
+    }
+}
+
+/// Labels CW/CCW bindings by routing them through the same `StudioRawBinding` label
+/// pipeline used for normal keys, so encoder overrides render with identical text.
+/// Returns `[None, None]` for `source == Keymap`, since that state must never reveal
+/// the underlying `.keymap` binding to the UI.
+fn label_encoder_bindings(
+    session: &mut StudioEditSession,
+    source: EncoderBindingSource,
+    cw: EncoderBinding,
+    ccw: EncoderBinding,
+    timeout: Duration,
+) -> Result<[Option<StudioBindingLabelPatch>; 2], String> {
+    if source == EncoderBindingSource::Keymap {
+        return Ok([None, None]);
+    }
+    let raw = vec![
+        StudioRawBinding {
+            behavior_id: i32::from(cw.behavior_id),
+            param1: cw.param1,
+            param2: cw.param2,
+        },
+        StudioRawBinding {
+            behavior_id: i32::from(ccw.behavior_id),
+            param1: ccw.param1,
+            param2: ccw.param2,
+        },
+    ];
+    let mut patches = session
+        .resolve_behavior_labels(raw, timeout)
+        .map_err(studio_error_code)?
+        .into_iter();
+    Ok([patches.next(), patches.next()])
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct EncoderInfoDto {
+    pub layer_count: u8,
+    pub encoder_count: u8,
+    pub capabilities: u8,
+}
+
+#[tauri::command]
+pub async fn read_encoder_info(
+    host_link_uid: String,
+    state: State<'_, AppState>,
+) -> Result<EncoderInfoDto, String> {
+    let target_uid = parse_host_link_uid(&host_link_uid)?;
+    let tx = host_link_sender(state.inner())?;
+    let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+    tauri::async_runtime::spawn_blocking(move || {
+        let info = match host_link_call(&tx, timeout, target_uid, HostLinkRequest::EncoderGetInfo)?
+        {
+            HostLinkResponse::EncoderInfo(info) => info,
+            _ => return Err("hostlink_invalid_response".to_string()),
+        };
+        Ok(EncoderInfoDto {
+            layer_count: info.layer_count,
+            encoder_count: info.encoder_count,
+            capabilities: info.capabilities,
+        })
+    })
+    .await
+    .map_err(|_| "read_encoder_info_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn read_encoder_bindings(
+    device_id: String,
+    host_link_uid: String,
+    layer_id: u32,
+    encoder_id: u8,
+    state: State<'_, AppState>,
+) -> Result<EncoderBindingsDto, String> {
+    let target_uid = parse_host_link_uid(&host_link_uid)?;
+    let tx = host_link_sender(state.inner())?;
+    let host_link_timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+    let studio_timeout = Duration::from_millis(
+        state
+            .config
+            .lock()
+            .unwrap()
+            .studio
+            .keymap_read_timeout_ms
+            .max(1),
+    );
+    let studio_config = state.config.lock().unwrap().studio.clone();
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        let bindings = match host_link_call(
+            &tx,
+            host_link_timeout,
+            target_uid,
+            HostLinkRequest::EncoderGetBindings {
+                layer_id,
+                encoder_id,
+            },
+        )? {
+            HostLinkResponse::EncoderBindings(bindings) => bindings,
+            _ => return Err("hostlink_invalid_response".to_string()),
+        };
+
+        let [cw_label, ccw_label] = label_encoder_bindings_for_device(
+            &device_id,
+            &edit,
+            &studio_config,
+            bindings.source,
+            bindings.cw_binding,
+            bindings.ccw_binding,
+            studio_timeout,
+        )?;
+
+        Ok(encoder_bindings_dto_from(bindings, [cw_label, ccw_label]))
+    })
+    .await
+    .map_err(|_| "read_encoder_bindings_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn read_encoder_layer_bindings(
+    device_id: String,
+    host_link_uid: String,
+    layer_id: u32,
+    encoder_count: u8,
+    state: State<'_, AppState>,
+) -> Result<Vec<EncoderBindingsDto>, String> {
+    let target_uid = parse_host_link_uid(&host_link_uid)?;
+    let tx = host_link_sender(state.inner())?;
+    let host_link_timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+    let studio_config = state.config.lock().unwrap().studio.clone();
+    let studio_timeout = Duration::from_millis(studio_config.keymap_read_timeout_ms.max(1));
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut bindings = Vec::with_capacity(usize::from(encoder_count));
+        for encoder_id in 0..encoder_count {
+            let binding = match host_link_call(
+                &tx,
+                host_link_timeout,
+                target_uid,
+                HostLinkRequest::EncoderGetBindings {
+                    layer_id,
+                    encoder_id,
+                },
+            )? {
+                HostLinkResponse::EncoderBindings(binding) => binding,
+                _ => return Err("hostlink_invalid_response".to_string()),
+            };
+            bindings.push(binding);
+        }
+        let labels = label_encoder_bindings_batch_for_device(
+            &device_id,
+            &edit,
+            &studio_config,
+            &bindings,
+            studio_timeout,
+        )?;
+        Ok(bindings
+            .into_iter()
+            .zip(labels)
+            .map(|(binding, labels)| encoder_bindings_dto_from(binding, labels))
+            .collect())
+    })
+    .await
+    .map_err(|_| "read_encoder_bindings_failed".to_string())?
+}
+
+/// `cw` / `ccw` may each be omitted; an omitted side keeps the current runtime
+/// override binding unchanged. Omitting a side is only valid while the target
+/// encoder already has a runtime override (`source == override`): during the
+/// first edit of a `source == keymap` encoder both sides must be sent together,
+/// because the host must never fabricate a binding the user did not choose
+/// (see keymap-encoder-editing-plan.md).
+#[tauri::command]
+pub async fn studio_set_encoder_bindings(
+    device_id: String,
+    host_link_uid: String,
+    layer_id: u32,
+    encoder_id: u8,
+    cw: Option<EditBehaviorDto>,
+    ccw: Option<EditBehaviorDto>,
+    state: State<'_, AppState>,
+) -> Result<EncoderBindingsDto, String> {
+    let target_uid = parse_host_link_uid(&host_link_uid)?;
+    let tx = host_link_sender(state.inner())?;
+    let host_link_timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+    let studio_timeout = Duration::from_millis(
+        state
+            .config
+            .lock()
+            .unwrap()
+            .studio
+            .keymap_read_timeout_ms
+            .max(1),
+    );
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        let resolve_side = |dto: EditBehaviorDto| -> Result<EncoderBinding, String> {
+            let mut guard = edit.lock().unwrap();
+            let session = guard
+                .as_mut()
+                .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+            if session.device_id != device_id {
+                return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+            }
+            session
+                .resolve_encoder_binding(&EditBehavior::from(dto))
+                .map_err(encoder_resolve_error_code)
+        };
+        let cw_resolved = cw.map(&resolve_side).transpose()?;
+        let ccw_resolved = ccw.map(&resolve_side).transpose()?;
+
+        let (cw_binding, ccw_binding) = match (cw_resolved, ccw_resolved) {
+            (Some(cw_binding), Some(ccw_binding)) => (cw_binding, ccw_binding),
+            (None, None) => return Err("encoder_bindings_incomplete".to_string()),
+            (cw_resolved, ccw_resolved) => {
+                let current = match host_link_call(
+                    &tx,
+                    host_link_timeout,
+                    target_uid,
+                    HostLinkRequest::EncoderGetBindings {
+                        layer_id,
+                        encoder_id,
+                    },
+                )? {
+                    HostLinkResponse::EncoderBindings(bindings) => bindings,
+                    _ => return Err("hostlink_invalid_response".to_string()),
+                };
+                if current.source != EncoderBindingSource::Override {
+                    return Err("encoder_bindings_incomplete".to_string());
+                }
+                (
+                    cw_resolved.unwrap_or(current.cw_binding),
+                    ccw_resolved.unwrap_or(current.ccw_binding),
+                )
+            }
+        };
+        match host_link_call(
+            &tx,
+            host_link_timeout,
+            target_uid,
+            HostLinkRequest::EncoderSetBindings {
+                layer_id,
+                encoder_id,
+                cw: cw_binding,
+                ccw: ccw_binding,
+            },
+        )? {
+            HostLinkResponse::Done => {}
+            _ => return Err("hostlink_invalid_response".to_string()),
+        }
+        let bindings = match host_link_call(
+            &tx,
+            host_link_timeout,
+            target_uid,
+            HostLinkRequest::EncoderGetBindings {
+                layer_id,
+                encoder_id,
+            },
+        )? {
+            HostLinkResponse::EncoderBindings(bindings) => bindings,
+            _ => return Err("hostlink_invalid_response".to_string()),
+        };
+
+        let mut guard = edit.lock().unwrap();
+        let session = guard
+            .as_mut()
+            .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+        let [cw_label, ccw_label] = label_encoder_bindings(
+            session,
+            bindings.source,
+            bindings.cw_binding,
+            bindings.ccw_binding,
+            studio_timeout,
+        )?;
+
+        Ok(EncoderBindingsDto {
+            layer_id: bindings.layer_id,
+            encoder_id: bindings.encoder_id,
+            source: match bindings.source {
+                EncoderBindingSource::Keymap => "keymap".to_string(),
+                EncoderBindingSource::Override => "override".to_string(),
+            },
+            stale_saved_exists: bindings.flags.bits() & EncoderBindingFlags::STALE_SAVED_EXISTS
+                != 0,
+            saved_exists: bindings.flags.bits() & EncoderBindingFlags::SAVED_EXISTS != 0,
+            runtime_dirty: bindings.flags.bits() & EncoderBindingFlags::RUNTIME_DIRTY != 0,
+            invalid_saved_exists: bindings.flags.bits() & EncoderBindingFlags::INVALID_SAVED_EXISTS
+                != 0,
+            cw: encoder_binding_dto(bindings.cw_binding, cw_label),
+            ccw: encoder_binding_dto(bindings.ccw_binding, ccw_label),
+        })
+    })
+    .await
+    .map_err(|_| "studio_set_encoder_bindings_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_encoder_has_unsaved(
+    host_link_uid: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let target_uid = parse_host_link_uid(&host_link_uid)?;
+    let tx = host_link_sender(state.inner())?;
+    let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+    tauri::async_runtime::spawn_blocking(move || {
+        match host_link_call(&tx, timeout, target_uid, HostLinkRequest::EncoderGetDirty)? {
+            HostLinkResponse::Dirty(dirty) => Ok(dirty),
+            _ => Err("hostlink_invalid_response".to_string()),
+        }
+    })
+    .await
+    .map_err(|_| "studio_encoder_has_unsaved_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_encoder_save(
+    host_link_uid: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let target_uid = parse_host_link_uid(&host_link_uid)?;
+    let tx = host_link_sender(state.inner())?;
+    let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+    tauri::async_runtime::spawn_blocking(move || {
+        match host_link_call(&tx, timeout, target_uid, HostLinkRequest::EncoderSave)? {
+            HostLinkResponse::Done => Ok(()),
+            _ => Err("hostlink_invalid_response".to_string()),
+        }
+    })
+    .await
+    .map_err(|_| "studio_encoder_save_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_encoder_discard(
+    host_link_uid: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let target_uid = parse_host_link_uid(&host_link_uid)?;
+    let tx = host_link_sender(state.inner())?;
+    let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+    tauri::async_runtime::spawn_blocking(move || {
+        match host_link_call(&tx, timeout, target_uid, HostLinkRequest::EncoderDiscard)? {
+            HostLinkResponse::Done => Ok(()),
+            _ => Err("hostlink_invalid_response".to_string()),
+        }
+    })
+    .await
+    .map_err(|_| "studio_encoder_discard_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_encoder_clear_override(
+    host_link_uid: String,
+    layer_id: u32,
+    encoder_id: u8,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let target_uid = parse_host_link_uid(&host_link_uid)?;
+    let tx = host_link_sender(state.inner())?;
+    let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+    tauri::async_runtime::spawn_blocking(move || {
+        match host_link_call(
+            &tx,
+            timeout,
+            target_uid,
+            HostLinkRequest::EncoderClearOverride {
+                layer_id,
+                encoder_id,
+            },
+        )? {
+            HostLinkResponse::Done => Ok(()),
+            _ => Err("hostlink_invalid_response".to_string()),
+        }
+    })
+    .await
+    .map_err(|_| "studio_encoder_clear_override_failed".to_string())?
 }
 
 #[tauri::command]
@@ -953,16 +2495,27 @@ pub fn start_monitoring(app: AppHandle, state: State<AppState>) -> Result<(), St
 /// Shared monitoring-start logic, callable from the command, the tray menu, and
 /// the auto-start-on-launch path.
 pub fn begin_monitoring(app: AppHandle, state: &AppState) -> Result<(), String> {
-    let already_running = state.stop_tx.lock().unwrap().is_some();
-    if already_running {
+    let _ = app;
+    if state.status.lock().unwrap().running {
         return Err("Already monitoring".to_string());
     }
+    set_automation_enabled(state, true)
+}
 
+/// Starts the single Host Link owner for the lifetime of the application.
+pub fn start_host_link_worker(
+    app: AppHandle,
+    state: &AppState,
+    automation_enabled: bool,
+) -> Result<(), String> {
+    if state.monitor_tx.lock().unwrap().is_some() {
+        return Ok(());
+    }
     let config = state.config.lock().unwrap().clone();
     let status = Arc::clone(&state.status);
     let log_entries = Arc::clone(&state.log_entries);
     let log_counter = Arc::clone(&state.log_counter);
-    let stop_tx_arc = Arc::clone(&state.stop_tx);
+    let monitor_tx_arc = Arc::clone(&state.monitor_tx);
     let ai_usage_shared = state
         .ai_usage_runtime
         .lock()
@@ -978,7 +2531,7 @@ pub fn begin_monitoring(app: AppHandle, state: &AppState) -> Result<(), String> 
 
     let (tx, rx) = mpsc::channel();
     let watcher_tx = tx.clone();
-    *stop_tx_arc.lock().unwrap() = Some(tx);
+    *monitor_tx_arc.lock().unwrap() = Some(tx);
 
     thread::spawn(move || {
         // The foreground watcher delivers instant wake-ups; polling stays as a
@@ -993,8 +2546,9 @@ pub fn begin_monitoring(app: AppHandle, state: &AppState) -> Result<(), String> 
             rx,
             ai_usage_shared,
             extras,
+            automation_enabled,
         );
-        *stop_tx_arc.lock().unwrap() = None;
+        *monitor_tx_arc.lock().unwrap() = None;
     });
 
     Ok(())
@@ -1007,13 +2561,32 @@ pub fn stop_monitoring(state: State<AppState>) -> Result<(), String> {
 
 /// Shared monitoring-stop logic, callable from the command and the tray menu.
 pub fn stop_monitoring_internal(state: &AppState) -> Result<(), String> {
-    let tx = state.stop_tx.lock().unwrap().take();
-    match tx {
-        Some(tx) => {
-            let _ = tx.send(MonitorCommand::Stop);
-            Ok(())
-        }
-        None => Err("Not monitoring".to_string()),
+    if !state.status.lock().unwrap().running {
+        return Err("Not monitoring".to_string());
+    }
+    set_automation_enabled(state, false)
+}
+
+fn set_automation_enabled(state: &AppState, enabled: bool) -> Result<(), String> {
+    let tx = state
+        .monitor_tx
+        .lock()
+        .unwrap()
+        .as_ref()
+        .cloned()
+        .ok_or_else(|| "hostlink_worker_unavailable".to_string())?;
+    let (reply_tx, reply_rx) = mpsc::channel();
+    tx.send(MonitorCommand::SetAutomationEnabled(enabled, reply_tx))
+        .map_err(|_| "hostlink_worker_unavailable".to_string())?;
+    let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+    reply_rx
+        .recv_timeout(timeout)
+        .map_err(|_| "hostlink_result_unknown".to_string())?
+}
+
+pub fn shutdown_host_link_worker(state: &AppState) {
+    if let Some(tx) = state.monitor_tx.lock().unwrap().take() {
+        let _ = tx.send(MonitorCommand::Shutdown);
     }
 }
 
@@ -1214,7 +2787,7 @@ fn apply_monitor_config(
             next_config.stats.flush_interval_sec.max(1),
         ));
     }
-    *runner = rebuild_runner(&next_config, ai_usage_shared)?;
+    runner.update_config(next_config.clone(), ai_usage_shared);
     runner.set_key_stats_store(Arc::clone(&extras.key_stats));
     *interval = Duration::from_millis(next_config.polling.interval_ms.max(1));
     *uplink_interval = Duration::from_millis(next_config.polling.uplink_interval_ms.max(5));
@@ -1246,9 +2819,57 @@ fn process_command(
     log_counter: &Arc<std::sync::Mutex<u64>>,
     extras: &MonitorExtras,
     actions_cfg: &mut ActionsConfig,
+    automation_enabled: &mut bool,
 ) -> bool {
     match command {
-        MonitorCommand::Stop => true,
+        MonitorCommand::Shutdown => true,
+        MonitorCommand::SetAutomationEnabled(enabled, reply) => {
+            *automation_enabled = enabled;
+            let mut s = status.lock().unwrap();
+            s.running = enabled;
+            if !enabled {
+                s.current_layer = None;
+                s.current_rule = None;
+            }
+            emit_status(app, &s);
+            let _ = reply.send(Ok(()));
+            false
+        }
+        MonitorCommand::Probe(reply) => {
+            let result = runner.probe_host_link_devices().map_err(hid_error_code);
+            let _ = reply.send(result);
+            false
+        }
+        MonitorCommand::Config(call) => {
+            let result = if Instant::now() >= call.deadline {
+                Err("hostlink_result_unknown".to_string())
+            } else {
+                execute_host_link_request(runner, call.uid, call.request)
+            };
+            let _ = call.reply.send(result);
+            if *automation_enabled {
+                runner.drain_uplink_only();
+                if handle_uplink_events(
+                    app,
+                    runner,
+                    actions_cfg,
+                    extras,
+                    status,
+                    log_entries,
+                    log_counter,
+                ) {
+                    *automation_enabled = false;
+                    let mut s = status.lock().unwrap();
+                    s.running = false;
+                    s.current_layer = None;
+                    s.current_rule = None;
+                    emit_status(app, &s);
+                }
+            } else {
+                runner.discard_uplink_only();
+            }
+            false
+        }
         MonitorCommand::ForegroundChanged => false,
         MonitorCommand::InjectUplink(device, packet) => {
             runner.inject_uplink(device, packet);
@@ -1278,6 +2899,48 @@ fn process_command(
             false
         }
     }
+}
+
+fn execute_host_link_request(
+    runner: &mut MonitorRunner,
+    uid: u64,
+    request: HostLinkRequest,
+) -> Result<HostLinkResponse, String> {
+    match request {
+        HostLinkRequest::EncoderGetInfo => runner
+            .config_get_encoder_info(uid)
+            .map(HostLinkResponse::EncoderInfo),
+        HostLinkRequest::EncoderGetBindings {
+            layer_id,
+            encoder_id,
+        } => runner
+            .config_get_encoder_bindings(uid, layer_id, encoder_id)
+            .map(HostLinkResponse::EncoderBindings),
+        HostLinkRequest::EncoderSetBindings {
+            layer_id,
+            encoder_id,
+            cw,
+            ccw,
+        } => runner
+            .config_set_encoder_bindings(uid, layer_id, encoder_id, cw, ccw)
+            .map(|()| HostLinkResponse::Done),
+        HostLinkRequest::EncoderGetDirty => runner
+            .config_get_encoder_dirty(uid)
+            .map(HostLinkResponse::Dirty),
+        HostLinkRequest::EncoderSave => runner
+            .config_save_encoder(uid)
+            .map(|()| HostLinkResponse::Done),
+        HostLinkRequest::EncoderDiscard => runner
+            .config_discard_encoder(uid)
+            .map(|()| HostLinkResponse::Done),
+        HostLinkRequest::EncoderClearOverride {
+            layer_id,
+            encoder_id,
+        } => runner
+            .config_clear_encoder_override(uid, layer_id, encoder_id)
+            .map(|()| HostLinkResponse::Done),
+    }
+    .map_err(hid_error_code)
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1385,39 +3048,77 @@ fn handle_uplink_events(
 #[allow(clippy::too_many_arguments)]
 fn run_monitor_loop(
     app: AppHandle,
-    config: AppConfig,
+    mut config: AppConfig,
     status: Arc<std::sync::Mutex<MonitorStatus>>,
     log_entries: Arc<std::sync::Mutex<std::collections::VecDeque<LogEntry>>>,
     log_counter: Arc<std::sync::Mutex<u64>>,
     rx: mpsc::Receiver<MonitorCommand>,
-    ai_usage_shared: Option<AiUsageShared>,
+    mut ai_usage_shared: Option<AiUsageShared>,
     extras: MonitorExtras,
+    mut automation_enabled: bool,
 ) {
-    let mut actions_cfg = config.actions.clone();
-    let mut runner = match rebuild_runner(&config, ai_usage_shared) {
-        Ok(runner) => runner,
-        Err(e) => {
-            let msg = format!("HID init error: {}", e);
-            let entry = add_log(&log_entries, &log_counter, "error", &msg);
-            {
-                let mut s = status.lock().unwrap();
-                s.last_error = Some(msg);
-                emit_status(&app, &s);
+    let mut init_error_logged = false;
+    let mut runner = loop {
+        match rebuild_runner(&config, ai_usage_shared.clone()) {
+            Ok(runner) => break runner,
+            Err(error) => {
+                if !init_error_logged {
+                    let msg = format!("HID init error: {error}");
+                    let entry = add_log(&log_entries, &log_counter, "error", &msg);
+                    {
+                        let mut s = status.lock().unwrap();
+                        s.running = automation_enabled;
+                        s.last_error = Some(msg);
+                        emit_status(&app, &s);
+                    }
+                    let _ = app.emit("log-added", entry);
+                    init_error_logged = true;
+                }
+                match rx.recv_timeout(Duration::from_secs(1)) {
+                    Ok(MonitorCommand::Shutdown) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return;
+                    }
+                    Ok(MonitorCommand::SetAutomationEnabled(enabled, reply)) => {
+                        automation_enabled = enabled;
+                        status.lock().unwrap().running = enabled;
+                        let _ = reply.send(Ok(()));
+                    }
+                    Ok(MonitorCommand::UpdateConfig(next, shared)) => {
+                        config = next;
+                        ai_usage_shared = shared;
+                        init_error_logged = false;
+                    }
+                    Ok(MonitorCommand::Probe(reply)) => {
+                        let _ = reply.send(Err("hostlink_worker_unavailable".to_string()));
+                    }
+                    Ok(MonitorCommand::Config(call)) => {
+                        let _ = call
+                            .reply
+                            .send(Err("hostlink_worker_unavailable".to_string()));
+                    }
+                    Ok(MonitorCommand::ForegroundChanged)
+                    | Ok(MonitorCommand::InjectUplink(_, _))
+                    | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
             }
-            let _ = app.emit("log-added", entry);
-            return;
         }
     };
+    let mut actions_cfg = config.actions.clone();
     runner.set_key_stats_store(Arc::clone(&extras.key_stats));
 
     {
         let mut s = status.lock().unwrap();
-        s.running = true;
+        s.running = automation_enabled;
         s.last_error = None;
         emit_status(&app, &s);
     }
 
-    let entry = add_log(&log_entries, &log_counter, "info", "Monitoring started");
+    let entry = add_log(
+        &log_entries,
+        &log_counter,
+        "info",
+        "Host Link worker started",
+    );
     let _ = app.emit("log-added", entry);
 
     let mut interval = Duration::from_millis(config.polling.interval_ms.max(1));
@@ -1439,6 +3140,7 @@ fn run_monitor_loop(
                         &log_counter,
                         &extras,
                         &mut actions_cfg,
+                        &mut automation_enabled,
                     ) {
                         should_stop = true;
                         break;
@@ -1455,66 +3157,90 @@ fn run_monitor_loop(
             break;
         }
 
-        match runner.tick() {
-            Ok(RunEvent::SetLayer { layer, rule_name }) => {
-                {
+        if automation_enabled {
+            match runner.tick() {
+                Ok(RunEvent::SetLayer { layer, rule_name }) => {
+                    {
+                        let mut s = status.lock().unwrap();
+                        s.current_layer = Some(layer);
+                        s.current_rule = Some(rule_name.clone());
+                        apply_runner_view(&mut s, &runner);
+                        s.last_error = None;
+                        emit_status(&app, &s);
+                    }
+                    let msg = format!("Switched to layer {} (rule: {})", layer, rule_name);
+                    let entry = add_log(&log_entries, &log_counter, "info", &msg);
+                    let _ = app.emit("log-added", entry);
+                }
+                Ok(RunEvent::Clear) => {
                     let mut s = status.lock().unwrap();
-                    s.current_layer = Some(layer);
-                    s.current_rule = Some(rule_name.clone());
+                    s.current_layer = None;
+                    s.current_rule = None;
                     apply_runner_view(&mut s, &runner);
+                    emit_status(&app, &s);
+                }
+                Ok(RunEvent::Unchanged) => {
+                    let devices = runner.verified_device_count();
+                    let host_link_devices = runner.verified_devices();
+                    let ai_usage = runner.ai_usage_statuses();
+                    let device_battery = runner.battery_statuses();
+                    let device_layers = runner.layer_states();
+                    let mut s = status.lock().unwrap();
+                    if s.connected_devices != devices
+                        || s.ai_usage != ai_usage
+                        || s.host_link_devices != host_link_devices
+                        || s.device_battery != device_battery
+                        || s.device_layers != device_layers
+                    {
+                        apply_runner_view(&mut s, &runner);
+                        emit_status(&app, &s);
+                    }
+                }
+                Err(e) => {
+                    let msg = format!("Error: {}", e);
+                    {
+                        let mut s = status.lock().unwrap();
+                        s.last_error = Some(msg.clone());
+                        emit_status(&app, &s);
+                    }
+                    let entry = add_log(&log_entries, &log_counter, "error", &msg);
+                    let _ = app.emit("log-added", entry);
+                }
+            }
+
+            if handle_uplink_events(
+                &app,
+                &mut runner,
+                &actions_cfg,
+                &extras,
+                &status,
+                &log_entries,
+                &log_counter,
+            ) {
+                automation_enabled = false;
+                let mut s = status.lock().unwrap();
+                s.running = false;
+                s.current_layer = None;
+                s.current_rule = None;
+                emit_status(&app, &s);
+            }
+        } else {
+            match runner.tick_transport_only() {
+                Ok(()) => {
+                    let mut s = status.lock().unwrap();
+                    apply_runner_view(&mut s, &runner);
+                    s.running = false;
+                    s.device_battery.clear();
+                    s.device_layers.clear();
                     s.last_error = None;
                     emit_status(&app, &s);
                 }
-                let msg = format!("Switched to layer {} (rule: {})", layer, rule_name);
-                let entry = add_log(&log_entries, &log_counter, "info", &msg);
-                let _ = app.emit("log-added", entry);
-            }
-            Ok(RunEvent::Clear) => {
-                let mut s = status.lock().unwrap();
-                s.current_layer = None;
-                s.current_rule = None;
-                apply_runner_view(&mut s, &runner);
-                emit_status(&app, &s);
-            }
-            Ok(RunEvent::Unchanged) => {
-                let devices = runner.verified_device_count();
-                let host_link_devices = runner.verified_devices();
-                let ai_usage = runner.ai_usage_statuses();
-                let device_battery = runner.battery_statuses();
-                let device_layers = runner.layer_states();
-                let mut s = status.lock().unwrap();
-                if s.connected_devices != devices
-                    || s.ai_usage != ai_usage
-                    || s.host_link_devices != host_link_devices
-                    || s.device_battery != device_battery
-                    || s.device_layers != device_layers
-                {
-                    apply_runner_view(&mut s, &runner);
-                    emit_status(&app, &s);
-                }
-            }
-            Err(e) => {
-                let msg = format!("Error: {}", e);
-                {
+                Err(error) => {
                     let mut s = status.lock().unwrap();
-                    s.last_error = Some(msg.clone());
+                    s.last_error = Some(format!("Error: {error}"));
                     emit_status(&app, &s);
                 }
-                let entry = add_log(&log_entries, &log_counter, "error", &msg);
-                let _ = app.emit("log-added", entry);
             }
-        }
-
-        if handle_uplink_events(
-            &app,
-            &mut runner,
-            &actions_cfg,
-            &extras,
-            &status,
-            &log_entries,
-            &log_counter,
-        ) {
-            break;
         }
 
         // Wait for the next control-loop tick, draining uplink every uplink_interval_ms.
@@ -1539,6 +3265,7 @@ fn run_monitor_loop(
                         &log_counter,
                         &extras,
                         &mut actions_cfg,
+                        &mut automation_enabled,
                     ) {
                         should_stop = true;
                     }
@@ -1550,18 +3277,27 @@ fn run_monitor_loop(
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
-            runner.drain_uplink_only();
-            if handle_uplink_events(
-                &app,
-                &mut runner,
-                &actions_cfg,
-                &extras,
-                &status,
-                &log_entries,
-                &log_counter,
-            ) {
-                should_stop = true;
-                break 'wait;
+            if automation_enabled {
+                runner.drain_uplink_only();
+                if handle_uplink_events(
+                    &app,
+                    &mut runner,
+                    &actions_cfg,
+                    &extras,
+                    &status,
+                    &log_entries,
+                    &log_counter,
+                ) {
+                    automation_enabled = false;
+                    let mut s = status.lock().unwrap();
+                    s.running = false;
+                    s.current_layer = None;
+                    s.current_rule = None;
+                    emit_status(&app, &s);
+                    break 'wait;
+                }
+            } else {
+                runner.discard_uplink_only();
             }
         }
         if should_stop {
@@ -1586,7 +3322,12 @@ fn run_monitor_loop(
         emit_status(&app, &s);
     }
 
-    let entry = add_log(&log_entries, &log_counter, "info", "Monitoring stopped");
+    let entry = add_log(
+        &log_entries,
+        &log_counter,
+        "info",
+        "Host Link worker stopped",
+    );
     let _ = app.emit("log-added", entry);
 }
 
@@ -1651,7 +3392,7 @@ pub fn debug_inject_uplink(
             capabilities: packet.required_capability(),
             device_uid_hash: uid,
         };
-        let tx = state.stop_tx.lock().unwrap();
+        let tx = state.monitor_tx.lock().unwrap();
         match tx.as_ref() {
             Some(tx) => tx
                 .send(MonitorCommand::InjectUplink(device, packet))
@@ -1706,6 +3447,29 @@ fn refresh_error_code(error: AiUsageRefreshError) -> String {
 mod tests {
     use super::*;
     use rawhid_host_core::runner::{DeviceBatterySource, DeviceBatteryStatus};
+
+    fn encoder_get_bindings(
+        source: EncoderBindingSource,
+        cw_param1: u32,
+        ccw_param1: u32,
+    ) -> EncoderGetBindings {
+        EncoderGetBindings {
+            layer_id: 10,
+            encoder_id: 0,
+            source,
+            flags: EncoderBindingFlags::default(),
+            cw_binding: EncoderBinding {
+                behavior_id: 1,
+                param1: cw_param1,
+                param2: 0,
+            },
+            ccw_binding: EncoderBinding {
+                behavior_id: 1,
+                param1: ccw_param1,
+                param2: 0,
+            },
+        }
+    }
 
     fn battery_status(sources: Vec<DeviceBatterySource>) -> MonitorStatus {
         let mut status = MonitorStatus::default();
@@ -1778,5 +3542,108 @@ mod tests {
             build_tray_tooltip(&status),
             "Keylink Studio\nTest Keyboard: C:92% P1:78% P2:76%"
         );
+    }
+
+    #[test]
+    fn failed_export_preparation_does_not_replace_destination() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "keylink-studio-export-{}-{}.json",
+            std::process::id(),
+            nonce
+        ));
+        std::fs::write(&path, "existing backup").unwrap();
+
+        let result = write_completed_keymap_export(
+            &path,
+            Err("config_rpc_status_storage_error".to_string()),
+        );
+
+        assert_eq!(result, Err("config_rpc_status_storage_error".to_string()));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "existing backup");
+        std::fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn config_errors_are_exposed_as_stable_codes() {
+        assert_eq!(
+            hid_error_code(HidError::ConfigRpcStatus(ConfigStatus::StorageError)),
+            "config_rpc_status_storage_error"
+        );
+        assert_eq!(
+            hid_error_code(HidError::ConfigRpcStatus(ConfigStatus::InvalidArgument)),
+            "config_rpc_status_invalid_argument"
+        );
+    }
+
+    #[test]
+    fn encoder_transport_setup_failure_is_a_structured_feature_result() {
+        let config = config_save_or_discard_from_feature(failed_encoder_feature(
+            "hostlink_worker_unavailable",
+        ));
+
+        assert!(config.attempted);
+        assert!(!config.skipped);
+        assert!(!config.success);
+        assert_eq!(config.results.len(), 1);
+        assert_eq!(
+            config.results[0].error.as_deref(),
+            Some("hostlink_worker_unavailable")
+        );
+    }
+
+    #[test]
+    fn encoder_import_discard_clears_override_and_verifies_keymap_baseline() {
+        let baseline = encoder_get_bindings(EncoderBindingSource::Keymap, 1, 2);
+        let imported = encoder_get_bindings(EncoderBindingSource::Override, 3, 4);
+        let (tx, rx) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let mut step = 0;
+            while let Ok(MonitorCommand::Config(call)) = rx.recv() {
+                let response = match (&call.request, step) {
+                    (HostLinkRequest::EncoderGetDirty, 0) => HostLinkResponse::Dirty(true),
+                    (HostLinkRequest::EncoderDiscard, 1) => HostLinkResponse::Done,
+                    (HostLinkRequest::EncoderGetBindings { .. }, 2) => {
+                        HostLinkResponse::EncoderBindings(imported)
+                    }
+                    (
+                        HostLinkRequest::EncoderClearOverride {
+                            layer_id,
+                            encoder_id,
+                        },
+                        3,
+                    ) => {
+                        assert_eq!((*layer_id, *encoder_id), (10, 0));
+                        HostLinkResponse::Done
+                    }
+                    (HostLinkRequest::EncoderSave, 4) => HostLinkResponse::Done,
+                    (HostLinkRequest::EncoderGetBindings { .. }, 5) => {
+                        HostLinkResponse::EncoderBindings(baseline)
+                    }
+                    _ => panic!("unexpected encoder rollback request at step {step}"),
+                };
+                call.reply.send(Ok(response)).unwrap();
+                step += 1;
+                if step == 6 {
+                    break;
+                }
+            }
+            assert_eq!(step, 6);
+        });
+
+        let result = run_encoder_discard_with_rollback(
+            tx,
+            Duration::from_secs(1),
+            "uid:00000000000000aa".to_string(),
+            BTreeMap::from([((10, 0), baseline)]),
+        );
+
+        assert!(result.success);
+        assert!(result.attempted);
+        assert!(!result.skipped);
+        worker.join().unwrap();
     }
 }

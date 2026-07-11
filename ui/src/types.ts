@@ -369,6 +369,11 @@ export interface RestoreChangedKey {
   position: number;
 }
 
+export interface RestoreChangedEncoder {
+  layer_index: number;
+  encoder_id: number;
+}
+
 export interface RestoreReport {
   can_apply: boolean;
   behavior_verification: BehaviorVerification;
@@ -380,6 +385,13 @@ export interface RestoreReport {
   changed_keys: RestoreChangedKey[];
   warnings: RestoreIssue[];
   errors: RestoreIssue[];
+  encoder_will_write: number;
+  encoder_unchanged_skipped: number;
+  encoder_blocked: number;
+  changed_encoders: RestoreChangedEncoder[];
+  apply_status: "preview" | "complete" | "partial";
+  applied_keys: RestoreChangedKey[];
+  applied_encoders: RestoreChangedEncoder[];
 }
 
 export type KeyCatalogCategory =
@@ -433,6 +445,76 @@ export type EditBehavior =
   | { kind: "bootloader" }
   | { kind: "studio_unlock" }
   | { kind: "grave_escape" };
+
+export interface EncoderInfoDto {
+  layer_count: number;
+  encoder_count: number;
+  capabilities: number;
+}
+
+export interface EncoderBindingDto {
+  behavior_id: number;
+  param1: number;
+  param2: number;
+  // Only populated when the parent EncoderBindingsDto.source is "override".
+  label: StudioBindingLabelPatch | null;
+}
+
+export interface EncoderBindingsDto {
+  layer_id: number;
+  encoder_id: number;
+  source: "keymap" | "override";
+  stale_saved_exists: boolean;
+  saved_exists: boolean;
+  runtime_dirty: boolean;
+  invalid_saved_exists: boolean;
+  cw: EncoderBindingDto;
+  ccw: EncoderBindingDto;
+}
+
+// Outcome of attempting a save-or-discard operation on a single target
+// (Studio RPC keys, or a Config RPC feature). `skipped` implies
+// `success: true`: there was nothing to do or no encoder target was part of
+// this edit session. A known dirty target that disconnected is a failure.
+export interface SaveOrDiscardTargetDto {
+  attempted: boolean;
+  skipped: boolean;
+  success: boolean;
+  error: string | null;
+}
+
+// Per-feature Config RPC result (currently only "ENCODER").
+export interface ConfigFeatureResultDto {
+  feature: string;
+  attempted: boolean;
+  skipped: boolean;
+  success: boolean;
+  error: string | null;
+}
+
+export interface ConfigSaveOrDiscardDto {
+  attempted: boolean;
+  skipped: boolean;
+  success: boolean;
+  results: ConfigFeatureResultDto[];
+}
+
+export interface SaveOrDiscardResultDto {
+  overall_success: boolean;
+  studio: SaveOrDiscardTargetDto;
+  config: ConfigSaveOrDiscardDto;
+}
+
+export interface DiscardChangesDto {
+  result: SaveOrDiscardResultDto;
+  // Present when the studio-side discard ran successfully (the re-read snapshot).
+  snapshot: StudioKeymapSnapshot | null;
+}
+
+export interface StudioResyncEditStateDto {
+  snapshot: StudioKeymapSnapshot;
+  has_unsaved: boolean;
+}
 
 export interface EditState {
   mode: "viewing" | "editing";

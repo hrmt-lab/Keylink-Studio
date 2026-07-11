@@ -5,13 +5,15 @@ import {
   getKeyStats,
   onKeyPressEvent,
   onKeyStatsUpdated,
+  readEncoderLayerBindings,
+  readEncoderInfo,
   readStudioKeymap,
   resolveStudioBehaviorLabels,
   studioAddLayer,
-  studioAbortEdit,
   studioApplyKeymapRestore,
   studioBeginEdit,
   studioDiscardChanges,
+  studioEncoderHasUnsaved,
   studioEndEdit,
   studioExportKeymap,
   studioHasUnsaved,
@@ -19,7 +21,9 @@ import {
   studioPreviewKeymapRestore,
   studioRemoveLayer,
   studioRenameLayer,
+  studioResyncEditState,
   studioSaveChanges,
+  studioSetEncoderBindings,
   studioSetKey,
 } from "../api";
 import { KeymapCanvas } from "../components/KeymapCanvas";
@@ -28,13 +32,16 @@ import { useLang, type TranslationKey } from "../i18n";
 import type {
   DeviceInfo,
   DeviceLayerState,
+  DiscardChangesDto,
   KeyPressEvent,
   EditBehavior,
   EditState,
+  EncoderBindingsDto,
   KeyCatalogEntry,
   KeyStatsSummary,
   MonitorStatus,
   RestoreReport,
+  SaveOrDiscardResultDto,
   StatsPeriod,
   StudioBinding,
   StudioBindingLabelPatch,
@@ -44,6 +51,9 @@ import type {
   StudioPhysicalKey,
   StudioRawBinding,
 } from "../types";
+
+// Config RPC (Host Link DEVICE_HELLO capability bit); see packet::CAPABILITY_CONFIG_RPC.
+const CONFIG_RPC_CAPABILITY = 1 << 9;
 
 interface KeymapViewerProps {
   studioDevices: StudioDeviceStatus[];
@@ -65,6 +75,10 @@ interface PendingKeyWrite {
   previousSnapshot: StudioKeymapSnapshot | null;
 }
 
+type PickerRect = { left: number; top: number; width: number; height: number };
+type EncoderLoadState = "loading" | "available" | "unsupported" | "error";
+type EncoderDirection = "cw" | "ccw";
+
 interface KeymapNavigationGuard {
   hasUnsaved: () => Promise<boolean>;
   canLeave: () => boolean;
@@ -74,6 +88,21 @@ interface KeymapNavigationGuard {
 
 function changedKeyId(layerIndex: number, position: number): string {
   return `${layerIndex}:${position}`;
+}
+
+function encoderTileId(layerId: number, encoderId: number): string {
+  return `${layerId}:${encoderId}`;
+}
+
+function encoderSideEquals(a: EncoderBindingsDto[EncoderDirection], b: EncoderBindingsDto[EncoderDirection]): boolean {
+  return a.behavior_id === b.behavior_id && a.param1 === b.param1 && a.param2 === b.param2;
+}
+
+function encoderBindingDiffers(current: EncoderBindingsDto, baseline: EncoderBindingsDto): boolean {
+  if (baseline.source === "keymap") {
+    return current.source !== "keymap" || current.runtime_dirty;
+  }
+  return !encoderSideEquals(current.cw, baseline.cw) || !encoderSideEquals(current.ccw, baseline.ccw);
 }
 
 /** Case-insensitive serial match between a Studio device and Host Link data. */
@@ -129,6 +158,23 @@ function findDeviceLayerForStudio(
     return product !== null && names.has(product);
   });
   return productMatches.length === 1 ? productMatches[0] : null;
+}
+
+/**
+ * Strict UID-only match between a Studio device and a Host Link device. Unlike
+ * `findHostLinkDeviceForStudio` (used for read-only stats, with serial/name
+ * fallbacks), write-capable features (encoder Config RPC) must never bind to
+ * the wrong physical device, so only an exact device_uid_hash match qualifies.
+ */
+function findHostLinkDeviceForStudioStrict(
+  devices: DeviceInfo[],
+  studioDevice: StudioDeviceStatus
+): DeviceInfo | null {
+  return (
+    devices.find((device) =>
+      uidStringsMatch(device.device_uid_hash, studioDevice.serial_number)
+    ) ?? null
+  );
 }
 
 function findHostLinkDeviceForStudio(
@@ -474,18 +520,37 @@ export default function KeymapViewer({
   const [restoreNotice, setRestoreNotice] = useState<"no_targets" | null>(null);
   const [changedKeys, setChangedKeys] = useState<Set<string>>(() => new Set());
   const [flashKeys, setFlashKeys] = useState<Map<string, number>>(() => new Map());
+  const [flashEncoderTiles, setFlashEncoderTiles] = useState<Map<string, number>>(() => new Map());
   const [catalog, setCatalog] = useState<KeyCatalogEntry[]>([]);
   const [pendingKeyWrites, setPendingKeyWrites] = useState(0);
   const [keyWriteErrorCode, setKeyWriteErrorCode] = useState<string | null>(null);
   const [picker, setPicker] = useState<{
     key: StudioPhysicalKey;
     layer: StudioLayer;
-    rect: { left: number; top: number; width: number; height: number };
+    rect: PickerRect;
   } | null>(null);
+  const [encoderPanel, setEncoderPanel] = useState<{ encoderId: number; rect: PickerRect } | null>(null);
+  const [pendingEncoderWrites, setPendingEncoderWrites] = useState(0);
+  const [encoderDirtyByUid, setEncoderDirtyByUid] = useState<Record<string, boolean>>({});
+  const [editHostLinkUid, setEditHostLinkUid] = useState<string | null>(null);
+  const [encoderWriteErrorCode, setEncoderWriteErrorCode] = useState<string | null>(null);
+  const [encoderRefreshNonce, setEncoderRefreshNonce] = useState(0);
+  const [encoderLoadState, setEncoderLoadState] = useState<EncoderLoadState>("unsupported");
+  const [changedEncoderTiles, setChangedEncoderTiles] = useState<Set<string>>(() => new Set());
   const behaviorResolveKeysRef = useRef<Set<string>>(new Set());
   const latestKeyWriteSnapshotRef = useRef<StudioKeymapSnapshot | null>(null);
   const keyWriteQueueRef = useRef<PendingKeyWrite[]>([]);
   const keyWriteActiveRef = useRef(false);
+  // Preserve UI request order. The Rust Host Link worker also serializes all
+  // HID traffic and owns the persistent Config RPC sequence.
+  const configRpcChainRef = useRef<Promise<void>>(Promise.resolve());
+  const encoderInfoGenerationRef = useRef(0);
+  const encoderRequestGenerationRef = useRef(0);
+  const encoderBindingsCacheRef = useRef(new Map<string, EncoderBindingsDto[]>());
+  const encoderCacheDeviceRef = useRef<string | null>(null);
+  const encoderCacheUidRef = useRef<string | null>(null);
+  const encoderBaselineRef = useRef(new Map<string, EncoderBindingsDto>());
+  const encoderFlashVersionRef = useRef(0);
 
   const devices = useMemo(
     () => studioDevices
@@ -525,6 +590,179 @@ export default function KeymapViewer({
     [selected, status.host_link_devices]
   );
 
+  // Config RPC (encoder editing) requires the stricter UID-only match: unlike
+  // stats display, sending SET_BINDINGS to the wrong physical device is not
+  // an acceptable failure mode.
+  const hostLinkDevice = useMemo(
+    () =>
+      selected
+        ? findHostLinkDeviceForStudioStrict(status.host_link_devices, selected)
+        : null,
+    [selected, status.host_link_devices]
+  );
+  const hostLinkUid = hostLinkDevice?.device_uid_hash ?? null;
+  const configRpcCapable =
+    hostLinkDevice !== null &&
+    (hostLinkDevice.capabilities & CONFIG_RPC_CAPABILITY) !== 0;
+  const editing = editState.mode === "editing";
+  const encoderDirtyUid = editHostLinkUid ?? hostLinkUid;
+  const encoderDirty = encoderDirtyUid ? encoderDirtyByUid[encoderDirtyUid] ?? false : false;
+  const setEncoderDirty = useCallback((value: boolean | ((current: boolean) => boolean)) => {
+    const uid = editHostLinkUid ?? hostLinkUid;
+    if (!uid) return;
+    setEncoderDirtyByUid((current) => {
+      const previous = current[uid] ?? false;
+      const next = typeof value === "function" ? value(previous) : value;
+      return { ...current, [uid]: next };
+    });
+  }, [editHostLinkUid, hostLinkUid]);
+
+  const [encoderCount, setEncoderCount] = useState<number | null>(null);
+  const [encoderBindings, setEncoderBindings] = useState<EncoderBindingsDto[]>([]);
+  const [encoderError, setEncoderError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const generation = ++encoderInfoGenerationRef.current;
+    setEncoderCount(null);
+    setEncoderError(null);
+    const selectedDeviceChanged = encoderCacheDeviceRef.current !== selectedId;
+    const physicalDeviceChanged =
+      hostLinkUid !== null &&
+      encoderCacheUidRef.current !== null &&
+      encoderCacheUidRef.current !== hostLinkUid;
+    if (selectedDeviceChanged || physicalDeviceChanged) {
+      encoderBindingsCacheRef.current.clear();
+      setEncoderBindings([]);
+    }
+    encoderCacheDeviceRef.current = selectedId;
+    if (hostLinkUid !== null) encoderCacheUidRef.current = hostLinkUid;
+    if (!selectedId) {
+      setEncoderLoadState("unsupported");
+      return;
+    }
+    if (!hostLinkUid) {
+      setEncoderLoadState("error");
+      setEncoderError(t("keymap.error.encoder_read_failed"));
+      return;
+    }
+    if (!configRpcCapable) {
+      setEncoderLoadState("unsupported");
+      return;
+    }
+    setEncoderLoadState("loading");
+    let cancelled = false;
+    const uid = hostLinkUid;
+    configRpcChainRef.current = configRpcChainRef.current.then(async () => {
+      if (cancelled || generation !== encoderInfoGenerationRef.current) return;
+      try {
+        const info = await readEncoderInfo(uid);
+        if (!cancelled && generation === encoderInfoGenerationRef.current) {
+          setEncoderCount(info.encoder_count);
+          setEncoderLoadState("available");
+        }
+      } catch (err) {
+        if (!cancelled && generation === encoderInfoGenerationRef.current) {
+          setEncoderError(friendlyError(err, t, "keymap.error.encoder_read_failed"));
+          setEncoderLoadState("error");
+        }
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, hostLinkUid, configRpcCapable, encoderRefreshNonce, t]);
+
+  useEffect(() => {
+    const generation = ++encoderRequestGenerationRef.current;
+    if (!selectedId || layer === null) {
+      setEncoderBindings([]);
+      return;
+    }
+    const cacheUid = hostLinkUid ?? encoderCacheUidRef.current;
+    const cacheKey = cacheUid ? `${cacheUid}:${layer.id}` : null;
+    const cached = cacheKey ? encoderBindingsCacheRef.current.get(cacheKey) : undefined;
+    setEncoderBindings(cached ?? []);
+    if (encoderCount === 0) return;
+    // Keep the last confirmed tiles visible (disabled by encoderLoadState) while
+    // Host Link is temporarily unavailable or GET_INFO is still pending.
+    if (!hostLinkUid || encoderCount === null) return;
+    const activeCacheKey = `${hostLinkUid}:${layer.id}`;
+    setEncoderLoadState("loading");
+    setEncoderError(null);
+    let cancelled = false;
+    const deviceId = selectedId;
+    const uid = hostLinkUid;
+    const layerId = layer.id;
+    const count = encoderCount;
+    configRpcChainRef.current = configRpcChainRef.current.then(async () => {
+      try {
+        const results = await readEncoderLayerBindings(deviceId, uid, layerId, count);
+        if (!cancelled && generation === encoderRequestGenerationRef.current) {
+          encoderBindingsCacheRef.current.set(activeCacheKey, results);
+          setEncoderBindings(results);
+          setEncoderLoadState("available");
+          if (editing) {
+            for (const result of results) {
+              const id = encoderTileId(result.layer_id, result.encoder_id);
+              const baseline = encoderBaselineRef.current.get(id);
+              if (!baseline) {
+                encoderBaselineRef.current.set(id, result);
+                if (result.runtime_dirty) {
+                  setChangedEncoderTiles((current) => new Set(current).add(id));
+                }
+                continue;
+              }
+
+              setChangedEncoderTiles((current) => {
+                const next = new Set(current);
+                if (encoderBindingDiffers(result, baseline)) next.add(id);
+                else next.delete(id);
+                return next;
+              });
+            }
+          }
+        }
+      } catch (err) {
+        if (!cancelled && generation === encoderRequestGenerationRef.current) {
+          setEncoderError(friendlyError(err, t, "keymap.error.encoder_read_failed"));
+          setEncoderLoadState("error");
+        }
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedId, hostLinkUid, encoderCount, layer, encoderRefreshNonce, editing]);
+
+  // Encoder edit availability (keymap-encoder-editing-plan.md): Studio editing
+  // active, strict-UID Host Link device with CONFIG_RPC, GET_INFO succeeded
+  // with encoder_count > 0, and a target layer resolved.
+  const encoderEditAvailable =
+    editing &&
+    hostLinkUid !== null &&
+    configRpcCapable &&
+    (encoderCount ?? 0) > 0 &&
+    layer !== null;
+
+  // Pick up pre-existing runtime override dirt (e.g. a previous session's
+  // unsaved SET_BINDINGS) when entering edit mode.
+  useEffect(() => {
+    if (!editing || !editHostLinkUid) return;
+    let cancelled = false;
+    const uid = editHostLinkUid;
+    studioEncoderHasUnsaved(uid)
+      .then((dirty) => {
+        if (!cancelled) {
+          setEncoderDirtyByUid((current) => ({ ...current, [uid]: dirty }));
+          if (!dirty) setEncoderRefreshNonce((nonce) => nonce + 1);
+        }
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [editing, editHostLinkUid]);
+
   useEffect(() => {
     const ids = new Set(devices.map((device) => device.id));
     setSelectedId((current) => current && ids.has(current) ? current : devices[0]?.id ?? "");
@@ -536,7 +774,13 @@ export default function KeymapViewer({
     keyWriteQueueRef.current = [];
     latestKeyWriteSnapshotRef.current = null;
     setPendingKeyWrites(0);
+    setEncoderWriteErrorCode(null);
+    setFlashEncoderTiles(new Map());
   }, [selectedId]);
+
+  useEffect(() => {
+    setFlashEncoderTiles(new Map());
+  }, [activeLayer]);
 
   // Follow keyboard-side layer changes (LAYER_STATE uplink): switch the
   // displayed layer too, not just the live ring. Manual tab clicks still
@@ -639,24 +883,30 @@ export default function KeymapViewer({
     }
   }, [editState.mode, readDevice, refreshStudioDevices, selectedId, t]);
 
-  const reloadSelectedKeymap = useCallback(async () => {
+  const resyncKeyState = useCallback(async () => {
     if (!selected || pendingKeyWrites > 0) return;
-    setError(null);
     setKeyWriteErrorCode(null);
-    setRestoreReport(null);
-    setRestoreNotice(null);
-    setChangedKeys(new Set());
-    keyWriteQueueRef.current = [];
-    latestKeyWriteSnapshotRef.current = null;
-    setEditNotice(null);
     try {
-      await studioAbortEdit(selected.id);
-      setEditState({ mode: "viewing", dirty: false, operation: "idle", problem: null });
-      await readDevice(selected, true);
+      const result = await studioResyncEditState(selected.id);
+      setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result.snapshot }));
+      setEditState((current) => ({ ...current, dirty: result.has_unsaved, problem: null }));
     } catch (e) {
-      setError(errorLabel(String(e), t));
+      setKeyWriteErrorCode(String(e));
     }
-  }, [pendingKeyWrites, readDevice, selected, t]);
+  }, [pendingKeyWrites, selected, setSnapshotsByDeviceId]);
+
+  const resyncEncoderState = useCallback(async () => {
+    const uid = editHostLinkUid ?? hostLinkUid;
+    if (!uid || pendingEncoderWrites > 0) return;
+    setEncoderWriteErrorCode(null);
+    try {
+      const dirty = await studioEncoderHasUnsaved(uid);
+      setEncoderDirtyByUid((current) => ({ ...current, [uid]: dirty }));
+      setEncoderRefreshNonce((nonce) => nonce + 1);
+    } catch (e) {
+      setEncoderWriteErrorCode(String(e));
+    }
+  }, [editHostLinkUid, hostLinkUid, pendingEncoderWrites]);
 
   const mapEditProblem = useCallback((code: string): EditState["problem"] => {
     if (code === "save_result_unknown") return "save_unknown";
@@ -731,6 +981,9 @@ export default function KeymapViewer({
     setRestoreNotice(null);
     if (forceDiscard) setChangedKeys(new Set());
     setPicker(null);
+    encoderBaselineRef.current.clear();
+    setChangedEncoderTiles(new Set());
+    setFlashEncoderTiles(new Map());
     setEditState((current) => ({ ...current, operation: "setting", problem: null }));
     try {
       const result = applyBehaviorLabelPatches(
@@ -740,6 +993,7 @@ export default function KeymapViewer({
       setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
       if (catalog.length === 0) setCatalog(await studioKeyCatalog());
       const dirty = await studioHasUnsaved(selected.id).catch(() => false);
+      setEditHostLinkUid(configRpcCapable ? hostLinkUid : null);
       setEditState({ mode: "editing", dirty, operation: "idle", problem: null });
     } catch (e) {
       const code = String(e);
@@ -754,6 +1008,7 @@ export default function KeymapViewer({
             setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
             if (catalog.length === 0) setCatalog(await studioKeyCatalog());
             const dirty = await studioHasUnsaved(selected.id).catch(() => false);
+            setEditHostLinkUid(configRpcCapable ? hostLinkUid : null);
             setEditState({ mode: "editing", dirty, operation: "idle", problem: null });
           } catch (retryError) {
             const retryCode = String(retryError);
@@ -770,58 +1025,138 @@ export default function KeymapViewer({
       }
       setEditState((current) => ({ ...current, operation: "idle" }));
     }
-  }, [catalog.length, mapEditProblem, selected, setSnapshotsByDeviceId, snapshot, t]);
+  }, [catalog.length, configRpcCapable, hostLinkUid, mapEditProblem, selected, setSnapshotsByDeviceId, snapshot, t]);
 
+  // Saves the normal-key (Studio RPC) and encoder (Config RPC) sides in a
+  // single Rust-side command that composes both outcomes into a structured
+  // result: a failure on one side must not strand the other, and only the
+  // failed side keeps its dirty state for the next retry
+  // (keymap-encoder-editing-plan.md).
   const saveEdit = useCallback(async () => {
     if (!selected) return false;
     setEditNotice(null);
     setKeyWriteErrorCode(null);
+    setEncoderWriteErrorCode(null);
     setEditState((current) => ({ ...current, operation: "saving", problem: null }));
+    let result: SaveOrDiscardResultDto;
     try {
-      await studioSaveChanges(selected.id);
-      setEditState((current) => ({ ...current, dirty: false, operation: "idle", problem: null }));
-      setRestoreReport(null);
-      setRestoreNotice(null);
-      setChangedKeys(new Set());
-      setEditNotice("saved");
-      return true;
+      result = await studioSaveChanges(
+        selected.id,
+        editHostLinkUid ?? (configRpcCapable ? hostLinkUid : null),
+      );
     } catch (e) {
       const code = String(e);
-      const problem = mapEditProblem(code) ?? "save_failed";
-      setEditState((current) => ({ ...current, operation: "idle", problem }));
+      setEditState((current) => ({ ...current, operation: "idle", problem: mapEditProblem(code) ?? "save_failed" }));
       setError(errorLabel(code, t));
       return false;
     }
-  }, [mapEditProblem, selected, t]);
+    // Success includes "skipped" (nothing to save).
+    if (result.studio.success) {
+      setEditState((current) => ({ ...current, dirty: false }));
+    }
+    const encoderFeature = result.config.results.find((r) => r.feature === "ENCODER");
+    if (encoderFeature ? encoderFeature.success : result.config.skipped) {
+      setEncoderDirty(false);
+    }
+    if (encoderFeature?.attempted && encoderFeature.success) {
+      setEncoderRefreshNonce((nonce) => nonce + 1);
+    }
+    if (result.overall_success) {
+      setEditState((current) => ({ ...current, operation: "idle", problem: null }));
+      setRestoreReport(null);
+      setRestoreNotice(null);
+      setChangedKeys(new Set());
+      encoderBaselineRef.current.clear();
+      setChangedEncoderTiles(new Set());
+      setEditNotice("saved");
+      return true;
+    }
+    const problem = !result.studio.success
+      ? mapEditProblem(result.studio.error ?? "save_failed") ?? "save_failed"
+      : "save_failed";
+    setEditState((current) => ({ ...current, operation: "idle", problem }));
+    const encoderError = encoderFeature && !encoderFeature.success ? encoderFeature.error : null;
+    setError(
+      [
+        !result.studio.success ? errorLabel(result.studio.error ?? "save_failed", t) : null,
+        encoderError
+          ? `${t("keymap.error.encoder_save_failed")} (${errorLabel(encoderError, t)})`
+          : null,
+      ]
+        .filter((message): message is string => message !== null)
+        .join(" / ")
+    );
+    return false;
+  }, [configRpcCapable, editHostLinkUid, encoderDirty, hostLinkUid, mapEditProblem, selected, t]);
 
+  // Same composition as saveEdit: discard normal keys and encoder overrides
+  // together via a single command, then re-sync the encoder snapshot so the
+  // UI matches the device state after DISCARD.
   const discardEdit = useCallback(async () => {
     if (!selected) return false;
     setEditNotice(null);
     setKeyWriteErrorCode(null);
+    setEncoderWriteErrorCode(null);
     setEditState((current) => ({ ...current, operation: "discarding", problem: null }));
+    let result: DiscardChangesDto;
     try {
-      const result = await studioDiscardChanges(selected.id);
-      setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
+      result = await studioDiscardChanges(
+        selected.id,
+        editHostLinkUid ?? (configRpcCapable ? hostLinkUid : null),
+      );
+    } catch (e) {
+      setEditState((current) => ({ ...current, operation: "idle" }));
+      setError(errorLabel(String(e), t));
+      return false;
+    }
+    if (result.result.studio.success && result.snapshot) {
+      const snapshot = result.snapshot;
+      setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: snapshot }));
       setPicker(null);
-      setEditState((current) => ({ ...current, dirty: false, operation: "idle", problem: null }));
+      setEditState((current) => ({ ...current, dirty: false }));
+    }
+    const encoderFeature = result.result.config.results.find((r) => r.feature === "ENCODER");
+    if (encoderFeature?.success) {
+      setEncoderDirty(false);
+    }
+    if (encoderFeature?.attempted) {
+      // Re-sync after DISCARD regardless of outcome, same as the panel close.
+      setEncoderPanel(null);
+      setEncoderRefreshNonce((nonce) => nonce + 1);
+    }
+    if (result.result.overall_success) {
+      setEditState((current) => ({ ...current, operation: "idle", problem: null }));
       setRestoreReport(null);
       setRestoreNotice(null);
       setChangedKeys(new Set());
+      encoderBaselineRef.current.clear();
+      setChangedEncoderTiles(new Set());
+      setFlashEncoderTiles(new Map());
       setEditNotice("discarded");
       return true;
-    } catch (e) {
-      const code = String(e);
-      setEditState((current) => ({ ...current, operation: "idle" }));
-      setError(errorLabel(code, t));
-      return false;
     }
-  }, [selected, setSnapshotsByDeviceId, t]);
+    setEditState((current) => ({ ...current, operation: "idle" }));
+    const encoderError = encoderFeature && !encoderFeature.success ? encoderFeature.error : null;
+    setError(
+      [
+        !result.result.studio.success
+          ? errorLabel(result.result.studio.error ?? "discard_failed", t)
+          : null,
+        encoderError
+          ? `${t("keymap.error.encoder_discard_failed")} (${errorLabel(encoderError, t)})`
+          : null,
+      ]
+        .filter((message): message is string => message !== null)
+        .join(" / ")
+    );
+    return false;
+  }, [configRpcCapable, editHostLinkUid, encoderDirty, hostLinkUid, selected, setSnapshotsByDeviceId, t]);
 
   const endEdit = useCallback(async () => {
     if (!selected) return;
-    let dirty = editState.dirty;
-    if (dirty) dirty = await studioHasUnsaved(selected.id).catch(() => true);
-    if (dirty) {
+    let studioDirty = editState.dirty;
+    if (studioDirty) studioDirty = await studioHasUnsaved(selected.id).catch(() => true);
+    if (studioDirty || encoderDirty) {
       const discard = window.confirm(t("keymap.edit.confirm_discard_end"));
       if (!discard) return;
       const discarded = await discardEdit();
@@ -831,30 +1166,55 @@ export default function KeymapViewer({
     try {
       await studioEndEdit(selected.id);
       setPicker(null);
+      setEncoderPanel(null);
       setRestoreReport(null);
       setRestoreNotice(null);
       setChangedKeys(new Set());
+      encoderBaselineRef.current.clear();
+      setChangedEncoderTiles(new Set());
+      setFlashEncoderTiles(new Map());
+      setEditHostLinkUid(null);
       setEditState({ mode: "viewing", dirty: false, operation: "idle", problem: null });
     } catch (e) {
       const code = String(e);
       setEditState((current) => ({ ...current, operation: "idle" }));
       setError(errorLabel(code, t));
     }
-  }, [discardEdit, editState.dirty, selected, t]);
+  }, [discardEdit, editState.dirty, encoderDirty, selected, t]);
+
+  const selectStudioDevice = useCallback(async (nextId: string) => {
+    if (nextId === selectedId) return;
+    if (editState.mode === "editing" && selected) {
+      if (editState.dirty || encoderDirty) {
+        if (!window.confirm(t("keymap.edit.confirm_discard_switch"))) return;
+        if (!(await discardEdit())) return;
+      }
+      try {
+        await studioEndEdit(selected.id);
+      } catch (error) {
+        setError(errorLabel(String(error), t));
+        return;
+      }
+      setEditHostLinkUid(null);
+      setEditState({ mode: "viewing", dirty: false, operation: "idle", problem: null });
+    }
+    setSelectedId(nextId);
+  }, [discardEdit, editState.dirty, editState.mode, encoderDirty, selected, selectedId, t]);
 
   const canLeaveForNavigation = useCallback(
-    () => pendingKeyWrites === 0 && editState.operation === "idle",
-    [editState.operation, pendingKeyWrites],
+    () => pendingKeyWrites === 0 && pendingEncoderWrites === 0 && editState.operation === "idle",
+    [editState.operation, pendingEncoderWrites, pendingKeyWrites],
   );
 
   const hasUnsavedForNavigation = useCallback(async () => {
     if (!selected || editState.mode !== "editing") return false;
-    if (pendingKeyWrites > 0) return true;
+    if (pendingKeyWrites > 0 || pendingEncoderWrites > 0) return true;
+    if (encoderDirty) return true;
     if (editState.dirty) {
       return await studioHasUnsaved(selected.id).catch(() => true);
     }
     return await studioHasUnsaved(selected.id).catch(() => false);
-  }, [editState.dirty, editState.mode, pendingKeyWrites, selected]);
+  }, [editState.dirty, editState.mode, encoderDirty, pendingEncoderWrites, pendingKeyWrites, selected]);
 
   const finishEditForNavigation = useCallback(async () => {
     if (!selected) return true;
@@ -862,9 +1222,14 @@ export default function KeymapViewer({
     try {
       await studioEndEdit(selected.id);
       setPicker(null);
+      setEncoderPanel(null);
       setRestoreReport(null);
       setRestoreNotice(null);
       setChangedKeys(new Set());
+      encoderBaselineRef.current.clear();
+      setChangedEncoderTiles(new Set());
+      setFlashEncoderTiles(new Map());
+      setEditHostLinkUid(null);
       setEditState({ mode: "viewing", dirty: false, operation: "idle", problem: null });
       return true;
     } catch (e) {
@@ -912,6 +1277,14 @@ export default function KeymapViewer({
     setRestoreReport(null);
     setRestoreNotice(null);
     setChangedKeys(new Set());
+    const encoderExportUnavailable =
+      encoderLoadState === "loading" ||
+      encoderLoadState === "error" ||
+      (encoderLoadState === "available" && (encoderCount ?? 0) > 0 && hostLinkUid === null);
+    if (encoderExportUnavailable) {
+      setError(t("keymap.error.encoder_export_unavailable"));
+      return;
+    }
     const defaultName = `${selected.display_name.replace(/[\\/:*?"<>|]+/g, "-")}-keymap.json`;
     const path = await saveDialog({
       defaultPath: defaultName,
@@ -920,7 +1293,9 @@ export default function KeymapViewer({
     if (!path) return;
     setKeymapFileBusy("export");
     try {
-      await studioExportKeymap(selected.id, path);
+      const encoderExportUid =
+        encoderLoadState === "available" && (encoderCount ?? 0) > 0 ? hostLinkUid : null;
+      await studioExportKeymap(selected.id, path, encoderExportUid);
       setEditNotice(null);
       window.alert(t("keymap.export.done"));
     } catch (e) {
@@ -928,7 +1303,7 @@ export default function KeymapViewer({
     } finally {
       setKeymapFileBusy(null);
     }
-  }, [editState.operation, keymapFileBusy, pendingKeyWrites, selected, t]);
+  }, [configRpcCapable, editState.operation, encoderCount, encoderLoadState, hostLinkUid, keymapFileBusy, pendingKeyWrites, selected, t]);
 
   const ensureRestoreEditSession = useCallback(async (): Promise<boolean> => {
     if (!selected) return false;
@@ -949,6 +1324,7 @@ export default function KeymapViewer({
       setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
       if (hasDirty) setChangedKeys(new Set());
       if (catalog.length === 0) setCatalog(await studioKeyCatalog());
+      setEditHostLinkUid(configRpcCapable ? hostLinkUid : null);
       setEditState({ mode: "editing", dirty: false, operation: "idle", problem: null });
       return true;
     } catch (e) {
@@ -957,7 +1333,7 @@ export default function KeymapViewer({
       setError(errorLabel(code, t));
       return false;
     }
-  }, [catalog.length, editState.dirty, editState.mode, mapEditProblem, selected, setSnapshotsByDeviceId, snapshot, t]);
+  }, [catalog.length, configRpcCapable, editState.dirty, editState.mode, hostLinkUid, mapEditProblem, selected, setSnapshotsByDeviceId, snapshot, t]);
 
   const restoreKeymap = useCallback(async () => {
     if (!selected || keymapFileBusy || pendingKeyWrites > 0 || editState.operation !== "idle") return;
@@ -975,8 +1351,15 @@ export default function KeymapViewer({
     try {
       const ready = await ensureRestoreEditSession();
       if (!ready) return;
-      const preview = await studioPreviewKeymapRestore(selected.id, selectedPath);
-      if (preview.can_apply && preview.will_write === 0 && preview.blocked === 0) {
+      const encoderRestoreUid = configRpcCapable && (encoderCount ?? 0) > 0 ? hostLinkUid : null;
+      const preview = await studioPreviewKeymapRestore(selected.id, selectedPath, encoderRestoreUid);
+      if (
+        preview.can_apply &&
+        preview.will_write === 0 &&
+        preview.blocked === 0 &&
+        preview.encoder_will_write === 0 &&
+        preview.encoder_blocked === 0
+      ) {
         setRestoreReport(preview);
         setRestoreNotice("no_targets");
         setEditState({ mode: "editing", dirty: false, operation: "idle", problem: null });
@@ -987,11 +1370,26 @@ export default function KeymapViewer({
         setRestoreReport(preview);
         return;
       }
-      const [nextSnapshot, report] = await studioApplyKeymapRestore(selected.id, selectedPath);
+      const [nextSnapshot, report] = await studioApplyKeymapRestore(selected.id, selectedPath, encoderRestoreUid);
       setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: nextSnapshot }));
       setRestoreReport(report);
-      setChangedKeys(new Set(report.changed_keys.map((key) => changedKeyId(key.layer_index, key.position))));
-      setEditState({ mode: "editing", dirty: report.will_write > 0, operation: "idle", problem: null });
+      setChangedKeys(new Set(report.applied_keys.map((key) => changedKeyId(key.layer_index, key.position))));
+      setChangedEncoderTiles(new Set(report.applied_encoders.map((item) => {
+        const restoredLayer = nextSnapshot.layers[item.layer_index];
+        return encoderTileId(restoredLayer?.id ?? item.layer_index, item.encoder_id);
+      })));
+      setEditState({ mode: "editing", dirty: report.applied_keys.length > 0, operation: "idle", problem: null });
+      if (
+        report.applied_encoders.length > 0 ||
+        report.errors.some((issue) => issue.code === "encoder_apply_failed")
+      ) {
+        setEncoderDirty(true);
+        setEncoderRefreshNonce((nonce) => nonce + 1);
+      }
+      if (report.apply_status === "partial") {
+        setError(t("keymap.restore.apply_partial"));
+        return;
+      }
       window.alert(t("keymap.restore.done"));
     } catch (e) {
       const code = String(e);
@@ -1000,7 +1398,7 @@ export default function KeymapViewer({
       setKeymapFileBusy(null);
       setEditState((current) => ({ ...current, operation: "idle" }));
     }
-  }, [editState.operation, ensureRestoreEditSession, keymapFileBusy, pendingKeyWrites, selected, setSnapshotsByDeviceId, t]);
+  }, [configRpcCapable, editState.operation, encoderCount, ensureRestoreEditSession, hostLinkUid, keymapFileBusy, pendingKeyWrites, selected, setSnapshotsByDeviceId, t]);
 
   const setKey = useCallback((key: StudioPhysicalKey, targetLayer: StudioLayer, behavior: EditBehavior) => {
     if (!selected || editState.operation === "saving" || editState.operation === "discarding" || editState.operation === "ending") return;
@@ -1033,6 +1431,57 @@ export default function KeymapViewer({
     void processKeyWriteQueue();
   }, [catalog, editState.operation, processKeyWriteQueue, selected, setSnapshotsByDeviceId, snapshot]);
 
+  // Sends CW/CCW encoder bindings over Host Link Config RPC. A null side keeps
+  // the current runtime override value (backend fills it in); the initial edit
+  // of a `source=keymap` encoder must pass both sides (EncoderPanel enforces
+  // this and never auto-completes the unset side).
+  const writeEncoderBinding = useCallback((encoderId: number, cw: EditBehavior | null, ccw: EditBehavior | null) => {
+    if (!selected || !hostLinkUid || !layer) return;
+    if (editState.operation === "saving" || editState.operation === "discarding" || editState.operation === "ending") return;
+    const deviceId = selected.id;
+    const uid = hostLinkUid;
+    const layerId = layer.id;
+    setEncoderWriteErrorCode(null);
+    setPendingEncoderWrites((current) => current + 1);
+    configRpcChainRef.current = configRpcChainRef.current.then(async () => {
+      try {
+        const result = await studioSetEncoderBindings(deviceId, uid, layerId, encoderId, cw, ccw);
+        setEncoderBindings((current) =>
+          current.map((item) =>
+            item.encoder_id === result.encoder_id && item.layer_id === result.layer_id ? result : item
+          )
+        );
+        const tileId = encoderTileId(result.layer_id, result.encoder_id);
+        const baseline = encoderBaselineRef.current.get(tileId);
+        setChangedEncoderTiles((current) => {
+          const next = new Set(current);
+          if (!baseline || encoderBindingDiffers(result, baseline)) next.add(tileId);
+          else next.delete(tileId);
+          return next;
+        });
+        const flashVersion = ++encoderFlashVersionRef.current;
+        setFlashEncoderTiles((current) => {
+          const next = new Map(current);
+          next.set(tileId, flashVersion);
+          return next;
+        });
+        window.setTimeout(() => {
+          setFlashEncoderTiles((current) => {
+            if (current.get(tileId) !== flashVersion) return current;
+            const next = new Map(current);
+            next.delete(tileId);
+            return next;
+          });
+        }, 1200);
+        setEncoderDirty(true);
+      } catch (e) {
+        setEncoderWriteErrorCode(String(e));
+      } finally {
+        setPendingEncoderWrites((current) => Math.max(0, current - 1));
+      }
+    });
+  }, [editState.operation, hostLinkUid, layer, selected]);
+
   const addLayer = useCallback(async (name: string) => {
     if (!selected || editState.operation !== "idle") return null;
     const previousLayerIds = new Set(snapshot?.layers.map((item) => item.id) ?? []);
@@ -1047,6 +1496,7 @@ export default function KeymapViewer({
       setRestoreReport(null);
       setRestoreNotice(null);
       setPicker(null);
+      setEncoderRefreshNonce((nonce) => nonce + 1);
       setEditState((current) => ({ ...current, dirty: true, operation: "idle", problem: null }));
       return result;
     } catch (e) {
@@ -1094,6 +1544,7 @@ export default function KeymapViewer({
       setRestoreReport(null);
       setRestoreNotice(null);
       setPicker(null);
+      setEncoderRefreshNonce((nonce) => nonce + 1);
       setEditState((current) => ({ ...current, dirty: true, operation: "idle", problem: null }));
       return result;
     } catch (e) {
@@ -1107,6 +1558,7 @@ export default function KeymapViewer({
 
   useEffect(() => {
     setPicker(null);
+    setEncoderPanel(null);
   }, [selectedId, viewMode, activeLayer]);
 
   useEffect(() => {
@@ -1128,13 +1580,15 @@ export default function KeymapViewer({
   }, [selectedId]);
 
   const busy = studioScanning || reading;
-  const editing = editState.mode === "editing";
-  const keyWritesPending = pendingKeyWrites > 0;
+  const keyWritesPending = pendingKeyWrites > 0 || pendingEncoderWrites > 0;
   const structuralEditBusy = busy || keyWritesPending || editState.operation !== "idle";
   const viewerAvailable = selected?.keymap_viewer_status === "available";
   const selectedLocked = selected?.keymap_viewer_status === "locked" || selected?.lock_state === "locked";
   const fileOperationBusy = keymapFileBusy !== null || keyWritesPending || editState.operation !== "idle";
-  const canExport = !!selected && !!snapshot && !busy && !fileOperationBusy;
+  const encoderExportReady =
+    encoderLoadState === "unsupported" ||
+    (encoderLoadState === "available" && ((encoderCount ?? 0) === 0 || hostLinkUid !== null));
+  const canExport = !!selected && !!snapshot && !busy && !fileOperationBusy && encoderExportReady;
   const canRestore = !!selected && viewerAvailable && !selectedLocked && !busy && !fileOperationBusy;
 
   return (
@@ -1198,7 +1652,7 @@ export default function KeymapViewer({
               {devices.map((device) => (
                 <button
                   key={device.id}
-                  onClick={() => setSelectedId(device.id)}
+                  onClick={() => void selectStudioDevice(device.id)}
                   className={`min-h-[4.75rem] min-w-64 max-w-72 rounded-pill px-3 py-3 text-left transition-colors ${
                     selectedId === device.id
                       ? "bg-plate shadow-neu-sel-in"
@@ -1225,7 +1679,9 @@ export default function KeymapViewer({
           )}
         </section>
 
-        <section className="w-full overflow-hidden rounded-card bg-surface p-5 space-y-4">
+        <section
+          className={`w-full overflow-hidden rounded-card bg-surface p-5 space-y-4 ${editing ? "pb-24" : ""}`}
+        >
           {!selected ? (
             <EmptyState icon={<Keyboard size={32} />} title={t("keymap.select_device")} />
           ) : selectedLocked ? (
@@ -1266,7 +1722,7 @@ export default function KeymapViewer({
                   keyStyle={changedKeyStyle}
                   flashKeys={flashKeys}
                   editing={editing}
-                  hasChangedKeys={changedKeys.size > 0}
+                  hasChangedKeys={changedKeys.size > 0 || changedEncoderTiles.size > 0}
                   editBusy={structuralEditBusy}
                   editAvailable={viewerAvailable && !selectedLocked}
                   onToggleEdit={() => editing ? void endEdit() : void beginEdit(false)}
@@ -1279,6 +1735,20 @@ export default function KeymapViewer({
                     setPicker({
                       key,
                       layer,
+                      rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
+                    });
+                  } : undefined}
+                  encoderBindings={encoderBindings}
+                  encoderLoadState={encoderLoadState}
+                  encoderError={encoderError}
+                  changedEncoderTiles={changedEncoderTiles}
+                  flashEncoderTiles={flashEncoderTiles}
+                  onRetryEncoders={() => setEncoderRefreshNonce((nonce) => nonce + 1)}
+                  onEncoderClick={encoderEditAvailable ? (binding, element) => {
+                    if (editState.operation === "saving" || editState.operation === "discarding" || editState.operation === "ending") return;
+                    const rect = element.getBoundingClientRect();
+                    setEncoderPanel({
+                      encoderId: binding.encoder_id,
                       rect: { left: rect.left, top: rect.top, width: rect.width, height: rect.height },
                     });
                   } : undefined}
@@ -1303,13 +1773,15 @@ export default function KeymapViewer({
       </div>
       {editing && selected && (
         <EditBar
-          dirty={editState.dirty}
+          dirty={editState.dirty || encoderDirty}
           operation={editState.operation}
-          pendingCount={pendingKeyWrites}
+          pendingCount={pendingKeyWrites + pendingEncoderWrites}
           problem={editState.problem}
           keyWriteError={keyWriteErrorCode ? errorLabel(keyWriteErrorCode, t) : null}
+          encoderWriteError={encoderWriteErrorCode ? errorLabel(encoderWriteErrorCode, t) : null}
           notice={editNotice}
-          onReload={reloadSelectedKeymap}
+          onResyncKey={resyncKeyState}
+          onResyncEncoder={resyncEncoderState}
           onSave={saveEdit}
           onDiscard={discardEdit}
           onEnd={endEdit}
@@ -1325,6 +1797,26 @@ export default function KeymapViewer({
           onSelect={(behavior) => void setKey(picker.key, picker.layer, behavior)}
         />
       )}
+      {encoderPanel && (() => {
+        const panelBinding = encoderBindings.find((item) => item.encoder_id === encoderPanel.encoderId);
+        if (!panelBinding) return null;
+        return (
+          <EncoderPanel
+            binding={panelBinding}
+            rect={encoderPanel.rect}
+            catalog={catalog}
+            layers={snapshot?.layers ?? []}
+            busy={
+              pendingEncoderWrites > 0 ||
+              editState.operation === "saving" ||
+              editState.operation === "discarding" ||
+              editState.operation === "ending"
+            }
+            onClose={() => setEncoderPanel(null)}
+            onWrite={(cw, ccw) => writeEncoderBinding(panelBinding.encoder_id, cw, ccw)}
+          />
+        );
+      })()}
     </div>
   );
 }
@@ -1366,6 +1858,13 @@ function KeymapContent({
   onAddLayer,
   onRenameLayer,
   onRemoveLayer,
+  encoderBindings = null,
+  encoderLoadState = "unsupported",
+  encoderError = null,
+  changedEncoderTiles = new Set(),
+  flashEncoderTiles = new Map(),
+  onRetryEncoders,
+  onEncoderClick,
 }: {
   snapshot: StudioKeymapSnapshot;
   activeLayer: number;
@@ -1386,6 +1885,15 @@ function KeymapContent({
   onAddLayer?: (name: string) => Promise<StudioKeymapSnapshot | null>;
   onRenameLayer?: (layer: StudioLayer, name: string) => Promise<StudioKeymapSnapshot | null>;
   onRemoveLayer?: (layer: StudioLayer) => Promise<StudioKeymapSnapshot | null>;
+  /** null when the connected device does not advertise CONFIG_RPC (encoders never shown). */
+  encoderBindings?: EncoderBindingsDto[] | null;
+  encoderLoadState?: EncoderLoadState;
+  encoderError?: string | null;
+  changedEncoderTiles?: Set<string>;
+  flashEncoderTiles?: Map<string, number>;
+  onRetryEncoders?: () => void;
+  /** Set while encoder editing is available; makes encoder tiles clickable. */
+  onEncoderClick?: (binding: EncoderBindingsDto, element: HTMLDivElement) => void;
 }) {
   const { t } = useLang();
   const layerTabRefs = useRef(new Map<number, HTMLDivElement>());
@@ -1580,6 +2088,95 @@ function KeymapContent({
           keyTitle={(key) => bindingsByPosition.get(key.position)?.full_label ?? "--"}
           keyStyle={keyStyle}
           onKeyClick={onKeyClick}
+          footer={
+            <>
+              {encoderLoadState === "error" && (
+                <div className="mt-3 flex items-center gap-2 text-xs text-danger">
+                  <span>{encoderError ?? t("keymap.error.encoder_read_failed")}</span>
+                  <button
+                    type="button"
+                    onClick={onRetryEncoders}
+                    className="flex items-center gap-1 rounded-pill bg-red-50 px-2 py-1 font-medium text-red-700 ring-1 ring-red-100"
+                  >
+                    <RefreshCw size={12} />
+                    {t("keymap.encoder.retry")}
+                  </button>
+                </div>
+              )}
+              {encoderLoadState === "loading" && (!encoderBindings || encoderBindings.length === 0) && (
+                <div className="mt-3 flex items-center gap-1.5 text-xs text-faint">
+                  <RefreshCw size={12} className="animate-spin" />
+                  {t("keymap.encoder.loading")}
+                </div>
+              )}
+              {encoderBindings && encoderBindings.length > 0 && (
+                // The plan places encoders bottom-left of the keymap plate, in
+                // encoder id order (no physical-position metadata in MVP).
+                <div className="mt-3 flex flex-wrap justify-start gap-3">
+                  {encoderBindings.map((binding) => (
+                    (() => {
+                      const tileId = encoderTileId(binding.layer_id, binding.encoder_id);
+                      const tileChanged = changedEncoderTiles.has(tileId);
+                      const flashVersion = flashEncoderTiles.get(tileId);
+                      const disabled = encoderLoadState !== "available";
+                      return (
+                    <div
+                      key={binding.encoder_id}
+                      title={t("keymap.encoder.title", { n: binding.encoder_id + 1 })}
+                      onClick={(event) => !disabled && onEncoderClick?.(binding, event.currentTarget)}
+                      className={`relative flex h-16 w-16 shrink-0 flex-col items-center justify-center rounded-full bg-surface px-1.5 text-center ${disabled ? "opacity-50" : onEncoderClick ? "cursor-pointer hover:ring-2 hover:ring-accent" : ""}`}
+                      style={tileChanged ? {
+                        backgroundColor: "rgb(var(--accent-rgb) / 0.18)",
+                        boxShadow: "inset 0 0 0 2px rgb(var(--accent-rgb) / 0.72)",
+                      } : undefined}
+                    >
+                      {(binding.stale_saved_exists || binding.invalid_saved_exists) && (
+                        <span
+                          className="absolute -right-0.5 -top-0.5 h-2.5 w-2.5 rounded-full bg-amber-400 ring-2 ring-white"
+                          title={t(binding.stale_saved_exists ? "keymap.encoder.stale_saved" : "keymap.encoder.invalid_saved")}
+                        />
+                      )}
+                      {binding.source === "keymap" ? (
+                        <div className="text-[9px] leading-tight text-faint">
+                          {t("keymap.encoder.using_keymap")}
+                        </div>
+                      ) : (
+                        <>
+                          <div
+                            className="w-full truncate text-[10px] font-medium leading-tight text-ink"
+                            title={binding.cw.label?.full_label ?? undefined}
+                          >
+                            {binding.cw.label?.full_label ?? "--"}
+                          </div>
+                          <div
+                            className="w-full truncate text-[10px] font-medium leading-tight text-ink"
+                            title={binding.ccw.label?.full_label ?? undefined}
+                          >
+                            {binding.ccw.label?.full_label ?? "--"}
+                          </div>
+                        </>
+                      )}
+                      <div className="mt-0.5 font-mono text-[9px] leading-none text-faint">
+                        {t("keymap.encoder.title", { n: binding.encoder_id + 1 })}
+                      </div>
+                      {flashVersion !== undefined && (
+                        <div key={flashVersion} className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                          <div
+                            className="animate-key-check-flash flex h-6 w-6 items-center justify-center rounded-full"
+                            style={{ backgroundColor: "rgb(var(--accent-rgb))" }}
+                          >
+                            <span className="text-base font-bold leading-none text-white">✓</span>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                      );
+                    })()
+                  ))}
+                </div>
+              )}
+            </>
+          }
           keyContent={(key) => {
             const binding = bindingsByPosition.get(key.position);
             const flashVersion = flashKeys?.get(`${activeLayer}:${key.position}`);
@@ -1612,14 +2209,16 @@ function KeymapContent({
   );
 }
 
-function EditBar({ dirty, operation, pendingCount, problem, keyWriteError, notice, onReload, onSave, onDiscard, onEnd }: {
+function EditBar({ dirty, operation, pendingCount, problem, keyWriteError, encoderWriteError, notice, onResyncKey, onResyncEncoder, onSave, onDiscard, onEnd }: {
   dirty: boolean;
   operation: EditState["operation"];
   pendingCount: number;
   problem: EditState["problem"];
   keyWriteError: string | null;
+  encoderWriteError: string | null;
   notice: "saved" | "discarded" | null;
-  onReload: () => void;
+  onResyncKey: () => void;
+  onResyncEncoder: () => void;
   onSave: () => void;
   onDiscard: () => void;
   onEnd: () => void;
@@ -1629,6 +2228,8 @@ function EditBar({ dirty, operation, pendingCount, problem, keyWriteError, notic
   const busy = operation !== "idle" || pending;
   const message = keyWriteError
     ? t("keymap.edit.key_write_failed")
+    : encoderWriteError
+    ? t("keymap.edit.encoder_write_failed")
     : problem
     ? t(`keymap.edit.problem.${problem}` as TranslationKey)
     : notice
@@ -1638,20 +2239,33 @@ function EditBar({ dirty, operation, pendingCount, problem, keyWriteError, notic
       : "";
   return (
     <div className="fixed bottom-4 left-1/2 z-40 flex w-[min(720px,calc(100vw-32px))] -translate-x-1/2 flex-wrap items-center justify-between gap-3 rounded-card bg-surface px-4 py-3 shadow-neu-up ring-1 ring-border">
-      <div className={`flex min-h-5 min-w-0 flex-1 flex-wrap items-center gap-2 text-sm font-medium ${problem || keyWriteError ? "text-red-700" : "text-muted"}`}>
+      <div className={`flex min-h-5 min-w-0 flex-1 flex-wrap items-center gap-2 text-sm font-medium ${problem || keyWriteError || encoderWriteError ? "text-red-700" : "text-muted"}`}>
         {message && <span>{message}</span>}
+        {!keyWriteError && encoderWriteError && (
+          <span className="text-xs font-normal text-red-600">{encoderWriteError}</span>
+        )}
         {keyWriteError && (
           <>
             <span className="text-xs font-normal text-red-600">{keyWriteError}</span>
             <button
-              onClick={onReload}
+              onClick={onResyncKey}
               disabled={pending}
               className="flex items-center gap-1 rounded-pill bg-red-50 px-2 py-1 text-xs font-medium text-red-700 ring-1 ring-red-100 disabled:opacity-50"
             >
               <RefreshCw size={12} />
-              {t("keymap.edit.reload")}
+              {t("keymap.edit.recheck")}
             </button>
           </>
+        )}
+        {!keyWriteError && encoderWriteError && (
+          <button
+            onClick={onResyncEncoder}
+            disabled={pending}
+            className="flex items-center gap-1 rounded-pill bg-red-50 px-2 py-1 text-xs font-medium text-red-700 ring-1 ring-red-100 disabled:opacity-50"
+          >
+            <RefreshCw size={12} />
+            {t("keymap.edit.recheck")}
+          </button>
         )}
         {pending && (
           <span className="rounded-pill bg-accent-soft px-2 py-0.5 text-xs font-medium text-accent-deep">
@@ -1845,15 +2459,20 @@ function ModifierToggleRow({ label, selectedIds, onToggle, busy }: {
   );
 }
 
-function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
+function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant = "key" }: {
   catalog: KeyCatalogEntry[];
   layers: StudioLayer[];
-  rect: { left: number; top: number; width: number; height: number };
+  rect: PickerRect;
   busy: boolean;
   onClose: () => void;
   onSelect: (behavior: EditBehavior) => void;
+  /** "encoder" hides everything the MVP encoder override does not allow
+   *  (layer/tap-hold tabs, &trans, modifier-only keys, non-select &bt commands,
+   *  utility/system/sticky behaviors); see keymap-encoder-editing-plan.md. */
+  variant?: "key" | "encoder";
 }) {
   const { t } = useLang();
+  const isEncoder = variant === "encoder";
   const [tab, setTab] = useState<PickerTab>("key");
   const [layerBehavior, setLayerBehavior] = useState<LayerBehaviorKind | null>(null);
   const [tapHoldBehavior, setTapHoldBehavior] = useState<TapHoldBehaviorKind | null>(null);
@@ -1865,9 +2484,20 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
   const [selectedStickyLayerIndex, setSelectedStickyLayerIndex] = useState<number | null>(null);
   const [query, setQuery] = useState("");
   const queryLower = query.trim().toLowerCase();
+  // Modifier-only keycodes (LCtrl..RGUI) are meaningless as a per-detent tap;
+  // the Rust resolver rejects them for encoders, so don't offer them either.
+  const pickerCatalog = useMemo(
+    () =>
+      isEncoder
+        ? catalog.filter(
+            (entry) => !MODIFIER_OPTIONS.some((option) => option.baseUsage === entry.hid_usage)
+          )
+        : catalog,
+    [catalog, isEncoder]
+  );
   const filtered = useMemo(() => {
-    if (!queryLower) return catalog;
-    return catalog.filter((entry) => {
+    if (!queryLower) return pickerCatalog;
+    return pickerCatalog.filter((entry) => {
       const usage = `0x${entry.hid_usage.toString(16)}`;
       return (
         entry.display.toLowerCase().includes(queryLower) ||
@@ -1876,7 +2506,7 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
         entry.aliases.some((alias) => alias.toLowerCase().includes(queryLower))
       );
     });
-  }, [catalog, queryLower]);
+  }, [pickerCatalog, queryLower]);
 
   const position = pickerPosition(rect);
   const grouped = useMemo(() => {
@@ -1982,7 +2612,10 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
         style={{ left: position.left, top: position.top }}
       >
         <div className="flex gap-1 rounded-pill bg-background p-1 ring-1 ring-border">
-          {(["key", "layer", "tap_hold", "bt_out", "advanced"] as const).map((item) => (
+          {(isEncoder
+            ? (["key", "bt_out", "advanced"] as const)
+            : (["key", "layer", "tap_hold", "bt_out", "advanced"] as const)
+          ).map((item) => (
             <button
               key={item}
               type="button"
@@ -2018,15 +2651,17 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
               />
             </div>
             <div className="mt-3 flex gap-2">
-              <button
-                disabled={busy}
-                onClick={() => onSelect({ kind: "transparent" })}
-                title="&trans"
-                className="flex-1 rounded-lg bg-background px-3 py-2 text-left text-sm ring-1 ring-border disabled:opacity-50"
-              >
-                <div className="font-medium text-ink">{t("keymap.edit.transparent")}</div>
-                <div className="mt-0.5 text-xs text-faint">{t("keymap.edit.transparent_desc")}</div>
-              </button>
+              {!isEncoder && (
+                <button
+                  disabled={busy}
+                  onClick={() => onSelect({ kind: "transparent" })}
+                  title="&trans"
+                  className="flex-1 rounded-lg bg-background px-3 py-2 text-left text-sm ring-1 ring-border disabled:opacity-50"
+                >
+                  <div className="font-medium text-ink">{t("keymap.edit.transparent")}</div>
+                  <div className="mt-0.5 text-xs text-faint">{t("keymap.edit.transparent_desc")}</div>
+                </button>
+              )}
               <button
                 disabled={busy}
                 onClick={() => onSelect({ kind: "none" })}
@@ -2214,7 +2849,8 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
                 {t("keymap.edit.bluetooth_command")}
               </div>
               <div className="flex flex-wrap gap-1.5">
-                {BLUETOOTH_COMMANDS.map((command) => (
+                {/* MVP encoder override only allows the select-profile command. */}
+                {(isEncoder ? BLUETOOTH_COMMANDS.filter((command) => command.command === 3) : BLUETOOTH_COMMANDS).map((command) => (
                   <button
                     key={command.title}
                     type="button"
@@ -2273,6 +2909,7 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
                 })),
               ])}
             </div>
+            {!isEncoder && (<>
             <div>
               <div className="mb-1.5 text-xs font-medium uppercase text-faint">
                 {t("keymap.edit.utility")}
@@ -2336,6 +2973,7 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
                 onSelect({ kind: "sticky_key", hid_usage: applyModifiers(entry.hid_usage, selectedStickyKeyModifierIds) })
               )}
             </div>
+            </>)}
           </div>
         )}
       </div>
@@ -2343,15 +2981,146 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect }: {
   );
 }
 
-function pickerPosition(rect: { left: number; top: number; width: number; height: number }) {
-  const width = Math.min(520, window.innerWidth - 24);
-  const height = Math.min(560, window.innerHeight - 32);
+/** Popover for editing one encoder's CW / CCW bindings.
+ *
+ *  `source=override`: picking a side writes it immediately; the backend keeps
+ *  the other side's current runtime value.
+ *  `source=keymap` (initial edit): selections are held as a local draft and
+ *  nothing is sent until both CW and CCW are explicitly chosen. Closing the
+ *  panel cancels without sending, leaving the encoder on its `.keymap`
+ *  bindings (keymap-encoder-editing-plan.md).
+ */
+function EncoderPanel({ binding, rect, catalog, layers, busy, onClose, onWrite }: {
+  binding: EncoderBindingsDto;
+  rect: PickerRect;
+  catalog: KeyCatalogEntry[];
+  layers: StudioLayer[];
+  busy: boolean;
+  onClose: () => void;
+  onWrite: (cw: EditBehavior | null, ccw: EditBehavior | null) => void;
+}) {
+  const { t } = useLang();
+  const [pickDirection, setPickDirection] = useState<"cw" | "ccw" | null>(null);
+  const [draft, setDraft] = useState<{
+    cw: { behavior: EditBehavior; label: string } | null;
+    ccw: { behavior: EditBehavior; label: string } | null;
+  }>({ cw: null, ccw: null });
+  const initial = binding.source === "keymap";
+
+  useEffect(() => {
+    // Once the initial write is confirmed the device override becomes the
+    // source of truth; drop the local draft.
+    if (!initial) setDraft({ cw: null, ccw: null });
+  }, [initial]);
+
+  useEffect(() => {
+    // While the BindingPicker is open its own Escape handler wins.
+    if (pickDirection !== null) return undefined;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose, pickDirection]);
+
+  const rowLabel = (direction: "cw" | "ccw"): { text: string; set: boolean } => {
+    const draftSide = draft[direction];
+    if (draftSide) return { text: draftSide.label, set: true };
+    if (initial) return { text: t("keymap.encoder.unset"), set: false };
+    const side = direction === "cw" ? binding.cw : binding.ccw;
+    return { text: side.label?.full_label ?? "--", set: true };
+  };
+
+  const handleSelect = (behavior: EditBehavior) => {
+    const direction = pickDirection;
+    if (!direction) return;
+    setPickDirection(null);
+    if (!initial) {
+      onWrite(direction === "cw" ? behavior : null, direction === "ccw" ? behavior : null);
+      return;
+    }
+    const label = optimisticLabelsForBehavior(behavior, catalog).full_label;
+    const next = { ...draft, [direction]: { behavior, label } };
+    setDraft(next);
+    // Initial override: only send once both directions are explicitly chosen;
+    // the host must never fill in a side the user did not pick.
+    if (next.cw && next.ccw) onWrite(next.cw.behavior, next.ccw.behavior);
+  };
+
+  const position = popoverPosition(rect, Math.min(320, window.innerWidth - 24), 240);
+
+  return (
+    <>
+      <button className="fixed inset-0 z-40 cursor-default bg-transparent" onClick={onClose} />
+      <div
+        className="fixed z-50 w-[min(320px,calc(100vw-24px))] rounded-card bg-surface p-3 shadow-neu-up ring-1 ring-border"
+        style={{ left: position.left, top: position.top }}
+      >
+        <div className="text-xs font-medium uppercase text-faint">
+          {t("keymap.encoder.title", { n: binding.encoder_id + 1 })}
+        </div>
+        {initial && (
+          <div className="mt-2 text-xs text-faint">{t("keymap.encoder.initial_notice")}</div>
+        )}
+        {(binding.stale_saved_exists || binding.invalid_saved_exists) && (
+          <div className="mt-2 flex items-start gap-1.5 text-xs text-amber-800">
+            <AlertCircle size={12} className="mt-0.5 flex-shrink-0" />
+            <span>{t(binding.stale_saved_exists ? "keymap.encoder.stale_saved" : "keymap.encoder.invalid_saved")}</span>
+          </div>
+        )}
+        <div className="mt-3 space-y-2">
+          {(["cw", "ccw"] as const).map((direction) => {
+            const label = rowLabel(direction);
+            return (
+              <button
+                key={direction}
+                type="button"
+                disabled={busy}
+                onClick={() => setPickDirection(direction)}
+                title={label.text}
+                className="flex w-full items-center gap-2 rounded-lg bg-background px-3 py-2 text-left text-sm ring-1 ring-border hover:bg-plate disabled:opacity-50"
+              >
+                <span className="w-9 shrink-0 font-mono text-[11px] text-faint">
+                  {t(direction === "cw" ? "keymap.encoder.cw" : "keymap.encoder.ccw")}
+                </span>
+                <span className={`min-w-0 flex-1 truncate font-medium ${label.set ? "text-ink" : "text-faint"}`}>
+                  {label.text}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+      {pickDirection && (
+        <BindingPicker
+          variant="encoder"
+          catalog={catalog}
+          layers={layers}
+          rect={rect}
+          busy={busy}
+          onClose={() => setPickDirection(null)}
+          onSelect={handleSelect}
+        />
+      )}
+    </>
+  );
+}
+
+function popoverPosition(rect: PickerRect, width: number, height: number) {
   let left = rect.left + rect.width / 2 - width / 2;
   let top = rect.top + rect.height + 8;
   if (left + width > window.innerWidth - 12) left = window.innerWidth - width - 12;
   if (left < 12) left = 12;
   if (top + height > window.innerHeight - 12) top = Math.max(12, rect.top - height - 8);
   return { left, top };
+}
+
+function pickerPosition(rect: PickerRect) {
+  return popoverPosition(
+    rect,
+    Math.min(520, window.innerWidth - 24),
+    Math.min(560, window.innerHeight - 32)
+  );
 }
 
 function HeatmapContent({ snapshot, statsUid }: {
@@ -2776,6 +3545,19 @@ function restoreConfirmText(
     }),
   ];
   if (report.behavior_verification === "skipped") lines.push(t("keymap.restore.verify_skipped"));
+  const encoderTotal = report.encoder_will_write + report.encoder_unchanged_skipped + report.encoder_blocked;
+  if (encoderTotal > 0) {
+    lines.push(
+      t("keymap.restore.encoder_summary", {
+        write: report.encoder_will_write,
+        unchanged: report.encoder_unchanged_skipped,
+        blocked: report.encoder_blocked,
+      }),
+    );
+  }
+  for (const code of new Set(report.warnings.map((issue) => issue.code))) {
+    lines.push(restoreIssueLabel(code, t));
+  }
   for (const issue of report.errors) {
     lines.push(restoreIssueLabel(issue.code, t));
   }
@@ -2786,12 +3568,26 @@ function restoreReportNotice(
   report: RestoreReport,
   t: (key: TranslationKey, vars?: Record<string, string | number>) => string,
 ): string | null {
-  if (report.will_write === 0 && report.blocked === 0 && report.errors.length === 0) return null;
+  const hostlinkMissing = report.warnings.some((issue) => issue.code === "encoder_hostlink_missing");
+  if (
+    report.will_write === 0 &&
+    report.blocked === 0 &&
+    report.errors.length === 0 &&
+    report.encoder_blocked === 0 &&
+    !hostlinkMissing
+  ) {
+    return null;
+  }
   const parts: string[] = [];
   if (report.behavior_verification === "skipped" && report.will_write > 0) {
     parts.push(t("keymap.restore.verify_skipped"));
   }
   if (report.blocked > 0) parts.push(t("keymap.restore.partial", { count: report.blocked }));
+  if (hostlinkMissing) {
+    parts.push(restoreIssueLabel("encoder_hostlink_missing", t));
+  } else if (report.encoder_blocked > 0) {
+    parts.push(t("keymap.restore.encoder_partial", { count: report.encoder_blocked }));
+  }
   for (const issue of report.errors) parts.push(restoreIssueLabel(issue.code, t));
   return parts.length > 0 ? parts.join(" ") : null;
 }
@@ -2807,12 +3603,44 @@ function restoreIssueLabel(
       return t("keymap.restore.abort.position_count");
     case "position_set":
       return t("keymap.restore.abort.position_set");
+    case "encoder_hostlink_missing":
+      return t("keymap.restore.encoder_hostlink_missing");
+    case "encoder_layer_mismatch":
+      return t("keymap.restore.encoder_layer_mismatch");
+    case "encoder_out_of_range":
+      return t("keymap.restore.encoder_out_of_range");
+    case "behavior_missing":
+    case "behavior_unverified":
+    case "behavior_conflict":
+      return t("keymap.restore.encoder_behavior_mismatch");
+    case "key_apply_failed":
+      return t("keymap.restore.key_apply_failed");
+    case "encoder_apply_failed":
+      return t("keymap.restore.encoder_apply_failed");
+    case "state_refresh_failed":
+      return t("keymap.restore.state_refresh_failed");
     default:
-      return code;
+      return t("error.generic");
   }
 }
 
 function errorLabel(code: string, t: (key: TranslationKey, vars?: Record<string, string | number>) => string) {
-  const key = `keymap.error.${code}` as TranslationKey;
-  return t(key) || code;
+  const normalized = code.trim().toLowerCase();
+  const knownCodes = [
+    "device_not_found", "hostlink_worker_unavailable", "hostlink_result_unknown",
+    "hostlink_invalid_response", "locked", "timeout", "rpc_failed", "studio_read_failed",
+    "disconnected", "invalid_location", "invalid_behavior", "invalid_parameters",
+    "missing_behavior_role", "save_failed", "save_not_supported", "save_no_space",
+    "save_result_unknown", "no_edit_session", "edit_session_exists", "unsaved_changes_exist",
+    "session_device_mismatch", "port_busy", "editing_unsupported_for_ble", "add_layer_failed",
+    "add_layer_no_space", "remove_layer_failed", "invalid_layer", "rename_layer_failed",
+    "keymap_invalid_file", "keymap_unsupported_version", "keymap_file_too_large",
+    "keymap_invalid_path", "restore_structure_mismatch", "keymap_export_failed",
+    "keymap_restore_preview_failed", "keymap_restore_apply_failed", "encoder_behavior_ineligible",
+    "encoder_behavior_unsupported_by_firmware", "encoder_bindings_incomplete",
+    "config_rpc_status_invalid_argument", "config_rpc_status_storage_error",
+    "config_rpc_status_internal_error",
+  ] as const;
+  const matched = knownCodes.find((candidate) => normalized === candidate || normalized.includes(candidate));
+  return matched ? t(`keymap.error.${matched}` as TranslationKey) : t("error.generic");
 }

@@ -54,6 +54,15 @@ pub fn run() {
             commands::studio_save_changes,
             commands::studio_discard_changes,
             commands::studio_has_unsaved,
+            commands::studio_resync_edit_state,
+            commands::read_encoder_info,
+            commands::read_encoder_bindings,
+            commands::read_encoder_layer_bindings,
+            commands::studio_set_encoder_bindings,
+            commands::studio_encoder_has_unsaved,
+            commands::studio_encoder_save,
+            commands::studio_encoder_discard,
+            commands::studio_encoder_clear_override,
             commands::studio_end_edit,
             commands::studio_abort_edit,
             commands::start_monitoring,
@@ -70,11 +79,10 @@ pub fn run() {
         .setup(move |app| {
             setup_window_icon(app)?;
             setup_tray(app)?;
-            if start_on_launch {
-                let handle = app.handle().clone();
-                let state = app.state::<AppState>();
-                let _ = commands::begin_monitoring(handle, state.inner());
-            }
+            let handle = app.handle().clone();
+            let state = app.state::<AppState>();
+            commands::start_host_link_worker(handle, state.inner(), start_on_launch)
+                .map_err(std::io::Error::other)?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -128,6 +136,8 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
                 }
             }
             "quit" => {
+                let state = app.state::<AppState>();
+                commands::shutdown_host_link_worker(state.inner());
                 app.exit(0);
             }
             _ => {}

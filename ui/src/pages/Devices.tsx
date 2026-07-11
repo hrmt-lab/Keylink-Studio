@@ -131,8 +131,8 @@ export default function Devices({
   );
 
   useEffect(() => {
-    handleProbe();
-  }, [handleProbe]);
+    void scanHostLink();
+  }, [scanHostLink]);
 
   return (
     <div className="mx-auto max-w-4xl space-y-5 p-6">

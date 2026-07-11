@@ -12,8 +12,8 @@ use crate::state::MonitorStatus;
 
 pub enum ActionOutcome {
     Continue,
-    /// The monitor loop should stop (handled like `MonitorCommand::Stop`;
-    /// never call `stop_monitoring_internal` from inside the loop thread).
+    /// Automatic monitoring should stop while the Host Link worker remains
+    /// available for discovery and keymap Config RPC.
     StopRequested,
 }
 

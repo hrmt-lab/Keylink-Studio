@@ -1,10 +1,11 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, str::FromStr};
 
 use clap::{Parser, Subcommand};
 use rawhid_host_core::{
     config::{load_config, write_default_config, ConfigError, ConfigPaths},
-    ActiveAppProvider, AppConfig, EncoderBinding, HidConfig, HidDeviceManager, ProbeResult, Runner,
-    SystemActiveAppProvider, CAPABILITY_CONFIG_RPC,
+    ActiveAppProvider, AppConfig, ComboBinding, ComboItem, DeviceConnectionType, DeviceInfo,
+    EncoderBinding, HidConfig, HidDeviceManager, ProbeResult, Runner, SystemActiveAppProvider,
+    CAPABILITY_CONFIG_RPC,
 };
 use thiserror::Error;
 use tracing_subscriber::{filter::EnvFilter, fmt};
@@ -76,6 +77,88 @@ enum Command {
         #[arg(long)]
         encoder_id: u8,
     },
+    /// Read Config RPC COMBO GET_INFO (all devices, or one --uid).
+    ComboGetInfo {
+        #[arg(long)]
+        uid: Option<DeviceUid>,
+    },
+    /// Read one Config RPC COMBO slot (all devices, or one --uid).
+    ComboGetCombo {
+        #[arg(long)]
+        uid: Option<DeviceUid>,
+        #[arg(long)]
+        slot: u8,
+    },
+    /// Read Config RPC COMBO dirty state (all devices, or one --uid).
+    ComboGetDirty {
+        #[arg(long)]
+        uid: Option<DeviceUid>,
+    },
+    /// Upsert one runtime Combo on the explicitly selected keyboard.
+    ComboSet {
+        #[arg(long)]
+        uid: DeviceUid,
+        #[arg(long)]
+        slot: u8,
+        #[arg(long)]
+        name: String,
+        #[arg(long, value_delimiter = ',', num_args = 2..=8)]
+        key_positions: Vec<u16>,
+        #[arg(long)]
+        slow_release: bool,
+        #[arg(long)]
+        behavior_id: u16,
+        #[arg(long, default_value_t = 0)]
+        param1: u32,
+        #[arg(long, default_value_t = 0)]
+        param2: u32,
+        #[arg(long, default_value_t = 0)]
+        layer_mask: u32,
+        #[arg(long, default_value_t = 50)]
+        timeout_ms: u16,
+        #[arg(long)]
+        prior_idle_ms: Option<u16>,
+    },
+    /// Delete one runtime Combo on the explicitly selected keyboard.
+    ComboDelete {
+        #[arg(long)]
+        uid: DeviceUid,
+        #[arg(long)]
+        slot: u8,
+    },
+    /// Persist all dirty Combos on the explicitly selected keyboard.
+    ComboSave {
+        #[arg(long)]
+        uid: DeviceUid,
+    },
+    /// Discard all dirty Combos on the explicitly selected keyboard.
+    ComboDiscard {
+        #[arg(long)]
+        uid: DeviceUid,
+    },
+    /// Reset runtime Combos to .keymap defaults on the explicitly selected keyboard.
+    ComboResetToKeymap {
+        #[arg(long)]
+        uid: DeviceUid,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DeviceUid(u64);
+
+impl FromStr for DeviceUid {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let value = value.strip_prefix("uid:").unwrap_or(value);
+        let value = value.strip_prefix("0x").unwrap_or(value);
+        if value.len() != 16 {
+            return Err("UID must be exactly 16 hexadecimal digits".into());
+        }
+        u64::from_str_radix(value, 16)
+            .map(Self)
+            .map_err(|error| format!("invalid UID: {error}"))
+    }
 }
 
 fn main() -> Result<(), CliError> {
@@ -123,6 +206,43 @@ fn main() -> Result<(), CliError> {
             layer_id,
             encoder_id,
         } => config_clear_override(cli.config, layer_id, encoder_id),
+        Command::ComboGetInfo { uid } => combo_get_info(cli.config, uid),
+        Command::ComboGetCombo { uid, slot } => combo_get_combo(cli.config, uid, slot),
+        Command::ComboGetDirty { uid } => combo_get_dirty(cli.config, uid),
+        Command::ComboSet {
+            uid,
+            slot,
+            name,
+            key_positions,
+            slow_release,
+            behavior_id,
+            param1,
+            param2,
+            layer_mask,
+            timeout_ms,
+            prior_idle_ms,
+        } => combo_set(
+            cli.config,
+            uid,
+            ComboItem::new(
+                slot,
+                &name,
+                &key_positions,
+                slow_release,
+                ComboBinding {
+                    behavior_id,
+                    param1,
+                    param2,
+                },
+                layer_mask,
+                timeout_ms,
+                prior_idle_ms,
+            )?,
+        ),
+        Command::ComboDelete { uid, slot } => combo_delete(cli.config, uid, slot),
+        Command::ComboSave { uid } => combo_save(cli.config, uid),
+        Command::ComboDiscard { uid } => combo_discard(cli.config, uid),
+        Command::ComboResetToKeymap { uid } => combo_reset_to_keymap(cli.config, uid),
     }
 }
 
@@ -711,6 +831,189 @@ fn print_config_clear_override_result(
     Ok(())
 }
 
+fn probe_combo_devices(
+    config_path: Option<PathBuf>,
+    uid: Option<DeviceUid>,
+) -> Result<(HidDeviceManager, Vec<DeviceInfo>), CliError> {
+    let (config, loaded_from) = load_config(config_path)?;
+    print_config_source(&loaded_from);
+    let mut manager = HidDeviceManager::real(config.hid)?;
+    let results = manager.probe()?;
+    let mut devices = Vec::<DeviceInfo>::new();
+    for result in results {
+        let device = result.device;
+        if !result.verified || device.capabilities & CAPABILITY_CONFIG_RPC == 0 {
+            continue;
+        }
+        if uid.is_some_and(|target| device.device_uid_hash != Some(target.0)) {
+            continue;
+        }
+        if let Some(existing_index) = device.device_uid_hash.and_then(|device_uid| {
+            devices
+                .iter()
+                .position(|existing| existing.device_uid_hash == Some(device_uid))
+        }) {
+            if devices[existing_index].connection_type != DeviceConnectionType::Usb
+                && device.connection_type == DeviceConnectionType::Usb
+            {
+                devices[existing_index] = device;
+            }
+        } else {
+            devices.push(device);
+        }
+    }
+    if devices.is_empty() {
+        return Err(match uid {
+            Some(uid) => CliError::ComboDeviceNotFound(uid.0),
+            None => CliError::NoComboDevices,
+        });
+    }
+    Ok((manager, devices))
+}
+
+fn combo_mutation_device(
+    config_path: Option<PathBuf>,
+    uid: DeviceUid,
+) -> Result<(HidDeviceManager, DeviceInfo), CliError> {
+    let (manager, mut devices) = probe_combo_devices(config_path, Some(uid))?;
+    if devices.len() != 1 {
+        return Err(CliError::AmbiguousComboDevice(uid.0));
+    }
+    Ok((manager, devices.remove(0)))
+}
+
+fn print_combo_device(device: &DeviceInfo) {
+    let uid = device
+        .device_uid_hash
+        .map(|uid| format!("{uid:016x}"))
+        .unwrap_or_else(|| "none".into());
+    println!(
+        "COMBO device uid={} vid={:04x} pid={:04x} connection={:?} path={}",
+        uid, device.vendor_id, device.product_id, device.connection_type, device.path
+    );
+}
+
+fn combo_get_info(config_path: Option<PathBuf>, uid: Option<DeviceUid>) -> Result<(), CliError> {
+    let (mut manager, devices) = probe_combo_devices(config_path, uid)?;
+    for device in devices {
+        print_combo_device(&device);
+        match manager.config_get_combo_info(&device) {
+            Ok(info) => {
+                println!("  COMBO GET_INFO: OK");
+                println!("    max_combos: {}", info.max_combos);
+                println!("    max_keys_per_combo: {}", info.max_keys_per_combo);
+                println!("    combo_count: {}", info.combo_count);
+                println!("    flags: 0x{:02x}", info.flags.bits());
+                println!("    occupied_slots: 0x{:08x}", info.occupied_slots);
+                println!("    stale_slots: 0x{:08x}", info.stale_slots);
+                println!("    invalid_slots: 0x{:08x}", info.invalid_slots);
+            }
+            Err(rawhid_host_core::hid::HidError::ConfigRpcStatus(status)) => {
+                println!("  COMBO GET_INFO: {status:?}");
+            }
+            Err(error) => println!("  COMBO GET_INFO: error: {error}"),
+        }
+    }
+    Ok(())
+}
+
+fn combo_get_combo(
+    config_path: Option<PathBuf>,
+    uid: Option<DeviceUid>,
+    slot: u8,
+) -> Result<(), CliError> {
+    let (mut manager, devices) = probe_combo_devices(config_path, uid)?;
+    for device in devices {
+        print_combo_device(&device);
+        match manager.config_get_combo(&device, slot) {
+            Ok(item) => print_combo_item(item),
+            Err(rawhid_host_core::hid::HidError::ConfigRpcStatus(status)) => {
+                println!("  COMBO GET_COMBO slot={slot}: {status:?}");
+            }
+            Err(error) => println!("  COMBO GET_COMBO slot={slot}: error: {error}"),
+        }
+    }
+    Ok(())
+}
+
+fn combo_get_dirty(config_path: Option<PathBuf>, uid: Option<DeviceUid>) -> Result<(), CliError> {
+    let (mut manager, devices) = probe_combo_devices(config_path, uid)?;
+    for device in devices {
+        print_combo_device(&device);
+        match manager.config_get_combo_dirty(&device) {
+            Ok(dirty) => println!("  COMBO GET_DIRTY: OK dirty={dirty}"),
+            Err(rawhid_host_core::hid::HidError::ConfigRpcStatus(status)) => {
+                println!("  COMBO GET_DIRTY: {status:?}");
+            }
+            Err(error) => println!("  COMBO GET_DIRTY: error: {error}"),
+        }
+    }
+    Ok(())
+}
+
+fn print_combo_item(item: ComboItem) {
+    let positions = &item.key_positions[..item.key_count as usize];
+    let prior_idle = item
+        .require_prior_idle_ms
+        .map(|value| value.to_string())
+        .unwrap_or_else(|| "disabled".into());
+    println!("  COMBO GET_COMBO slot={}: OK", item.slot);
+    println!("    name: {}", item.name.as_str());
+    println!("    key_positions: {positions:?}");
+    println!("    slow_release: {}", item.flags.slow_release());
+    println!(
+        "    binding: behavior_id=0x{:04x} param1={} param2={}",
+        item.binding.behavior_id, item.binding.param1, item.binding.param2
+    );
+    println!("    layer_mask: 0x{:08x}", item.layer_mask);
+    println!("    timeout_ms: {}", item.timeout_ms);
+    println!("    require_prior_idle_ms: {prior_idle}");
+}
+
+fn combo_set(
+    config_path: Option<PathBuf>,
+    uid: DeviceUid,
+    item: ComboItem,
+) -> Result<(), CliError> {
+    let (mut manager, device) = combo_mutation_device(config_path, uid)?;
+    print_combo_device(&device);
+    manager.config_set_combo(&device, item)?;
+    println!("  COMBO SET_COMBO slot={}: OK", item.slot);
+    Ok(())
+}
+
+fn combo_delete(config_path: Option<PathBuf>, uid: DeviceUid, slot: u8) -> Result<(), CliError> {
+    let (mut manager, device) = combo_mutation_device(config_path, uid)?;
+    print_combo_device(&device);
+    manager.config_delete_combo(&device, slot)?;
+    println!("  COMBO DELETE_COMBO slot={slot}: OK");
+    Ok(())
+}
+
+fn combo_save(config_path: Option<PathBuf>, uid: DeviceUid) -> Result<(), CliError> {
+    let (mut manager, device) = combo_mutation_device(config_path, uid)?;
+    print_combo_device(&device);
+    manager.config_save_combos(&device)?;
+    println!("  COMBO SAVE: OK");
+    Ok(())
+}
+
+fn combo_discard(config_path: Option<PathBuf>, uid: DeviceUid) -> Result<(), CliError> {
+    let (mut manager, device) = combo_mutation_device(config_path, uid)?;
+    print_combo_device(&device);
+    manager.config_discard_combos(&device)?;
+    println!("  COMBO DISCARD: OK");
+    Ok(())
+}
+
+fn combo_reset_to_keymap(config_path: Option<PathBuf>, uid: DeviceUid) -> Result<(), CliError> {
+    let (mut manager, device) = combo_mutation_device(config_path, uid)?;
+    print_combo_device(&device);
+    manager.config_reset_combos_to_keymap(&device)?;
+    println!("  COMBO RESET_TO_KEYMAP: OK");
+    Ok(())
+}
+
 fn print_binding(label: &str, binding: EncoderBinding) {
     println!(
         "    {label}: behavior_id=0x{:04x} param1={} param2={}",
@@ -726,8 +1029,16 @@ enum CliError {
     ActiveApp(#[from] rawhid_host_core::active_app::ActiveAppError),
     #[error("{0}")]
     Hid(#[from] rawhid_host_core::hid::HidError),
+    #[error("{0}")]
+    Packet(#[from] rawhid_host_core::packet::PacketError),
     #[error("could not determine a config path")]
     NoConfigPath,
+    #[error("no verified CONFIG_RPC devices with a usable Host Link endpoint were found")]
+    NoComboDevices,
+    #[error("no verified CONFIG_RPC device matched uid:{0:016x}")]
+    ComboDeviceNotFound(u64),
+    #[error("multiple CONFIG_RPC devices matched uid:{0:016x}")]
+    AmbiguousComboDevice(u64),
 }
 
 #[allow(dead_code)]

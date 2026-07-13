@@ -7,6 +7,9 @@ import type {
   EditBehavior,
   EncoderBindingsDto,
   EncoderInfoDto,
+  ComboInfoDto,
+  ComboItemDto,
+  ComboItemInputDto,
   KeyPressEvent,
   KeyCatalogEntry,
   KeyStatsSummary,
@@ -103,12 +106,12 @@ export const studioRenameLayer = (deviceId: string, layerId: number, name: strin
   invoke<StudioKeymapSnapshot>("studio_rename_layer", { deviceId, layerId, name });
 export const studioRemoveLayer = (deviceId: string, layerIndex: number) =>
   invoke<StudioKeymapSnapshot>("studio_remove_layer", { deviceId, layerIndex });
-export const studioSaveChanges = (deviceId: string, hostLinkUid: string | null) =>
-  invoke<SaveOrDiscardResultDto>("studio_save_changes", { deviceId, hostLinkUid });
-export const studioDiscardChanges = (deviceId: string, hostLinkUid: string | null) =>
-  invoke<DiscardChangesDto>("studio_discard_changes", { deviceId, hostLinkUid });
-export const studioResetToKeymap = (deviceId: string, hostLinkUid: string | null) =>
-  invoke<ResetToKeymapDto>("studio_reset_to_keymap", { deviceId, hostLinkUid });
+export const studioSaveChanges = (deviceId: string, hostLinkUid: string | null, comboHostLinkUid: string | null) =>
+  invoke<SaveOrDiscardResultDto>("studio_save_changes", { deviceId, hostLinkUid, comboHostLinkUid });
+export const studioDiscardChanges = (deviceId: string, hostLinkUid: string | null, comboHostLinkUid: string | null) =>
+  invoke<DiscardChangesDto>("studio_discard_changes", { deviceId, hostLinkUid, comboHostLinkUid });
+export const studioResetToKeymap = (deviceId: string, hostLinkUid: string | null, comboHostLinkUid: string | null) =>
+  invoke<ResetToKeymapDto>("studio_reset_to_keymap", { deviceId, hostLinkUid, comboHostLinkUid });
 export const studioHasUnsaved = (deviceId: string) =>
   invoke<boolean>("studio_has_unsaved", { deviceId });
 export const studioResyncEditState = (deviceId: string) =>
@@ -177,6 +180,24 @@ export const studioEncoderClearOverride = (
   encoderId: number
 ) =>
   invoke<void>("studio_encoder_clear_override", { hostLinkUid, layerId, encoderId });
+
+// Combo Config RPC
+export const readComboInfo = (hostLinkUid: string) =>
+  invoke<ComboInfoDto>("read_combo_info", { hostLinkUid });
+export const readCombo = (deviceId: string, hostLinkUid: string, slot: number) =>
+  invoke<ComboItemDto>("read_combo", { deviceId, hostLinkUid, slot });
+export const studioSetCombo = (deviceId: string, hostLinkUid: string, item: ComboItemInputDto) =>
+  invoke<ComboItemDto>("studio_set_combo", { deviceId, hostLinkUid, item });
+export const studioComboHasUnsaved = (hostLinkUid: string) =>
+  invoke<boolean>("studio_combo_has_unsaved", { hostLinkUid });
+export const studioComboSave = (hostLinkUid: string) =>
+  invoke<void>("studio_combo_save", { hostLinkUid });
+export const studioComboDiscard = (hostLinkUid: string) =>
+  invoke<void>("studio_combo_discard", { hostLinkUid });
+export const studioComboDelete = (hostLinkUid: string, slot: number) =>
+  invoke<void>("studio_combo_delete", { hostLinkUid, slot });
+export const studioComboResetToKeymap = (hostLinkUid: string) =>
+  invoke<void>("studio_combo_reset_to_keymap", { hostLinkUid });
 
 // ─── Monitoring ───────────────────────────────────────────────────────────────
 

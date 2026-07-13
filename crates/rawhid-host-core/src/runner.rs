@@ -15,7 +15,8 @@ use crate::{
     config::{AppConfig, UnmatchedAction},
     hid::{DeviceInfo, HidDeviceManager, HidError, HidTransport, ProbeResult},
     packet::{
-        EncoderBinding, EncoderGetBindings, EncoderGetInfo, UplinkPacket, CAPABILITY_CONFIG_RPC,
+        ComboInfo, ComboItem, EncoderBinding, EncoderGetBindings, EncoderGetInfo, UplinkPacket,
+        CAPABILITY_CONFIG_RPC,
     },
     stats::SharedKeyStatsStore,
     time::{Clock, SystemClock, TimeError, TimeSnapshot, TimeSyncState},
@@ -268,6 +269,46 @@ where
         let device = self.config_device(uid)?;
         self.hid
             .config_clear_encoder_override(&device, layer_id, encoder_id)
+    }
+
+    pub fn config_get_combo_info(&mut self, uid: u64) -> Result<ComboInfo, HidError> {
+        let device = self.config_device(uid)?;
+        self.hid.config_get_combo_info(&device)
+    }
+
+    pub fn config_get_combo(&mut self, uid: u64, slot: u8) -> Result<ComboItem, HidError> {
+        let device = self.config_device(uid)?;
+        self.hid.config_get_combo(&device, slot)
+    }
+
+    pub fn config_set_combo(&mut self, uid: u64, item: ComboItem) -> Result<(), HidError> {
+        let device = self.config_device(uid)?;
+        self.hid.config_set_combo(&device, item)
+    }
+
+    pub fn config_get_combo_dirty(&mut self, uid: u64) -> Result<bool, HidError> {
+        let device = self.config_device(uid)?;
+        self.hid.config_get_combo_dirty(&device)
+    }
+
+    pub fn config_save_combos(&mut self, uid: u64) -> Result<(), HidError> {
+        let device = self.config_device(uid)?;
+        self.hid.config_save_combos(&device)
+    }
+
+    pub fn config_discard_combos(&mut self, uid: u64) -> Result<(), HidError> {
+        let device = self.config_device(uid)?;
+        self.hid.config_discard_combos(&device)
+    }
+
+    pub fn config_delete_combo(&mut self, uid: u64, slot: u8) -> Result<(), HidError> {
+        let device = self.config_device(uid)?;
+        self.hid.config_delete_combo(&device, slot)
+    }
+
+    pub fn config_reset_combos_to_keymap(&mut self, uid: u64) -> Result<(), HidError> {
+        let device = self.config_device(uid)?;
+        self.hid.config_reset_combos_to_keymap(&device)
     }
 
     /// Attach the shared key-stats store fed by KEY_STATS uplink packets.

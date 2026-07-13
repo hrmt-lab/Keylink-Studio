@@ -17,8 +17,8 @@ use rawhid_host_core::{
     config::{load_config, ActionsConfig, AppConfig, ConfigPaths},
     hid::{HidDeviceManager, HidError, ProbeResult},
     packet::{
-        ConfigStatus, EncoderBinding, EncoderBindingFlags, EncoderBindingSource,
-        EncoderGetBindings, EncoderGetInfo, UplinkPacket,
+        ComboBinding, ComboInfo, ComboItem, ConfigStatus, EncoderBinding, EncoderBindingFlags,
+        EncoderBindingSource, EncoderGetBindings, EncoderGetInfo, UplinkPacket,
     },
     runner::{uplink_device_key, RunEvent, Runner},
     stats::{KeyStatsSummary, SharedKeyStatsStore, StatsPeriod},
@@ -1331,18 +1331,37 @@ pub struct ResetToKeymapDto {
     pub refresh_error: Option<String>,
 }
 
-fn config_save_or_discard_from_feature(feature: ConfigFeatureResultDto) -> ConfigSaveOrDiscardDto {
+fn config_save_or_discard_from_features(
+    results: Vec<ConfigFeatureResultDto>,
+) -> ConfigSaveOrDiscardDto {
+    let attempted = results.iter().any(|feature| feature.attempted);
+    let skipped = results.iter().all(|feature| feature.skipped);
+    let success = results.iter().all(|feature| feature.success);
     ConfigSaveOrDiscardDto {
-        attempted: feature.attempted,
-        skipped: feature.skipped,
-        success: feature.success,
-        results: vec![feature],
+        attempted,
+        skipped,
+        success,
+        results,
     }
 }
 
-fn failed_encoder_feature(error: impl Into<String>) -> ConfigFeatureResultDto {
+fn config_save_or_discard_from_feature(feature: ConfigFeatureResultDto) -> ConfigSaveOrDiscardDto {
+    config_save_or_discard_from_features(vec![feature])
+}
+
+fn skipped_config_feature(feature: &str) -> ConfigFeatureResultDto {
     ConfigFeatureResultDto {
-        feature: "ENCODER".to_string(),
+        feature: feature.to_string(),
+        attempted: false,
+        skipped: true,
+        success: true,
+        error: None,
+    }
+}
+
+fn failed_config_feature(feature: &str, error: impl Into<String>) -> ConfigFeatureResultDto {
+    ConfigFeatureResultDto {
+        feature: feature.to_string(),
         attempted: true,
         skipped: false,
         success: false,
@@ -1350,9 +1369,87 @@ fn failed_encoder_feature(error: impl Into<String>) -> ConfigFeatureResultDto {
     }
 }
 
+fn failed_encoder_feature(error: impl Into<String>) -> ConfigFeatureResultDto {
+    failed_config_feature("ENCODER", error)
+}
+
 enum EncoderFeatureOp {
     Save,
     Discard,
+}
+
+enum ComboFeatureOp {
+    Save,
+    Discard,
+}
+
+fn run_combo_feature(
+    tx: mpsc::Sender<MonitorCommand>,
+    timeout: Duration,
+    host_link_uid: String,
+    op: ComboFeatureOp,
+) -> ConfigFeatureResultDto {
+    let fail = |error: String| failed_config_feature("COMBO", error);
+    let target_uid = match parse_host_link_uid(&host_link_uid) {
+        Ok(uid) => uid,
+        Err(error) => return fail(error),
+    };
+    let dirty = match host_link_call(&tx, timeout, target_uid, HostLinkRequest::ComboGetDirty) {
+        Ok(HostLinkResponse::Dirty(dirty)) => dirty,
+        Ok(_) => return fail("hostlink_invalid_response".to_string()),
+        Err(error) => return fail(error),
+    };
+    if !dirty {
+        return skipped_config_feature("COMBO");
+    }
+    let request = match op {
+        ComboFeatureOp::Save => HostLinkRequest::ComboSave,
+        ComboFeatureOp::Discard => HostLinkRequest::ComboDiscard,
+    };
+    match host_link_call(&tx, timeout, target_uid, request) {
+        Ok(HostLinkResponse::Done) => ConfigFeatureResultDto {
+            feature: "COMBO".to_string(),
+            attempted: true,
+            skipped: false,
+            success: true,
+            error: None,
+        },
+        Ok(_) => fail("hostlink_invalid_response".to_string()),
+        Err(error) => fail(error),
+    }
+}
+
+fn run_combo_reset_to_keymap(
+    tx: mpsc::Sender<MonitorCommand>,
+    timeout: Duration,
+    host_link_uid: String,
+) -> ConfigFeatureResultDto {
+    let fail = |error: String| failed_config_feature("COMBO", error);
+    let target_uid = match parse_host_link_uid(&host_link_uid) {
+        Ok(uid) => uid,
+        Err(error) => return fail(error),
+    };
+    match host_link_call(
+        &tx,
+        timeout,
+        target_uid,
+        HostLinkRequest::ComboResetToKeymap,
+    ) {
+        Ok(HostLinkResponse::Done) => {}
+        Ok(_) => return fail("hostlink_invalid_response".to_string()),
+        Err(error) => return fail(error),
+    }
+    match host_link_call(&tx, timeout, target_uid, HostLinkRequest::ComboSave) {
+        Ok(HostLinkResponse::Done) => ConfigFeatureResultDto {
+            feature: "COMBO".to_string(),
+            attempted: true,
+            skipped: false,
+            success: true,
+            error: None,
+        },
+        Ok(_) => fail("hostlink_invalid_response".to_string()),
+        Err(error) => fail(error),
+    }
 }
 
 fn run_encoder_feature(
@@ -1587,6 +1684,7 @@ fn run_encoder_discard_with_rollback(
 pub async fn studio_save_changes(
     device_id: String,
     host_link_uid: Option<String>,
+    combo_host_link_uid: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<SaveOrDiscardResultDto, String> {
     let edit = Arc::clone(&state.studio_edit);
@@ -1650,32 +1748,38 @@ pub async fn studio_save_changes(
     .map_err(|_| "studio_save_failed".to_string())?;
 
     let saved_uid = host_link_uid.clone();
-    let config = match host_link_uid {
-        None => config_save_or_discard_from_feature(ConfigFeatureResultDto {
-            feature: "ENCODER".to_string(),
-            attempted: false,
-            skipped: true,
-            success: true,
-            error: None,
-        }),
-        Some(uid) => {
-            let feature = match host_link_sender(state.inner()) {
-                Ok(tx) => {
-                    let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
-                    match tauri::async_runtime::spawn_blocking(move || {
-                        run_encoder_feature(tx, timeout, uid, EncoderFeatureOp::Save)
-                    })
-                    .await
-                    {
-                        Ok(feature) => feature,
-                        Err(_) => failed_encoder_feature("studio_encoder_save_failed"),
-                    }
+    let encoder_feature = match host_link_uid {
+        None => skipped_config_feature("ENCODER"),
+        Some(uid) => match host_link_sender(state.inner()) {
+            Ok(tx) => {
+                let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+                match tauri::async_runtime::spawn_blocking(move || {
+                    run_encoder_feature(tx, timeout, uid, EncoderFeatureOp::Save)
+                })
+                .await
+                {
+                    Ok(feature) => feature,
+                    Err(_) => failed_encoder_feature("studio_encoder_save_failed"),
                 }
-                Err(error) => failed_encoder_feature(error),
-            };
-            config_save_or_discard_from_feature(feature)
-        }
+            }
+            Err(error) => failed_encoder_feature(error),
+        },
     };
+    let combo_feature = match combo_host_link_uid {
+        None => skipped_config_feature("COMBO"),
+        Some(uid) => match host_link_sender(state.inner()) {
+            Ok(tx) => {
+                let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+                tauri::async_runtime::spawn_blocking(move || {
+                    run_combo_feature(tx, timeout, uid, ComboFeatureOp::Save)
+                })
+                .await
+                .unwrap_or_else(|_| failed_config_feature("COMBO", "studio_combo_save_failed"))
+            }
+            Err(error) => failed_config_feature("COMBO", error),
+        },
+    };
+    let config = config_save_or_discard_from_features(vec![encoder_feature, combo_feature]);
 
     if config.success {
         if let Some(uid) = saved_uid {
@@ -1703,6 +1807,7 @@ pub async fn studio_save_changes(
 pub async fn studio_discard_changes(
     device_id: String,
     host_link_uid: Option<String>,
+    combo_host_link_uid: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<DiscardChangesDto, String> {
     let edit = Arc::clone(&state.studio_edit);
@@ -1773,35 +1878,39 @@ pub async fn studio_discard_changes(
                 .get(&(device_id.clone(), uid))
                 .cloned()
         });
-    let config = match host_link_uid {
-        None => config_save_or_discard_from_feature(ConfigFeatureResultDto {
-            feature: "ENCODER".to_string(),
-            attempted: false,
-            skipped: true,
-            success: true,
-            error: None,
-        }),
-        Some(uid) => {
-            let feature = match host_link_sender(state.inner()) {
-                Ok(tx) => {
-                    let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
-                    match tauri::async_runtime::spawn_blocking(move || match rollback {
-                        Some(rollback) => {
-                            run_encoder_discard_with_rollback(tx, timeout, uid, rollback)
-                        }
-                        None => run_encoder_feature(tx, timeout, uid, EncoderFeatureOp::Discard),
-                    })
-                    .await
-                    {
-                        Ok(feature) => feature,
-                        Err(_) => failed_encoder_feature("studio_encoder_discard_failed"),
-                    }
+    let encoder_feature = match host_link_uid {
+        None => skipped_config_feature("ENCODER"),
+        Some(uid) => match host_link_sender(state.inner()) {
+            Ok(tx) => {
+                let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+                match tauri::async_runtime::spawn_blocking(move || match rollback {
+                    Some(rollback) => run_encoder_discard_with_rollback(tx, timeout, uid, rollback),
+                    None => run_encoder_feature(tx, timeout, uid, EncoderFeatureOp::Discard),
+                })
+                .await
+                {
+                    Ok(feature) => feature,
+                    Err(_) => failed_encoder_feature("studio_encoder_discard_failed"),
                 }
-                Err(error) => failed_encoder_feature(error),
-            };
-            config_save_or_discard_from_feature(feature)
-        }
+            }
+            Err(error) => failed_encoder_feature(error),
+        },
     };
+    let combo_feature = match combo_host_link_uid {
+        None => skipped_config_feature("COMBO"),
+        Some(uid) => match host_link_sender(state.inner()) {
+            Ok(tx) => {
+                let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+                tauri::async_runtime::spawn_blocking(move || {
+                    run_combo_feature(tx, timeout, uid, ComboFeatureOp::Discard)
+                })
+                .await
+                .unwrap_or_else(|_| failed_config_feature("COMBO", "studio_combo_discard_failed"))
+            }
+            Err(error) => failed_config_feature("COMBO", error),
+        },
+    };
+    let config = config_save_or_discard_from_features(vec![encoder_feature, combo_feature]);
 
     if config.success {
         if let Some(uid) = discarded_uid {
@@ -1830,6 +1939,7 @@ pub async fn studio_discard_changes(
 pub async fn studio_reset_to_keymap(
     device_id: String,
     host_link_uid: Option<String>,
+    combo_host_link_uid: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<ResetToKeymapDto, String> {
     // Verify the optional encoder transport before touching the Studio state.
@@ -1954,7 +2064,7 @@ pub async fn studio_reset_to_keymap(
     .await
     .map_err(|_| "studio_reset_to_keymap_failed".to_string())?;
 
-    let config = if !studio.success || refresh_error.is_some() {
+    let encoder_config = if !studio.success || refresh_error.is_some() {
         config_save_or_discard_from_feature(ConfigFeatureResultDto {
             feature: "ENCODER".to_string(),
             attempted: false,
@@ -1984,6 +2094,27 @@ pub async fn studio_reset_to_keymap(
             error: None,
         })
     };
+
+    let combo_feature = if !studio.success || refresh_error.is_some() {
+        skipped_config_feature("COMBO")
+    } else if let Some(uid) = combo_host_link_uid {
+        match host_link_sender(state.inner()) {
+            Ok(tx) => {
+                let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+                tauri::async_runtime::spawn_blocking(move || {
+                    run_combo_reset_to_keymap(tx, timeout, uid)
+                })
+                .await
+                .unwrap_or_else(|_| failed_config_feature("COMBO", "studio_combo_reset_failed"))
+            }
+            Err(error) => failed_config_feature("COMBO", error),
+        }
+    } else {
+        skipped_config_feature("COMBO")
+    };
+    let mut config_results = encoder_config.results;
+    config_results.push(combo_feature);
+    let config = config_save_or_discard_from_features(config_results);
 
     let overall_success = studio.success && refresh_error.is_none() && config.success;
     if overall_success {
@@ -2660,6 +2791,326 @@ pub async fn studio_encoder_clear_override(
     .map_err(|_| "studio_encoder_clear_override_failed".to_string())?
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ComboInfoDto {
+    pub max_combos: u8,
+    pub max_keys_per_combo: u8,
+    pub combo_count: u8,
+    pub flags: u8,
+    pub occupied_slots: u32,
+    pub stale_slots: u32,
+    pub invalid_slots: u32,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ComboBindingDto {
+    pub behavior_id: u16,
+    pub param1: u32,
+    pub param2: u32,
+    #[serde(default)]
+    pub label: Option<StudioBindingLabelPatch>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
+pub struct ComboItemDto {
+    pub slot: u8,
+    pub name: String,
+    pub key_positions: Vec<u16>,
+    pub slow_release: bool,
+    pub binding: ComboBindingDto,
+    pub layer_mask: u32,
+    pub timeout_ms: u16,
+    pub require_prior_idle_ms: Option<u16>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ComboItemInputDto {
+    pub slot: u8,
+    pub name: String,
+    pub key_positions: Vec<u16>,
+    pub slow_release: bool,
+    /// Kept when an existing Combo is edited without changing its behavior.
+    pub binding: ComboBindingDto,
+    /// A newly selected behavior is resolved through the connected firmware's
+    /// Studio catalog. This is deliberately separate from the wire DTO because
+    /// behavior ids are build-specific.
+    pub behavior: Option<EditBehaviorDto>,
+    pub layer_mask: u32,
+    pub timeout_ms: u16,
+    pub require_prior_idle_ms: Option<u16>,
+}
+
+fn combo_info_dto(info: ComboInfo) -> ComboInfoDto {
+    ComboInfoDto {
+        max_combos: info.max_combos,
+        max_keys_per_combo: info.max_keys_per_combo,
+        combo_count: info.combo_count,
+        flags: info.flags.bits(),
+        occupied_slots: info.occupied_slots,
+        stale_slots: info.stale_slots,
+        invalid_slots: info.invalid_slots,
+    }
+}
+
+fn combo_item_dto(item: ComboItem, label: Option<StudioBindingLabelPatch>) -> ComboItemDto {
+    ComboItemDto {
+        slot: item.slot,
+        name: item.name.as_str().to_string(),
+        key_positions: item.key_positions[..usize::from(item.key_count)].to_vec(),
+        slow_release: item.flags.slow_release(),
+        binding: ComboBindingDto {
+            behavior_id: item.binding.behavior_id,
+            param1: item.binding.param1,
+            param2: item.binding.param2,
+            label,
+        },
+        layer_mask: item.layer_mask,
+        timeout_ms: item.timeout_ms,
+        require_prior_idle_ms: item.require_prior_idle_ms,
+    }
+}
+
+/// Resolve the build-specific behavior id for passive Combo display.  A
+/// Studio lookup failure must not prevent Config RPC reads, so callers retain
+/// the raw binding and use a UI fallback when this returns `None`.
+fn label_combo_binding_for_device(
+    device_id: &str,
+    edit: &Arc<Mutex<Option<StudioEditSession>>>,
+    studio_config: &rawhid_host_core::config::StudioConfig,
+    binding: ComboBinding,
+    timeout: Duration,
+) -> Option<StudioBindingLabelPatch> {
+    let raw = vec![StudioRawBinding {
+        behavior_id: i32::from(binding.behavior_id),
+        param1: binding.param1,
+        param2: binding.param2,
+    }];
+    let labels = {
+        let mut guard = edit.lock().unwrap();
+        match guard.as_mut() {
+            Some(session) if session.device_id == device_id => {
+                session.resolve_behavior_labels(raw, timeout)
+            }
+            _ => {
+                drop(guard);
+                resolve_behavior_labels_for_device(device_id, raw, studio_config)
+            }
+        }
+    };
+    labels.ok().and_then(|mut labels| labels.pop())
+}
+
+fn combo_item_from_dto(
+    item: ComboItemInputDto,
+    binding: ComboBinding,
+) -> Result<ComboItem, String> {
+    ComboItem::new(
+        item.slot,
+        &item.name,
+        &item.key_positions,
+        item.slow_release,
+        binding,
+        item.layer_mask,
+        item.timeout_ms,
+        item.require_prior_idle_ms,
+    )
+    .map_err(|error| format!("combo_invalid_argument:{error}"))
+}
+
+#[tauri::command]
+pub async fn read_combo_info(
+    host_link_uid: String,
+    state: State<'_, AppState>,
+) -> Result<ComboInfoDto, String> {
+    let uid = parse_host_link_uid(&host_link_uid)?;
+    let tx = host_link_sender(state.inner())?;
+    let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+    tauri::async_runtime::spawn_blocking(move || {
+        match host_link_call(&tx, timeout, uid, HostLinkRequest::ComboGetInfo)? {
+            HostLinkResponse::ComboInfo(info) => Ok(combo_info_dto(info)),
+            _ => Err("hostlink_invalid_response".to_string()),
+        }
+    })
+    .await
+    .map_err(|_| "read_combo_info_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn read_combo(
+    device_id: String,
+    host_link_uid: String,
+    slot: u8,
+    state: State<'_, AppState>,
+) -> Result<ComboItemDto, String> {
+    let uid = parse_host_link_uid(&host_link_uid)?;
+    let tx = host_link_sender(state.inner())?;
+    let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+    let studio_config = state.config.lock().unwrap().studio.clone();
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        match host_link_call(&tx, timeout, uid, HostLinkRequest::ComboGet { slot })? {
+            HostLinkResponse::ComboItem(item) => {
+                let label = label_combo_binding_for_device(
+                    &device_id,
+                    &edit,
+                    &studio_config,
+                    item.binding,
+                    timeout,
+                );
+                Ok(combo_item_dto(item, label))
+            }
+            _ => Err("hostlink_invalid_response".to_string()),
+        }
+    })
+    .await
+    .map_err(|_| "read_combo_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_set_combo(
+    device_id: String,
+    host_link_uid: String,
+    item: ComboItemInputDto,
+    state: State<'_, AppState>,
+) -> Result<ComboItemDto, String> {
+    let uid = parse_host_link_uid(&host_link_uid)?;
+    let tx = host_link_sender(state.inner())?;
+    let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+    let studio_config = state.config.lock().unwrap().studio.clone();
+    let edit = Arc::clone(&state.studio_edit);
+    tauri::async_runtime::spawn_blocking(move || {
+        let binding = match item.behavior.clone() {
+            Some(behavior) => {
+                let mut guard = edit.lock().unwrap();
+                let session = guard
+                    .as_mut()
+                    .ok_or_else(|| studio_error_code(StudioError::NoEditSession))?;
+                if session.device_id != device_id {
+                    return Err(studio_error_code(StudioError::SessionDeviceMismatch));
+                }
+                session
+                    .resolve_combo_binding(&EditBehavior::from(behavior))
+                    .map_err(encoder_resolve_error_code)?
+            }
+            None => ComboBinding {
+                behavior_id: item.binding.behavior_id,
+                param1: item.binding.param1,
+                param2: item.binding.param2,
+            },
+        };
+        let item = combo_item_from_dto(item, binding)?;
+        match host_link_call(&tx, timeout, uid, HostLinkRequest::ComboSet { item })? {
+            HostLinkResponse::Done => {
+                let label = label_combo_binding_for_device(
+                    &device_id,
+                    &edit,
+                    &studio_config,
+                    item.binding,
+                    timeout,
+                );
+                Ok(combo_item_dto(item, label))
+            }
+            _ => Err("hostlink_invalid_response".to_string()),
+        }
+    })
+    .await
+    .map_err(|_| "studio_set_combo_failed".to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_combo_has_unsaved(
+    host_link_uid: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let uid = parse_host_link_uid(&host_link_uid)?;
+    let tx = host_link_sender(state.inner())?;
+    let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+    tauri::async_runtime::spawn_blocking(move || {
+        match host_link_call(&tx, timeout, uid, HostLinkRequest::ComboGetDirty)? {
+            HostLinkResponse::Dirty(dirty) => Ok(dirty),
+            _ => Err("hostlink_invalid_response".to_string()),
+        }
+    })
+    .await
+    .map_err(|_| "studio_combo_has_unsaved_failed".to_string())?
+}
+
+async fn combo_simple_operation(
+    host_link_uid: String,
+    state: &AppState,
+    request: HostLinkRequest,
+    error: &'static str,
+) -> Result<(), String> {
+    let uid = parse_host_link_uid(&host_link_uid)?;
+    let tx = host_link_sender(state)?;
+    let timeout = host_link_reply_timeout(&state.config.lock().unwrap());
+    tauri::async_runtime::spawn_blocking(move || {
+        match host_link_call(&tx, timeout, uid, request)? {
+            HostLinkResponse::Done => Ok(()),
+            _ => Err("hostlink_invalid_response".to_string()),
+        }
+    })
+    .await
+    .map_err(|_| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn studio_combo_save(
+    host_link_uid: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    combo_simple_operation(
+        host_link_uid,
+        state.inner(),
+        HostLinkRequest::ComboSave,
+        "studio_combo_save_failed",
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn studio_combo_discard(
+    host_link_uid: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    combo_simple_operation(
+        host_link_uid,
+        state.inner(),
+        HostLinkRequest::ComboDiscard,
+        "studio_combo_discard_failed",
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn studio_combo_delete(
+    host_link_uid: String,
+    slot: u8,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    combo_simple_operation(
+        host_link_uid,
+        state.inner(),
+        HostLinkRequest::ComboDelete { slot },
+        "studio_combo_delete_failed",
+    )
+    .await
+}
+
+#[tauri::command]
+pub async fn studio_combo_reset_to_keymap(
+    host_link_uid: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    combo_simple_operation(
+        host_link_uid,
+        state.inner(),
+        HostLinkRequest::ComboResetToKeymap,
+        "studio_combo_reset_failed",
+    )
+    .await
+}
+
 #[tauri::command]
 pub async fn studio_end_edit(device_id: String, state: State<'_, AppState>) -> Result<(), String> {
     let edit = Arc::clone(&state.studio_edit);
@@ -3193,6 +3644,30 @@ fn execute_host_link_request(
             encoder_id,
         } => runner
             .config_clear_encoder_override(uid, layer_id, encoder_id)
+            .map(|()| HostLinkResponse::Done),
+        HostLinkRequest::ComboGetInfo => runner
+            .config_get_combo_info(uid)
+            .map(HostLinkResponse::ComboInfo),
+        HostLinkRequest::ComboGet { slot } => runner
+            .config_get_combo(uid, slot)
+            .map(HostLinkResponse::ComboItem),
+        HostLinkRequest::ComboSet { item } => runner
+            .config_set_combo(uid, item)
+            .map(|()| HostLinkResponse::Done),
+        HostLinkRequest::ComboGetDirty => runner
+            .config_get_combo_dirty(uid)
+            .map(HostLinkResponse::Dirty),
+        HostLinkRequest::ComboSave => runner
+            .config_save_combos(uid)
+            .map(|()| HostLinkResponse::Done),
+        HostLinkRequest::ComboDiscard => runner
+            .config_discard_combos(uid)
+            .map(|()| HostLinkResponse::Done),
+        HostLinkRequest::ComboDelete { slot } => runner
+            .config_delete_combo(uid, slot)
+            .map(|()| HostLinkResponse::Done),
+        HostLinkRequest::ComboResetToKeymap => runner
+            .config_reset_combos_to_keymap(uid)
             .map(|()| HostLinkResponse::Done),
     }
     .map_err(hid_error_code)
@@ -3873,6 +4348,26 @@ mod tests {
         assert_eq!(
             config.results[0].error.as_deref(),
             Some("hostlink_worker_unavailable")
+        );
+    }
+
+    #[test]
+    fn combined_config_result_keeps_encoder_and_combo_outcomes_separate() {
+        let config = config_save_or_discard_from_features(vec![
+            skipped_config_feature("ENCODER"),
+            failed_config_feature("COMBO", "config_rpc_status_storage_error"),
+        ]);
+
+        assert!(config.attempted);
+        assert!(!config.skipped);
+        assert!(!config.success);
+        assert_eq!(config.results.len(), 2);
+        assert_eq!(config.results[0].feature, "ENCODER");
+        assert!(config.results[0].skipped);
+        assert_eq!(config.results[1].feature, "COMBO");
+        assert_eq!(
+            config.results[1].error.as_deref(),
+            Some("config_rpc_status_storage_error")
         );
     }
 

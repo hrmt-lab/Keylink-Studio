@@ -13,9 +13,9 @@ use tracing::{debug, warn};
 use crate::{
     config::HidConfig,
     packet::{
-        AiUsagePacket, ConfigRequest, ConfigResponse, ConfigStatus, DeviceHello, EncoderBinding,
-        EncoderGetBindings, EncoderGetInfo, Packet, TimeSyncPacket, UplinkPacket,
-        CAPABILITY_CONFIG_RPC, PACKET_SIZE, REPORT_SIZE,
+        AiUsagePacket, ComboInfo, ComboItem, ConfigRequest, ConfigResponse, ConfigStatus,
+        DeviceHello, EncoderBinding, EncoderGetBindings, EncoderGetInfo, Packet, TimeSyncPacket,
+        UplinkPacket, CAPABILITY_CONFIG_RPC, PACKET_SIZE, REPORT_SIZE,
     },
 };
 
@@ -605,6 +605,94 @@ impl<T: HidTransport> HidDeviceManager<T> {
         self.send_config_status_request(device, request, "ENCODER CLEAR_OVERRIDE")
     }
 
+    pub fn config_get_combo_info(&mut self, device: &DeviceInfo) -> Result<ComboInfo, HidError> {
+        self.require_config_rpc(device)?;
+        let request = ConfigRequest::combo_get_info(self.next_seq());
+        let response = self.send_config_request_with_retry(device, request, "COMBO GET_INFO")?;
+        if response.status == ConfigStatus::Ok {
+            return response.combo_info.ok_or(HidError::ConfigRpcMissingPayload);
+        }
+        Err(HidError::ConfigRpcStatus(response.status))
+    }
+
+    pub fn config_get_combo(
+        &mut self,
+        device: &DeviceInfo,
+        slot: u8,
+    ) -> Result<ComboItem, HidError> {
+        self.require_config_rpc(device)?;
+        let request = ConfigRequest::combo_get_combo(self.next_seq(), slot)?;
+        let response = self.send_config_request_with_retry(device, request, "COMBO GET_COMBO")?;
+        if response.status == ConfigStatus::Ok {
+            return response.combo_item.ok_or(HidError::ConfigRpcMissingPayload);
+        }
+        Err(HidError::ConfigRpcStatus(response.status))
+    }
+
+    pub fn config_set_combo(
+        &mut self,
+        device: &DeviceInfo,
+        item: ComboItem,
+    ) -> Result<(), HidError> {
+        self.require_config_rpc(device)?;
+        let request = ConfigRequest::combo_set_combo(self.next_seq(), item)?;
+        self.send_config_status_request(device, request, "COMBO SET_COMBO")
+    }
+
+    pub fn config_get_combo_dirty(&mut self, device: &DeviceInfo) -> Result<bool, HidError> {
+        self.require_config_rpc(device)?;
+        let request = ConfigRequest::combo_get_dirty(self.next_seq());
+        let response = self.send_config_request_with_retry(device, request, "COMBO GET_DIRTY")?;
+        if response.status == ConfigStatus::Ok {
+            return response
+                .combo_dirty
+                .ok_or(HidError::ConfigRpcMissingPayload);
+        }
+        Err(HidError::ConfigRpcStatus(response.status))
+    }
+
+    pub fn config_save_combos(&mut self, device: &DeviceInfo) -> Result<(), HidError> {
+        self.require_config_rpc(device)?;
+        let request = ConfigRequest::combo_save(self.next_seq());
+        // Combo SAVE completes on the firmware workqueue after the USB callback
+        // returns. Keep the ordinary Config RPC timeout for every other op, but
+        // allow enough room for one NVS table write before retrying the same request.
+        const COMBO_SAVE_TIMEOUT_MS: i32 = 1_500;
+        let timeout_ms = self.config.hello_timeout_ms.max(COMBO_SAVE_TIMEOUT_MS);
+        let response =
+            self.send_config_request_with_retry_timeout(device, request, "COMBO SAVE", timeout_ms)?;
+        if response.status == ConfigStatus::Ok {
+            Ok(())
+        } else {
+            Err(HidError::ConfigRpcStatus(response.status))
+        }
+    }
+
+    pub fn config_discard_combos(&mut self, device: &DeviceInfo) -> Result<(), HidError> {
+        self.require_config_rpc(device)?;
+        let request = ConfigRequest::combo_discard(self.next_seq());
+        self.send_config_status_request(device, request, "COMBO DISCARD")
+    }
+
+    pub fn config_delete_combo(&mut self, device: &DeviceInfo, slot: u8) -> Result<(), HidError> {
+        self.require_config_rpc(device)?;
+        let request = ConfigRequest::combo_delete_combo(self.next_seq(), slot)?;
+        self.send_config_status_request(device, request, "COMBO DELETE_COMBO")
+    }
+
+    pub fn config_reset_combos_to_keymap(&mut self, device: &DeviceInfo) -> Result<(), HidError> {
+        self.require_config_rpc(device)?;
+        let request = ConfigRequest::combo_reset_to_keymap(self.next_seq());
+        self.send_config_status_request(device, request, "COMBO RESET_TO_KEYMAP")
+    }
+
+    fn require_config_rpc(&self, device: &DeviceInfo) -> Result<(), HidError> {
+        if device.capabilities & CAPABILITY_CONFIG_RPC == 0 {
+            return Err(HidError::ConfigRpcUnsupported);
+        }
+        Ok(())
+    }
+
     fn send_config_status_request(
         &mut self,
         device: &DeviceInfo,
@@ -624,6 +712,21 @@ impl<T: HidTransport> HidDeviceManager<T> {
         request: ConfigRequest,
         label: &str,
     ) -> Result<ConfigResponse, HidError> {
+        self.send_config_request_with_retry_timeout(
+            device,
+            request,
+            label,
+            self.config.hello_timeout_ms,
+        )
+    }
+
+    fn send_config_request_with_retry_timeout(
+        &mut self,
+        device: &DeviceInfo,
+        request: ConfigRequest,
+        label: &str,
+        timeout_ms: i32,
+    ) -> Result<ConfigResponse, HidError> {
         // Windows hidapi can leave the handle in an overlapped I/O state after
         // the HELLO/probe read path. Config RPC is synchronous request/response,
         // so reopen once before the first write to keep it isolated from probe.
@@ -632,7 +735,7 @@ impl<T: HidTransport> HidDeviceManager<T> {
         const MAX_ATTEMPTS: usize = 2;
         for attempt in 0..MAX_ATTEMPTS {
             self.send_report_to_device(device, request.encode_report())?;
-            match self.wait_for_config_response(device, request)? {
+            match self.wait_for_config_response(device, request, timeout_ms)? {
                 Some(response) => return Ok(response),
                 None if attempt + 1 < MAX_ATTEMPTS => {
                     debug!(
@@ -650,9 +753,9 @@ impl<T: HidTransport> HidDeviceManager<T> {
         &mut self,
         device: &DeviceInfo,
         request: ConfigRequest,
+        timeout_ms: i32,
     ) -> Result<Option<ConfigResponse>, HidError> {
-        let deadline =
-            Instant::now() + Duration::from_millis(self.config.hello_timeout_ms.max(1) as u64);
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms.max(1) as u64);
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
@@ -1696,6 +1799,179 @@ mod tests {
         let writes = manager.transport.writes.borrow();
         assert_eq!(writes.len(), 2);
         assert_eq!(writes[0].1, writes[1].1);
+    }
+
+    fn combo_item(slot: u8) -> crate::packet::ComboItem {
+        crate::packet::ComboItem::new(
+            slot,
+            "test",
+            &[1, 2],
+            false,
+            crate::packet::ComboBinding {
+                behavior_id: 1,
+                param1: 2,
+                param2: 3,
+            },
+            0,
+            50,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn combo_get_info_ignores_mismatched_seq_feature_and_op() {
+        let info = crate::packet::ComboInfo {
+            max_combos: 32,
+            max_keys_per_combo: 8,
+            combo_count: 6,
+            flags: crate::packet::ComboInfoFlags::default(),
+            occupied_slots: 0x3f,
+            stale_slots: 0,
+            invalid_slots: 0,
+        };
+        let transport = MockTransport::default();
+        let responses = vec![
+            crate::packet::ConfigResponse::combo_get_info_ok(99, info).encode_payload(),
+            crate::packet::ConfigResponse::status(
+                0,
+                crate::packet::ConfigFeature::Encoder as u8,
+                crate::packet::ConfigOp::GetInfo as u8,
+                crate::packet::ConfigStatus::Ok,
+            )
+            .encode_payload(),
+            crate::packet::ConfigResponse::status(
+                0,
+                crate::packet::ConfigFeature::Combo as u8,
+                crate::packet::ComboConfigOp::Save as u8,
+                crate::packet::ConfigStatus::Ok,
+            )
+            .encode_payload(),
+            crate::packet::ConfigResponse::combo_get_info_ok(0, info).encode_payload(),
+        ];
+        transport
+            .uplink
+            .borrow_mut()
+            .insert("a".to_string(), VecDeque::from(responses));
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        let device = device_with_capabilities("a", crate::packet::CAPABILITY_CONFIG_RPC);
+
+        assert_eq!(manager.config_get_combo_info(&device).unwrap(), info);
+        assert_eq!(manager.transport.writes.borrow().len(), 1);
+    }
+
+    #[test]
+    fn combo_get_info_retries_identical_request_once_on_timeout() {
+        let transport = MockTransport::default();
+        let config = HidConfig {
+            hello_timeout_ms: 1,
+            ..HidConfig::default()
+        };
+        let mut manager = HidDeviceManager::new(config, transport);
+        let device = device_with_capabilities("a", crate::packet::CAPABILITY_CONFIG_RPC);
+
+        let error = manager.config_get_combo_info(&device).unwrap_err();
+
+        assert!(matches!(error, HidError::ConfigRpcTimeout));
+        let writes = manager.transport.writes.borrow();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0].1, writes[1].1);
+    }
+
+    #[test]
+    fn combo_get_combo_maps_not_found_status() {
+        let transport = MockTransport::default();
+        let response = crate::packet::ConfigResponse::status(
+            0,
+            crate::packet::ConfigFeature::Combo as u8,
+            crate::packet::ComboConfigOp::GetCombo as u8,
+            crate::packet::ConfigStatus::NotFound,
+        )
+        .encode_payload();
+        transport
+            .uplink
+            .borrow_mut()
+            .insert("a".to_string(), VecDeque::from(vec![response]));
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        let device = device_with_capabilities("a", crate::packet::CAPABILITY_CONFIG_RPC);
+
+        assert!(matches!(
+            manager.config_get_combo(&device, 31).unwrap_err(),
+            HidError::ConfigRpcStatus(crate::packet::ConfigStatus::NotFound)
+        ));
+    }
+
+    #[test]
+    fn combo_set_maps_busy_and_save_maps_storage_error() {
+        let transport = MockTransport::default();
+        let responses = vec![
+            crate::packet::ConfigResponse::status(
+                0,
+                crate::packet::ConfigFeature::Combo as u8,
+                crate::packet::ComboConfigOp::SetCombo as u8,
+                crate::packet::ConfigStatus::Busy,
+            )
+            .encode_payload(),
+            crate::packet::ConfigResponse::status(
+                1,
+                crate::packet::ConfigFeature::Combo as u8,
+                crate::packet::ComboConfigOp::Save as u8,
+                crate::packet::ConfigStatus::StorageError,
+            )
+            .encode_payload(),
+        ];
+        transport
+            .uplink
+            .borrow_mut()
+            .insert("a".to_string(), VecDeque::from(responses));
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        let device = device_with_capabilities("a", crate::packet::CAPABILITY_CONFIG_RPC);
+
+        assert!(matches!(
+            manager
+                .config_set_combo(&device, combo_item(31))
+                .unwrap_err(),
+            HidError::ConfigRpcStatus(crate::packet::ConfigStatus::Busy)
+        ));
+        assert!(matches!(
+            manager.config_save_combos(&device).unwrap_err(),
+            HidError::ConfigRpcStatus(crate::packet::ConfigStatus::StorageError)
+        ));
+    }
+
+    #[test]
+    fn combo_delete_discard_and_reset_send_typed_ops() {
+        let transport = MockTransport::default();
+        let responses = [
+            crate::packet::ComboConfigOp::DeleteCombo,
+            crate::packet::ComboConfigOp::Discard,
+            crate::packet::ComboConfigOp::ResetToKeymap,
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(seq, op)| {
+            crate::packet::ConfigResponse::status(
+                seq as u8,
+                crate::packet::ConfigFeature::Combo as u8,
+                op as u8,
+                crate::packet::ConfigStatus::Ok,
+            )
+            .encode_payload()
+        })
+        .collect::<Vec<_>>();
+        transport
+            .uplink
+            .borrow_mut()
+            .insert("a".to_string(), VecDeque::from(responses));
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        let device = device_with_capabilities("a", crate::packet::CAPABILITY_CONFIG_RPC);
+
+        manager.config_delete_combo(&device, 31).unwrap();
+        manager.config_discard_combos(&device).unwrap();
+        manager.config_reset_combos_to_keymap(&device).unwrap();
+        let writes = manager.transport.writes.borrow();
+        assert_eq!(writes.len(), 3);
+        assert_eq!(writes[0].1[1 + crate::packet::PAYLOAD_OFFSET], 31);
     }
 
     #[test]

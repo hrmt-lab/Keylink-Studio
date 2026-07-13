@@ -472,6 +472,39 @@ export interface EncoderBindingsDto {
   ccw: EncoderBindingDto;
 }
 
+export interface ComboInfoDto {
+  max_combos: number;
+  max_keys_per_combo: number;
+  combo_count: number;
+  flags: number;
+  occupied_slots: number;
+  stale_slots: number;
+  invalid_slots: number;
+}
+
+export interface ComboBindingDto {
+  behavior_id: number;
+  param1: number;
+  param2: number;
+  label: StudioBindingLabelPatch | null;
+}
+
+export interface ComboItemDto {
+  slot: number;
+  name: string;
+  key_positions: number[];
+  slow_release: boolean;
+  binding: ComboBindingDto;
+  layer_mask: number;
+  timeout_ms: number;
+  require_prior_idle_ms: number | null;
+}
+
+export interface ComboItemInputDto extends ComboItemDto {
+  /** A picker result is resolved against the connected firmware on apply. */
+  behavior: EditBehavior | null;
+}
+
 // Outcome of attempting a save-or-discard operation on a single target
 // (Studio RPC keys, or a Config RPC feature). `skipped` implies
 // `success: true`: there was nothing to do or no encoder target was part of

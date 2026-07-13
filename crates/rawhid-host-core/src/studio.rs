@@ -686,6 +686,32 @@ fn encoder_role_display_name(behavior: &EditBehavior) -> Option<&'static str> {
     }
 }
 
+fn combo_role_display_name(behavior: &EditBehavior) -> &'static str {
+    match behavior {
+        EditBehavior::KeyPress(_) => "Key Press",
+        EditBehavior::Transparent => "Transparent",
+        EditBehavior::None => "None",
+        EditBehavior::MomentaryLayer(_) => "Momentary Layer",
+        EditBehavior::ToggleLayer(_) => "Toggle Layer",
+        EditBehavior::ToLayer(_) => "To Layer",
+        EditBehavior::ModTap { .. } => "Mod-Tap",
+        EditBehavior::LayerTap { .. } => "Layer-Tap",
+        EditBehavior::StickyKey(_) => "Sticky Key",
+        EditBehavior::StickyLayer(_) => "Sticky Layer",
+        EditBehavior::Bluetooth { .. } => "Bluetooth",
+        EditBehavior::OutputSelection(_) => "Output Selection",
+        EditBehavior::MouseKeyPress(_) => "Mouse Key Press",
+        EditBehavior::MouseMove(_) => "Mouse Move",
+        EditBehavior::MouseScroll(_) => "Mouse Scroll",
+        EditBehavior::CapsWord => "Caps Word",
+        EditBehavior::KeyRepeat => "Key Repeat",
+        EditBehavior::Reset => "Reset",
+        EditBehavior::Bootloader => "Bootloader",
+        EditBehavior::StudioUnlock => "Studio Unlock",
+        EditBehavior::GraveEscape => "Grave/Escape",
+    }
+}
+
 /// Finds the `constant` value of a named param1 entry within a behavior's metadata.
 /// Used for `Bluetooth`, whose single behavior_id multiplexes several commands
 /// (select/clear/disconnect/...) via the param1 value rather than distinct ids.
@@ -780,6 +806,54 @@ impl BehaviorResolver {
             }),
             _ => Err(EncoderResolveError::Ineligible),
         }
+    }
+
+    fn resolve_combo(
+        &self,
+        behavior: &EditBehavior,
+    ) -> Result<EncoderBinding, EncoderResolveError> {
+        let display_name = combo_role_display_name(behavior);
+        let mut matches = self
+            .catalog
+            .iter()
+            .filter(|entry| entry.display_name == display_name);
+        let entry = match (matches.next(), matches.next()) {
+            (Some(entry), None) => entry,
+            _ => return Err(EncoderResolveError::UnsupportedByFirmware),
+        };
+        let behavior_id =
+            u16::try_from(entry.id).map_err(|_| EncoderResolveError::UnsupportedByFirmware)?;
+        let (param1, param2) = match behavior {
+            EditBehavior::KeyPress(value)
+            | EditBehavior::StickyKey(value)
+            | EditBehavior::MomentaryLayer(value)
+            | EditBehavior::ToggleLayer(value)
+            | EditBehavior::ToLayer(value)
+            | EditBehavior::StickyLayer(value)
+            | EditBehavior::OutputSelection(value)
+            | EditBehavior::MouseKeyPress(value)
+            | EditBehavior::MouseMove(value)
+            | EditBehavior::MouseScroll(value) => (*value, 0),
+            EditBehavior::ModTap { hold, tap } => (*hold, *tap),
+            EditBehavior::LayerTap {
+                target_layer_index,
+                tap,
+            } => (*target_layer_index, *tap),
+            EditBehavior::Bluetooth { command, value } => (*command, *value),
+            EditBehavior::Transparent
+            | EditBehavior::None
+            | EditBehavior::CapsWord
+            | EditBehavior::KeyRepeat
+            | EditBehavior::Reset
+            | EditBehavior::Bootloader
+            | EditBehavior::StudioUnlock
+            | EditBehavior::GraveEscape => (0, 0),
+        };
+        Ok(EncoderBinding {
+            behavior_id,
+            param1,
+            param2,
+        })
     }
 }
 
@@ -1309,6 +1383,23 @@ impl StudioEditSession {
             .as_ref()
             .expect("encoder_resolver was just initialized")
             .resolve(behavior)
+    }
+
+    /// Resolves a keymap-editor behavior into the raw binding used by Combo
+    /// Config RPC. Unlike encoders, Combo accepts every behavior exposed by
+    /// the existing keymap picker and verifies its role against the connected
+    /// firmware catalog before returning the per-build behavior id.
+    pub fn resolve_combo_binding(
+        &mut self,
+        behavior: &EditBehavior,
+    ) -> Result<EncoderBinding, EncoderResolveError> {
+        if self.encoder_resolver.is_none() {
+            self.encoder_resolver = Some(BehaviorResolver::build(&mut self.client)?);
+        }
+        self.encoder_resolver
+            .as_ref()
+            .expect("resolver initialized")
+            .resolve_combo(behavior)
     }
 
     pub fn snapshot(&mut self) -> Result<StudioKeymapSnapshot, StudioError> {
@@ -4659,6 +4750,55 @@ mod tests {
         assert_eq!(binding.behavior_id, 27);
         assert_eq!(binding.param1, 0);
         assert_eq!(binding.param2, 0);
+    }
+
+    #[test]
+    fn combo_resolver_resolves_key_press_and_mod_tap() {
+        let resolver = BehaviorResolver {
+            catalog: vec![
+                behavior_details(6, "Key Press", vec![]),
+                behavior_details(26, "Mod-Tap", vec![]),
+            ],
+        };
+
+        let key = resolver
+            .resolve_combo(&EditBehavior::KeyPress(0x0007_0004))
+            .unwrap();
+        assert_eq!(
+            (key.behavior_id, key.param1, key.param2),
+            (6, 0x0007_0004, 0)
+        );
+
+        let mod_tap = resolver
+            .resolve_combo(&EditBehavior::ModTap {
+                hold: 0x0007_00E1,
+                tap: 0x0007_0004,
+            })
+            .unwrap();
+        assert_eq!(
+            (mod_tap.behavior_id, mod_tap.param1, mod_tap.param2),
+            (26, 0x0007_00E1, 0x0007_0004)
+        );
+    }
+
+    #[test]
+    fn combo_resolver_rejects_missing_or_ambiguous_firmware_role() {
+        let missing = BehaviorResolver { catalog: vec![] };
+        assert!(matches!(
+            missing.resolve_combo(&EditBehavior::None),
+            Err(EncoderResolveError::UnsupportedByFirmware)
+        ));
+
+        let ambiguous = BehaviorResolver {
+            catalog: vec![
+                behavior_details(27, "None", vec![]),
+                behavior_details(28, "None", vec![]),
+            ],
+        };
+        assert!(matches!(
+            ambiguous.resolve_combo(&EditBehavior::None),
+            Err(EncoderResolveError::UnsupportedByFirmware)
+        ));
     }
 
     #[test]

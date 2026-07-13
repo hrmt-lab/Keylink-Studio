@@ -9,7 +9,9 @@ use rawhid_host_core::{
     ai_usage::{AiUsageProviderStatus, AiUsageRuntime, AiUsageShared},
     config::AppConfig,
     hid::{DeviceInfo, ProbeResult},
-    packet::{EncoderBinding, EncoderGetBindings, EncoderGetInfo, UplinkPacket},
+    packet::{
+        ComboInfo, ComboItem, EncoderBinding, EncoderGetBindings, EncoderGetInfo, UplinkPacket,
+    },
     runner::{DeviceBatteryStatus, DeviceLayerState},
     stats::{default_stats_dir, KeyStatsStore, SharedKeyStatsStore},
     studio::StudioEditSession,
@@ -112,12 +114,28 @@ pub enum HostLinkRequest {
         layer_id: u32,
         encoder_id: u8,
     },
+    ComboGetInfo,
+    ComboGet {
+        slot: u8,
+    },
+    ComboSet {
+        item: ComboItem,
+    },
+    ComboGetDirty,
+    ComboSave,
+    ComboDiscard,
+    ComboDelete {
+        slot: u8,
+    },
+    ComboResetToKeymap,
 }
 
 #[derive(Debug)]
 pub enum HostLinkResponse {
     EncoderInfo(EncoderGetInfo),
     EncoderBindings(EncoderGetBindings),
+    ComboInfo(ComboInfo),
+    ComboItem(ComboItem),
     Dirty(bool),
     Done,
 }

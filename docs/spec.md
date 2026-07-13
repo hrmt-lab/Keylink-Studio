@@ -241,8 +241,25 @@ AI Usage は任意機能で、既定では無効です。
 - `studio_remove_layer`
 - `studio_save_changes`
 - `studio_discard_changes`
+- `studio_reset_to_keymap`
 - `studio_has_unsaved`
 - `studio_end_edit`
+- `read_encoder_info`
+- `read_encoder_bindings`
+- `read_encoder_layer_bindings`
+- `studio_set_encoder_bindings`
+- `studio_encoder_has_unsaved`
+- `studio_encoder_save`
+- `studio_encoder_discard`
+- `studio_encoder_clear_override`
+- `read_combo_info`
+- `read_combo`
+- `studio_set_combo`
+- `studio_combo_has_unsaved`
+- `studio_combo_save`
+- `studio_combo_discard`
+- `studio_combo_delete`
+- `studio_combo_reset_to_keymap`
 - `debug_inject_uplink` (debug build のみ動作)
 
 `show_config_file_location` は config path だけを Explorer で表示します。credentials path の reveal は行いません。

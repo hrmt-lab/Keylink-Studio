@@ -24,6 +24,11 @@ pub const BATTERY_LEVEL_UNKNOWN: u8 = 0xFF;
 pub const KEY_STATS_MAX_ENTRIES: usize = 8;
 pub const KEY_STATS_FLAG_MORE_FOLLOWS: u8 = 1 << 0;
 pub const KEY_PRESS_FLAG_PRESSED: u8 = 1 << 0;
+pub const COMBO_MAX_SLOTS: u8 = 32;
+pub const COMBO_MAX_KEYS: usize = 8;
+pub const COMBO_NAME_LEN: usize = 16;
+pub const COMBO_ITEM_LEN: usize = 52;
+const _: [(); MAX_PAYLOAD_LEN] = [(); COMBO_ITEM_LEN];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
@@ -193,6 +198,7 @@ pub enum AiUsageErrorCode {
 #[repr(u8)]
 pub enum ConfigFeature {
     Encoder = 0x01,
+    Combo = 0x02,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -205,6 +211,19 @@ pub enum ConfigOp {
     Save = 0x05,
     Discard = 0x06,
     ClearOverride = 0x07,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ComboConfigOp {
+    GetInfo = 0x01,
+    GetCombo = 0x02,
+    SetCombo = 0x03,
+    GetDirty = 0x04,
+    Save = 0x05,
+    Discard = 0x06,
+    DeleteCombo = 0x07,
+    ResetToKeymap = 0x08,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -306,6 +325,255 @@ pub struct EncoderGetBindings {
     pub flags: EncoderBindingFlags,
     pub cw_binding: EncoderBinding,
     pub ccw_binding: EncoderBinding,
+}
+
+pub type ComboBinding = EncoderBinding;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ComboInfoFlags(u8);
+
+impl ComboInfoFlags {
+    pub const SAVED_TABLE_LOADED: u8 = 1 << 0;
+    pub const TABLE_METADATA_INVALID_FALLBACK: u8 = 1 << 1;
+    pub const TABLE_VERSION_UNSUPPORTED_FALLBACK: u8 = 1 << 2;
+    pub const STORAGE_READ_ERROR_FALLBACK: u8 = 1 << 3;
+    pub const STORAGE_UNAVAILABLE: u8 = 1 << 4;
+    pub const VALID_MASK: u8 = Self::SAVED_TABLE_LOADED
+        | Self::TABLE_METADATA_INVALID_FALLBACK
+        | Self::TABLE_VERSION_UNSUPPORTED_FALLBACK
+        | Self::STORAGE_READ_ERROR_FALLBACK
+        | Self::STORAGE_UNAVAILABLE;
+
+    pub fn new(bits: u8) -> Result<Self, PacketError> {
+        if bits & !Self::VALID_MASK != 0 {
+            return Err(PacketError::InvalidComboInfoFlags(bits));
+        }
+        Ok(Self(bits))
+    }
+
+    pub fn bits(self) -> u8 {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComboInfo {
+    pub max_combos: u8,
+    pub max_keys_per_combo: u8,
+    pub combo_count: u8,
+    pub flags: ComboInfoFlags,
+    pub occupied_slots: u32,
+    pub stale_slots: u32,
+    pub invalid_slots: u32,
+}
+
+impl ComboInfo {
+    pub fn listed_slots(self) -> u32 {
+        self.occupied_slots | self.stale_slots | self.invalid_slots
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ComboFlags(u8);
+
+impl ComboFlags {
+    pub const SLOW_RELEASE: u8 = 1 << 0;
+    pub const VALID_MASK: u8 = Self::SLOW_RELEASE;
+
+    pub fn new(bits: u8) -> Result<Self, PacketError> {
+        if bits & !Self::VALID_MASK != 0 {
+            return Err(PacketError::InvalidComboFlags(bits));
+        }
+        Ok(Self(bits))
+    }
+
+    pub fn bits(self) -> u8 {
+        self.0
+    }
+
+    pub fn slow_release(self) -> bool {
+        self.0 & Self::SLOW_RELEASE != 0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComboName([u8; COMBO_NAME_LEN]);
+
+impl ComboName {
+    pub fn new(name: &str) -> Result<Self, PacketError> {
+        let bytes = name.as_bytes();
+        if bytes.is_empty() || bytes.len() >= COMBO_NAME_LEN {
+            return Err(PacketError::InvalidComboNameLength(bytes.len()));
+        }
+        if !bytes
+            .iter()
+            .all(|byte| byte.is_ascii_alphanumeric() || b",._+-".contains(byte))
+        {
+            return Err(PacketError::InvalidComboName);
+        }
+        let mut encoded = [0u8; COMBO_NAME_LEN];
+        encoded[..bytes.len()].copy_from_slice(bytes);
+        Ok(Self(encoded))
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, PacketError> {
+        let terminator = bytes
+            .iter()
+            .position(|byte| *byte == 0)
+            .ok_or(PacketError::ComboNameNotTerminated)?;
+        if bytes[terminator + 1..].iter().any(|byte| *byte != 0) {
+            return Err(PacketError::ReservedNotZero);
+        }
+        let name = std::str::from_utf8(&bytes[..terminator])
+            .map_err(|_| PacketError::InvalidComboNameUtf8)?;
+        Self::new(name)
+    }
+
+    pub fn as_str(&self) -> &str {
+        let len = self.0.iter().position(|byte| *byte == 0).unwrap_or(0);
+        std::str::from_utf8(&self.0[..len]).expect("ComboName is validated UTF-8")
+    }
+
+    fn bytes(self) -> [u8; COMBO_NAME_LEN] {
+        self.0
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ComboItem {
+    pub slot: u8,
+    pub key_count: u8,
+    pub flags: ComboFlags,
+    pub name: ComboName,
+    pub key_positions: [u16; COMBO_MAX_KEYS],
+    pub binding: ComboBinding,
+    pub layer_mask: u32,
+    pub timeout_ms: u16,
+    pub require_prior_idle_ms: Option<u16>,
+}
+
+impl ComboItem {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        slot: u8,
+        name: &str,
+        key_positions: &[u16],
+        slow_release: bool,
+        binding: ComboBinding,
+        layer_mask: u32,
+        timeout_ms: u16,
+        require_prior_idle_ms: Option<u16>,
+    ) -> Result<Self, PacketError> {
+        let mut positions = [u16::MAX; COMBO_MAX_KEYS];
+        if !(2..=COMBO_MAX_KEYS).contains(&key_positions.len()) {
+            return Err(PacketError::InvalidComboKeyCount(key_positions.len() as u8));
+        }
+        positions[..key_positions.len()].copy_from_slice(key_positions);
+        positions[..key_positions.len()].sort_unstable();
+        let item = Self {
+            slot,
+            key_count: key_positions.len() as u8,
+            flags: ComboFlags::new(if slow_release {
+                ComboFlags::SLOW_RELEASE
+            } else {
+                0
+            })?,
+            name: ComboName::new(name)?,
+            key_positions: positions,
+            binding,
+            layer_mask,
+            timeout_ms,
+            require_prior_idle_ms,
+        };
+        item.validate()?;
+        Ok(item)
+    }
+
+    pub fn validate(&self) -> Result<(), PacketError> {
+        if self.slot >= COMBO_MAX_SLOTS {
+            return Err(PacketError::InvalidComboSlot(self.slot));
+        }
+        if !(2..=COMBO_MAX_KEYS as u8).contains(&self.key_count) {
+            return Err(PacketError::InvalidComboKeyCount(self.key_count));
+        }
+        let used = self.key_count as usize;
+        if self.key_positions[..used].contains(&u16::MAX)
+            || self.key_positions[..used]
+                .windows(2)
+                .any(|pair| pair[0] >= pair[1])
+        {
+            return Err(PacketError::InvalidComboKeyPositions);
+        }
+        if self.key_positions[used..]
+            .iter()
+            .any(|position| *position != u16::MAX)
+        {
+            return Err(PacketError::InvalidComboUnusedKeyPosition);
+        }
+        if self.binding.behavior_id == u16::MAX {
+            return Err(PacketError::InvalidComboBehaviorId);
+        }
+        if !(1..=1000).contains(&self.timeout_ms) {
+            return Err(PacketError::InvalidComboTimeout(self.timeout_ms));
+        }
+        if let Some(prior_idle) = self.require_prior_idle_ms {
+            if !(1..=1000).contains(&prior_idle) {
+                return Err(PacketError::InvalidComboPriorIdle(prior_idle));
+            }
+        }
+        Ok(())
+    }
+
+    fn encode(self) -> Result<[u8; COMBO_ITEM_LEN], PacketError> {
+        self.validate()?;
+        let mut bytes = [0u8; COMBO_ITEM_LEN];
+        bytes[0] = self.slot;
+        bytes[1] = self.key_count | (self.flags.bits() << 4);
+        bytes[2..18].copy_from_slice(&self.name.bytes());
+        for (index, position) in self.key_positions.iter().enumerate() {
+            let offset = 18 + index * 2;
+            bytes[offset..offset + 2].copy_from_slice(&position.to_le_bytes());
+        }
+        encode_encoder_binding(&mut bytes[34..44], self.binding);
+        bytes[44..48].copy_from_slice(&self.layer_mask.to_le_bytes());
+        bytes[48..50].copy_from_slice(&self.timeout_ms.to_le_bytes());
+        bytes[50..52]
+            .copy_from_slice(&self.require_prior_idle_ms.unwrap_or(u16::MAX).to_le_bytes());
+        Ok(bytes)
+    }
+
+    fn decode(bytes: &[u8]) -> Result<Self, PacketError> {
+        if bytes.len() != COMBO_ITEM_LEN {
+            return Err(PacketError::InvalidPayloadLength {
+                max: COMBO_ITEM_LEN,
+                actual: bytes.len() as u8,
+            });
+        }
+        let key_count_flags = bytes[1];
+        if key_count_flags & 0xe0 != 0 {
+            return Err(PacketError::ReservedNotZero);
+        }
+        let key_count = key_count_flags & 0x0f;
+        let mut key_positions = [0u16; COMBO_MAX_KEYS];
+        for (index, position) in key_positions.iter_mut().enumerate() {
+            let offset = 18 + index * 2;
+            *position = u16::from_le_bytes(bytes[offset..offset + 2].try_into().unwrap());
+        }
+        let prior_idle = u16::from_le_bytes(bytes[50..52].try_into().unwrap());
+        let item = Self {
+            slot: bytes[0],
+            key_count,
+            flags: ComboFlags::new((key_count_flags >> 4) & ComboFlags::VALID_MASK)?,
+            name: ComboName::decode(&bytes[2..18])?,
+            key_positions,
+            binding: decode_encoder_binding(&bytes[34..44]),
+            layer_mask: u32::from_le_bytes(bytes[44..48].try_into().unwrap()),
+            timeout_ms: u16::from_le_bytes(bytes[48..50].try_into().unwrap()),
+            require_prior_idle_ms: (prior_idle != u16::MAX).then_some(prior_idle),
+        };
+        item.validate()?;
+        Ok(item)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -422,6 +690,84 @@ impl ConfigRequest {
         }
     }
 
+    pub fn combo_get_info(seq: u8) -> Self {
+        Self::combo_empty(seq, ComboConfigOp::GetInfo)
+    }
+
+    pub fn combo_get_combo(seq: u8, slot: u8) -> Result<Self, PacketError> {
+        validate_combo_slot(slot)?;
+        let mut payload = [0u8; MAX_PAYLOAD_LEN];
+        payload[0] = slot;
+        Ok(Self {
+            seq,
+            feature: ConfigFeature::Combo as u8,
+            op: ComboConfigOp::GetCombo as u8,
+            payload_len: 1,
+            payload,
+        })
+    }
+
+    pub fn combo_set_combo(seq: u8, item: ComboItem) -> Result<Self, PacketError> {
+        let mut payload = [0u8; MAX_PAYLOAD_LEN];
+        payload.copy_from_slice(&item.encode()?);
+        Ok(Self {
+            seq,
+            feature: ConfigFeature::Combo as u8,
+            op: ComboConfigOp::SetCombo as u8,
+            payload_len: COMBO_ITEM_LEN as u8,
+            payload,
+        })
+    }
+
+    pub fn combo_get_dirty(seq: u8) -> Self {
+        Self::combo_empty(seq, ComboConfigOp::GetDirty)
+    }
+
+    pub fn combo_save(seq: u8) -> Self {
+        Self::combo_empty(seq, ComboConfigOp::Save)
+    }
+
+    pub fn combo_discard(seq: u8) -> Self {
+        Self::combo_empty(seq, ComboConfigOp::Discard)
+    }
+
+    pub fn combo_delete_combo(seq: u8, slot: u8) -> Result<Self, PacketError> {
+        validate_combo_slot(slot)?;
+        let mut payload = [0u8; MAX_PAYLOAD_LEN];
+        payload[0] = slot;
+        Ok(Self {
+            seq,
+            feature: ConfigFeature::Combo as u8,
+            op: ComboConfigOp::DeleteCombo as u8,
+            payload_len: 1,
+            payload,
+        })
+    }
+
+    pub fn combo_reset_to_keymap(seq: u8) -> Self {
+        Self::combo_empty(seq, ComboConfigOp::ResetToKeymap)
+    }
+
+    fn combo_empty(seq: u8, op: ComboConfigOp) -> Self {
+        Self {
+            seq,
+            feature: ConfigFeature::Combo as u8,
+            op: op as u8,
+            payload_len: 0,
+            payload: [0; MAX_PAYLOAD_LEN],
+        }
+    }
+
+    fn combo_slot_target(&self) -> Option<u8> {
+        if self.feature != ConfigFeature::Combo as u8
+            || self.op != ComboConfigOp::GetCombo as u8
+            || self.payload_len != 1
+        {
+            return None;
+        }
+        Some(self.payload[0])
+    }
+
     pub fn encode_payload(self) -> [u8; PACKET_SIZE] {
         let mut bytes = [0u8; PACKET_SIZE];
         encode_header(
@@ -457,6 +803,9 @@ pub struct ConfigResponse {
     pub encoder_get_info: Option<EncoderGetInfo>,
     pub encoder_get_bindings: Option<EncoderGetBindings>,
     pub encoder_get_dirty: Option<bool>,
+    pub combo_info: Option<ComboInfo>,
+    pub combo_item: Option<ComboItem>,
+    pub combo_dirty: Option<bool>,
 }
 
 impl ConfigResponse {
@@ -469,6 +818,9 @@ impl ConfigResponse {
             encoder_get_info: Some(info),
             encoder_get_bindings: None,
             encoder_get_dirty: None,
+            combo_info: None,
+            combo_item: None,
+            combo_dirty: None,
         }
     }
 
@@ -481,6 +833,9 @@ impl ConfigResponse {
             encoder_get_info: None,
             encoder_get_bindings: Some(bindings),
             encoder_get_dirty: None,
+            combo_info: None,
+            combo_item: None,
+            combo_dirty: None,
         }
     }
 
@@ -493,6 +848,54 @@ impl ConfigResponse {
             encoder_get_info: None,
             encoder_get_bindings: None,
             encoder_get_dirty: Some(dirty),
+            combo_info: None,
+            combo_item: None,
+            combo_dirty: None,
+        }
+    }
+
+    pub fn combo_get_info_ok(seq: u8, info: ComboInfo) -> Self {
+        Self {
+            seq,
+            feature: ConfigFeature::Combo as u8,
+            op: ComboConfigOp::GetInfo as u8,
+            status: ConfigStatus::Ok,
+            encoder_get_info: None,
+            encoder_get_bindings: None,
+            encoder_get_dirty: None,
+            combo_info: Some(info),
+            combo_item: None,
+            combo_dirty: None,
+        }
+    }
+
+    pub fn combo_get_combo_ok(seq: u8, item: ComboItem) -> Self {
+        Self {
+            seq,
+            feature: ConfigFeature::Combo as u8,
+            op: ComboConfigOp::GetCombo as u8,
+            status: ConfigStatus::Ok,
+            encoder_get_info: None,
+            encoder_get_bindings: None,
+            encoder_get_dirty: None,
+            combo_info: None,
+            combo_item: Some(item),
+            combo_dirty: None,
+        }
+    }
+
+    pub fn combo_get_dirty_ok(seq: u8, dirty: bool) -> Self {
+        Self {
+            seq,
+            feature: ConfigFeature::Combo as u8,
+            op: ComboConfigOp::GetDirty as u8,
+            status: ConfigStatus::Ok,
+            encoder_get_info: None,
+            encoder_get_bindings: None,
+            encoder_get_dirty: None,
+            combo_info: None,
+            combo_item: None,
+            combo_dirty: Some(dirty),
         }
     }
 
@@ -505,6 +908,9 @@ impl ConfigResponse {
             encoder_get_info: None,
             encoder_get_bindings: None,
             encoder_get_dirty: None,
+            combo_info: None,
+            combo_item: None,
+            combo_dirty: None,
         }
     }
 
@@ -523,6 +929,21 @@ impl ConfigResponse {
         } else if self.status == ConfigStatus::Ok
             && self.feature == ConfigFeature::Encoder as u8
             && self.op == ConfigOp::GetDirty as u8
+        {
+            1
+        } else if self.status == ConfigStatus::Ok
+            && self.feature == ConfigFeature::Combo as u8
+            && self.op == ComboConfigOp::GetInfo as u8
+        {
+            16
+        } else if self.status == ConfigStatus::Ok
+            && self.feature == ConfigFeature::Combo as u8
+            && self.op == ComboConfigOp::GetCombo as u8
+        {
+            COMBO_ITEM_LEN as u8
+        } else if self.status == ConfigStatus::Ok
+            && self.feature == ConfigFeature::Combo as u8
+            && self.op == ComboConfigOp::GetDirty as u8
         {
             1
         } else {
@@ -559,6 +980,26 @@ impl ConfigResponse {
         if let Some(dirty) = self.encoder_get_dirty {
             bytes[PAYLOAD_OFFSET] = u8::from(dirty);
         }
+        if let Some(info) = self.combo_info {
+            let p = &mut bytes[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 16];
+            p[0] = info.max_combos;
+            p[1] = info.max_keys_per_combo;
+            p[2] = info.combo_count;
+            p[3] = info.flags.bits();
+            p[4..8].copy_from_slice(&info.occupied_slots.to_le_bytes());
+            p[8..12].copy_from_slice(&info.stale_slots.to_le_bytes());
+            p[12..16].copy_from_slice(&info.invalid_slots.to_le_bytes());
+        }
+        if let Some(item) = self.combo_item {
+            bytes[PAYLOAD_OFFSET..].copy_from_slice(
+                &item
+                    .encode()
+                    .expect("ConfigResponse ComboItem must be valid"),
+            );
+        }
+        if let Some(dirty) = self.combo_dirty {
+            bytes[PAYLOAD_OFFSET] = u8::from(dirty);
+        }
         bytes
     }
 
@@ -571,6 +1012,9 @@ impl ConfigResponse {
         let mut encoder_get_info = None;
         let mut encoder_get_bindings = None;
         let mut encoder_get_dirty = None;
+        let mut combo_info = None;
+        let mut combo_item = None;
+        let mut combo_dirty = None;
         if status == ConfigStatus::Ok
             && header.feature == ConfigFeature::Encoder as u8
             && header.op == ConfigOp::GetInfo as u8
@@ -628,6 +1072,39 @@ impl ConfigResponse {
                 1 => true,
                 other => return Err(PacketError::InvalidConfigDirty(other)),
             });
+        } else if status == ConfigStatus::Ok
+            && header.feature == ConfigFeature::Combo as u8
+            && header.op == ComboConfigOp::GetInfo as u8
+        {
+            require_config_payload_len(header.payload_len, 16)?;
+            let p = &bytes[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 16];
+            combo_info = Some(ComboInfo {
+                max_combos: p[0],
+                max_keys_per_combo: p[1],
+                combo_count: p[2],
+                flags: ComboInfoFlags::new(p[3])?,
+                occupied_slots: u32::from_le_bytes(p[4..8].try_into().unwrap()),
+                stale_slots: u32::from_le_bytes(p[8..12].try_into().unwrap()),
+                invalid_slots: u32::from_le_bytes(p[12..16].try_into().unwrap()),
+            });
+        } else if status == ConfigStatus::Ok
+            && header.feature == ConfigFeature::Combo as u8
+            && header.op == ComboConfigOp::GetCombo as u8
+        {
+            require_config_payload_len(header.payload_len, COMBO_ITEM_LEN)?;
+            combo_item = Some(ComboItem::decode(
+                &bytes[PAYLOAD_OFFSET..PAYLOAD_OFFSET + COMBO_ITEM_LEN],
+            )?);
+        } else if status == ConfigStatus::Ok
+            && header.feature == ConfigFeature::Combo as u8
+            && header.op == ComboConfigOp::GetDirty as u8
+        {
+            require_config_payload_len(header.payload_len, 1)?;
+            combo_dirty = Some(match bytes[PAYLOAD_OFFSET] {
+                0 => false,
+                1 => true,
+                other => return Err(PacketError::InvalidConfigDirty(other)),
+            });
         } else {
             if header.payload_len != 0 {
                 return Err(PacketError::InvalidPayloadLength {
@@ -645,6 +1122,9 @@ impl ConfigResponse {
             encoder_get_info,
             encoder_get_bindings,
             encoder_get_dirty,
+            combo_info,
+            combo_item,
+            combo_dirty,
         })
     }
 
@@ -665,9 +1145,29 @@ impl ConfigResponse {
                     None => false,
                 };
             }
+            if let Some(slot) = request.combo_slot_target() {
+                return self.combo_item.is_some_and(|item| item.slot == slot);
+            }
         }
         true
     }
+}
+
+fn validate_combo_slot(slot: u8) -> Result<(), PacketError> {
+    if slot >= COMBO_MAX_SLOTS {
+        return Err(PacketError::InvalidComboSlot(slot));
+    }
+    Ok(())
+}
+
+fn require_config_payload_len(actual: u8, expected: usize) -> Result<(), PacketError> {
+    if actual as usize != expected {
+        return Err(PacketError::InvalidPayloadLength {
+            max: expected,
+            actual,
+        });
+    }
+    Ok(())
 }
 
 fn encode_encoder_binding(bytes: &mut [u8], binding: EncoderBinding) {
@@ -1364,6 +1864,32 @@ pub enum PacketError {
     InvalidEncoderBindingSource(u8),
     #[error("invalid encoder binding flags {0:#04x}")]
     InvalidEncoderBindingFlags(u8),
+    #[error("invalid Combo info flags {0:#04x}")]
+    InvalidComboInfoFlags(u8),
+    #[error("invalid Combo flags {0:#04x}")]
+    InvalidComboFlags(u8),
+    #[error("invalid Combo slot {0}; expected 0..31")]
+    InvalidComboSlot(u8),
+    #[error("invalid Combo key count {0}; expected 2..8")]
+    InvalidComboKeyCount(u8),
+    #[error("Combo name must contain 1..15 bytes, got {0}")]
+    InvalidComboNameLength(usize),
+    #[error("Combo name is not valid UTF-8")]
+    InvalidComboNameUtf8,
+    #[error("Combo name contains a disallowed character")]
+    InvalidComboName,
+    #[error("Combo name is not NUL terminated")]
+    ComboNameNotTerminated,
+    #[error("Combo key positions must be unique and in ascending order")]
+    InvalidComboKeyPositions,
+    #[error("unused Combo key positions must be 0xffff")]
+    InvalidComboUnusedKeyPosition,
+    #[error("Combo behavior id 0xffff is reserved")]
+    InvalidComboBehaviorId,
+    #[error("invalid Combo timeout {0}; expected 1..1000 ms")]
+    InvalidComboTimeout(u16),
+    #[error("invalid Combo prior idle {0}; expected 1..1000 ms or disabled")]
+    InvalidComboPriorIdle(u16),
     #[error("invalid Config RPC dirty value {0:#04x}")]
     InvalidConfigDirty(u8),
 }
@@ -1983,20 +2509,31 @@ mod tests {
 
     #[test]
     fn config_response_decodes_non_ok_status_without_payload() {
-        let payload = ConfigResponse::status(
-            12,
-            ConfigFeature::Encoder as u8,
-            ConfigOp::GetInfo as u8,
+        for status in [
+            ConfigStatus::BadPacket,
+            ConfigStatus::UnsupportedFeature,
             ConfigStatus::UnsupportedOp,
-        )
-        .encode_payload();
+            ConfigStatus::InvalidArgument,
+            ConfigStatus::Busy,
+            ConfigStatus::NotFound,
+            ConfigStatus::StorageError,
+            ConfigStatus::InternalError,
+        ] {
+            let payload = ConfigResponse::status(
+                12,
+                ConfigFeature::Encoder as u8,
+                ConfigOp::GetInfo as u8,
+                status,
+            )
+            .encode_payload();
 
-        let decoded = ConfigResponse::decode_payload(&payload).unwrap();
+            let decoded = ConfigResponse::decode_payload(&payload).unwrap();
 
-        assert_eq!(decoded.status, ConfigStatus::UnsupportedOp);
-        assert_eq!(decoded.encoder_get_info, None);
-        assert_eq!(decoded.encoder_get_bindings, None);
-        assert_eq!(decoded.encoder_get_dirty, None);
+            assert_eq!(decoded.status, status);
+            assert_eq!(decoded.encoder_get_info, None);
+            assert_eq!(decoded.encoder_get_bindings, None);
+            assert_eq!(decoded.encoder_get_dirty, None);
+        }
     }
 
     #[test]
@@ -2137,6 +2674,243 @@ mod tests {
             ConfigResponse::decode_payload(&payload).unwrap_err(),
             PacketError::InvalidPayloadLength { max: 1, actual: 0 }
         );
+    }
+
+    fn sample_combo(slot: u8) -> ComboItem {
+        ComboItem::new(
+            slot,
+            "nav_1",
+            &[3, 1, 2],
+            true,
+            ComboBinding {
+                behavior_id: 0x1234,
+                param1: 0x01020304,
+                param2: 0x05060708,
+            },
+            0x0000_0005,
+            50,
+            Some(125),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn combo_get_info_request_and_response_round_trip() {
+        let request = ConfigRequest::combo_get_info(41).encode_payload();
+        assert_eq!(request[3], PacketType::ConfigRequest as u8);
+        assert_eq!(request[4], 41);
+        assert_eq!(request[5], ConfigFeature::Combo as u8);
+        assert_eq!(request[6], ComboConfigOp::GetInfo as u8);
+        assert_eq!(request[8], 0);
+
+        let info = ComboInfo {
+            max_combos: 32,
+            max_keys_per_combo: 8,
+            combo_count: 6,
+            flags: ComboInfoFlags::new(ComboInfoFlags::SAVED_TABLE_LOADED).unwrap(),
+            occupied_slots: 0x3f,
+            stale_slots: 1 << 30,
+            invalid_slots: 1 << 31,
+        };
+        let decoded = ConfigResponse::decode_payload(
+            &ConfigResponse::combo_get_info_ok(41, info).encode_payload(),
+        )
+        .unwrap();
+        assert_eq!(decoded.combo_info, Some(info));
+        assert_eq!(info.listed_slots(), 0xc000_003f);
+    }
+
+    #[test]
+    fn combo_get_and_set_use_exact_item_layout() {
+        let get = ConfigRequest::combo_get_combo(7, 31)
+            .unwrap()
+            .encode_payload();
+        assert_eq!(get[5], ConfigFeature::Combo as u8);
+        assert_eq!(get[6], ComboConfigOp::GetCombo as u8);
+        assert_eq!(get[8], 1);
+        assert_eq!(get[PAYLOAD_OFFSET], 31);
+
+        let item = sample_combo(31);
+        assert_eq!(&item.key_positions[..3], &[1, 2, 3]);
+        let set = ConfigRequest::combo_set_combo(8, item)
+            .unwrap()
+            .encode_payload();
+        assert_eq!(set[6], ComboConfigOp::SetCombo as u8);
+        assert_eq!(set[8] as usize, COMBO_ITEM_LEN);
+        assert_eq!(set[PAYLOAD_OFFSET], 31);
+        assert_eq!(set[PAYLOAD_OFFSET + 1], 0x13);
+        assert_eq!(&set[PAYLOAD_OFFSET + 2..PAYLOAD_OFFSET + 8], b"nav_1\0");
+        assert_eq!(
+            &set[PAYLOAD_OFFSET + 18..PAYLOAD_OFFSET + 24],
+            &[1, 0, 2, 0, 3, 0]
+        );
+        assert!(set[PAYLOAD_OFFSET + 24..PAYLOAD_OFFSET + 34]
+            .chunks_exact(2)
+            .all(|position| position == [0xff, 0xff]));
+
+        let response = ConfigResponse::combo_get_combo_ok(7, item).encode_payload();
+        let decoded = ConfigResponse::decode_payload(&response).unwrap();
+        assert_eq!(decoded.combo_item, Some(item));
+        assert!(decoded.is_response_to(ConfigRequest::combo_get_combo(7, 31).unwrap()));
+    }
+
+    #[test]
+    fn combo_dirty_and_lifecycle_requests_encode() {
+        let dirty = ConfigRequest::combo_get_dirty(1).encode_payload();
+        let save = ConfigRequest::combo_save(2).encode_payload();
+        let discard = ConfigRequest::combo_discard(3).encode_payload();
+        let delete = ConfigRequest::combo_delete_combo(4, 31)
+            .unwrap()
+            .encode_payload();
+        let reset = ConfigRequest::combo_reset_to_keymap(5).encode_payload();
+        assert_eq!(dirty[6], ComboConfigOp::GetDirty as u8);
+        assert_eq!(save[6], ComboConfigOp::Save as u8);
+        assert_eq!(discard[6], ComboConfigOp::Discard as u8);
+        assert_eq!(delete[6], ComboConfigOp::DeleteCombo as u8);
+        assert_eq!(delete[8], 1);
+        assert_eq!(delete[PAYLOAD_OFFSET], 31);
+        assert_eq!(reset[6], ComboConfigOp::ResetToKeymap as u8);
+        assert_eq!(
+            ConfigResponse::decode_payload(
+                &ConfigResponse::combo_get_dirty_ok(1, true).encode_payload()
+            )
+            .unwrap()
+            .combo_dirty,
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn combo_decoder_rejects_length_reserved_and_padding_errors() {
+        let info = ComboInfo {
+            max_combos: 32,
+            max_keys_per_combo: 8,
+            combo_count: 0,
+            flags: ComboInfoFlags::default(),
+            occupied_slots: 0,
+            stale_slots: 0,
+            invalid_slots: 0,
+        };
+        let mut response = ConfigResponse::combo_get_info_ok(1, info).encode_payload();
+        response[8] = 15;
+        response[PAYLOAD_OFFSET + 15..].fill(0);
+        assert_eq!(
+            ConfigResponse::decode_payload(&response).unwrap_err(),
+            PacketError::InvalidPayloadLength {
+                max: 16,
+                actual: 15
+            }
+        );
+
+        let mut response = ConfigResponse::combo_get_info_ok(1, info).encode_payload();
+        response[PAYLOAD_OFFSET + 3] = 0x80;
+        assert_eq!(
+            ConfigResponse::decode_payload(&response).unwrap_err(),
+            PacketError::InvalidComboInfoFlags(0x80)
+        );
+
+        let mut response = ConfigResponse::combo_get_info_ok(1, info).encode_payload();
+        response[PAYLOAD_OFFSET + 16] = 1;
+        assert_eq!(
+            ConfigResponse::decode_payload(&response).unwrap_err(),
+            PacketError::ReservedNotZero
+        );
+
+        let mut response = ConfigResponse::combo_get_combo_ok(2, sample_combo(0)).encode_payload();
+        response[PAYLOAD_OFFSET + 1] |= 0x20;
+        assert_eq!(
+            ConfigResponse::decode_payload(&response).unwrap_err(),
+            PacketError::ReservedNotZero
+        );
+    }
+
+    #[test]
+    fn combo_item_validates_slot_keys_name_and_numeric_bounds() {
+        assert_eq!(
+            ConfigRequest::combo_get_combo(1, 32).unwrap_err(),
+            PacketError::InvalidComboSlot(32)
+        );
+        assert_eq!(
+            ComboItem::new(0, "x", &[1], false, sample_combo(0).binding, 0, 50, None).unwrap_err(),
+            PacketError::InvalidComboKeyCount(1)
+        );
+        assert_eq!(
+            ComboItem::new(0, "x", &[1, 1], false, sample_combo(0).binding, 0, 50, None)
+                .unwrap_err(),
+            PacketError::InvalidComboKeyPositions
+        );
+        assert_eq!(
+            ComboName::new("1234567890123456").unwrap_err(),
+            PacketError::InvalidComboNameLength(16)
+        );
+        assert_eq!(
+            ComboName::new("コンボ").unwrap_err(),
+            PacketError::InvalidComboName
+        );
+        assert_eq!(
+            ComboItem::new(0, "x", &[1, 2], false, sample_combo(0).binding, 0, 0, None)
+                .unwrap_err(),
+            PacketError::InvalidComboTimeout(0)
+        );
+        assert_eq!(
+            ComboItem::new(
+                0,
+                "x",
+                &[1, 2],
+                false,
+                sample_combo(0).binding,
+                0,
+                50,
+                Some(1001)
+            )
+            .unwrap_err(),
+            PacketError::InvalidComboPriorIdle(1001)
+        );
+
+        let nine_positions = [0, 1, 2, 3, 4, 5, 6, 7, 8];
+        assert_eq!(
+            ComboItem::new(
+                0,
+                "x",
+                &nine_positions,
+                false,
+                sample_combo(0).binding,
+                0,
+                50,
+                None
+            )
+            .unwrap_err(),
+            PacketError::InvalidComboKeyCount(9)
+        );
+
+        let mut response = ConfigResponse::combo_get_combo_ok(2, sample_combo(0)).encode_payload();
+        response[PAYLOAD_OFFSET + 24..PAYLOAD_OFFSET + 26].copy_from_slice(&0u16.to_le_bytes());
+        assert_eq!(
+            ConfigResponse::decode_payload(&response).unwrap_err(),
+            PacketError::InvalidComboUnusedKeyPosition
+        );
+        let mut response = ConfigResponse::combo_get_combo_ok(2, sample_combo(0)).encode_payload();
+        response[PAYLOAD_OFFSET + 8] = 1;
+        assert_eq!(
+            ConfigResponse::decode_payload(&response).unwrap_err(),
+            PacketError::ReservedNotZero
+        );
+        let mut response = ConfigResponse::combo_get_combo_ok(2, sample_combo(0)).encode_payload();
+        response[PAYLOAD_OFFSET + 2] = 0xff;
+        assert_eq!(
+            ConfigResponse::decode_payload(&response).unwrap_err(),
+            PacketError::InvalidComboNameUtf8
+        );
+    }
+
+    #[test]
+    fn combo_response_matching_requires_seq_feature_op_and_slot_echo() {
+        let response = ConfigResponse::combo_get_combo_ok(9, sample_combo(3));
+        assert!(response.is_response_to(ConfigRequest::combo_get_combo(9, 3).unwrap()));
+        assert!(!response.is_response_to(ConfigRequest::combo_get_combo(8, 3).unwrap()));
+        assert!(!response.is_response_to(ConfigRequest::combo_get_combo(9, 4).unwrap()));
+        assert!(!response.is_response_to(ConfigRequest::encoder_get_info(9)));
+        assert!(!response.is_response_to(ConfigRequest::combo_get_info(9)));
     }
 
     #[test]

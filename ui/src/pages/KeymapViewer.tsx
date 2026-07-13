@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type Dispatch, type SetStateAction } from "react";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { Crosshair, AlertCircle, BarChart3, Keyboard, Lock, RefreshCw, RotateCcw, XCircle, Pencil, Save, Trash2, LogOut, Search, Plus, Usb, Bluetooth, Download, Upload } from "lucide-react";
+import { Crosshair, AlertCircle, BarChart3, Keyboard, Lock, RefreshCw, RotateCcw, XCircle, Pencil, Save, Trash2, LogOut, Search, Plus, Group, Usb, Bluetooth, Download, Upload } from "lucide-react";
 import {
   getKeyStats,
   onKeyPressEvent,
   onKeyStatsUpdated,
   readEncoderLayerBindings,
   readEncoderInfo,
+  readCombo,
+  readComboInfo,
   readStudioKeymap,
   resolveStudioBehaviorLabels,
   studioAddLayer,
@@ -14,6 +16,8 @@ import {
   studioBeginEdit,
   studioDiscardChanges,
   studioEncoderHasUnsaved,
+  studioComboDelete,
+  studioComboHasUnsaved,
   studioEndEdit,
   studioExportKeymap,
   studioHasUnsaved,
@@ -25,6 +29,7 @@ import {
   studioResyncEditState,
   studioSaveChanges,
   studioSetEncoderBindings,
+  studioSetCombo,
   studioSetKey,
 } from "../api";
 import { KeymapCanvas } from "../components/KeymapCanvas";
@@ -38,6 +43,8 @@ import type {
   EditBehavior,
   EditState,
   EncoderBindingsDto,
+  ComboInfoDto,
+  ComboItemDto,
   KeyCatalogEntry,
   KeyStatsSummary,
   MonitorStatus,
@@ -507,7 +514,7 @@ export default function KeymapViewer({
   const { t } = useLang();
   const [selectedId, setSelectedId] = useState<string>("");
   const [activeLayer, setActiveLayer] = useState(0);
-  const [viewMode, setViewMode] = useState<"keymap" | "heatmap" | "tester">("keymap");
+  const [viewMode, setViewMode] = useState<"keymap" | "combo" | "heatmap" | "tester">("keymap");
   const [reading, setReading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [editState, setEditState] = useState<EditState>({
@@ -534,6 +541,9 @@ export default function KeymapViewer({
   const [encoderPanel, setEncoderPanel] = useState<{ encoderId: number; rect: PickerRect } | null>(null);
   const [pendingEncoderWrites, setPendingEncoderWrites] = useState(0);
   const [encoderDirtyByUid, setEncoderDirtyByUid] = useState<Record<string, boolean>>({});
+  const [comboDirtyByUid, setComboDirtyByUid] = useState<Record<string, boolean>>({});
+  const [comboAvailableByUid, setComboAvailableByUid] = useState<Record<string, boolean>>({});
+  const [comboDraftActive, setComboDraftActive] = useState(false);
   const [editHostLinkUid, setEditHostLinkUid] = useState<string | null>(null);
   const [encoderWriteErrorCode, setEncoderWriteErrorCode] = useState<string | null>(null);
   const [encoderRefreshNonce, setEncoderRefreshNonce] = useState(0);
@@ -609,6 +619,8 @@ export default function KeymapViewer({
   const editing = editState.mode === "editing";
   const encoderDirtyUid = editHostLinkUid ?? hostLinkUid;
   const encoderDirty = encoderDirtyUid ? encoderDirtyByUid[encoderDirtyUid] ?? false : false;
+  const comboDirty = encoderDirtyUid ? comboDirtyByUid[encoderDirtyUid] ?? false : false;
+  const comboAvailable = encoderDirtyUid ? comboAvailableByUid[encoderDirtyUid] ?? false : false;
   const setEncoderDirty = useCallback((value: boolean | ((current: boolean) => boolean)) => {
     const uid = editHostLinkUid ?? hostLinkUid;
     if (!uid) return;
@@ -617,6 +629,14 @@ export default function KeymapViewer({
       const next = typeof value === "function" ? value(previous) : value;
       return { ...current, [uid]: next };
     });
+  }, [editHostLinkUid, hostLinkUid]);
+  const setComboDirty = useCallback((value: boolean) => {
+    const uid = editHostLinkUid ?? hostLinkUid;
+    if (uid) setComboDirtyByUid((current) => ({ ...current, [uid]: value }));
+  }, [editHostLinkUid, hostLinkUid]);
+  const setComboAvailable = useCallback((value: boolean) => {
+    const uid = editHostLinkUid ?? hostLinkUid;
+    if (uid) setComboAvailableByUid((current) => ({ ...current, [uid]: value }));
   }, [editHostLinkUid, hostLinkUid]);
 
   const [encoderCount, setEncoderCount] = useState<number | null>(null);
@@ -1045,6 +1065,7 @@ export default function KeymapViewer({
       result = await studioSaveChanges(
         selected.id,
         editHostLinkUid ?? (configRpcCapable ? hostLinkUid : null),
+        comboAvailable ? editHostLinkUid ?? hostLinkUid : null,
       );
     } catch (e) {
       const code = String(e);
@@ -1057,12 +1078,14 @@ export default function KeymapViewer({
       setEditState((current) => ({ ...current, dirty: false }));
     }
     const encoderFeature = result.config.results.find((r) => r.feature === "ENCODER");
+    const comboFeature = result.config.results.find((r) => r.feature === "COMBO");
     if (encoderFeature ? encoderFeature.success : result.config.skipped) {
       setEncoderDirty(false);
     }
     if (encoderFeature?.attempted && encoderFeature.success) {
       setEncoderRefreshNonce((nonce) => nonce + 1);
     }
+    if (comboFeature?.success) setComboDirty(false);
     if (result.overall_success) {
       setEditState((current) => ({ ...current, operation: "idle", problem: null }));
       setRestoreReport(null);
@@ -1078,18 +1101,20 @@ export default function KeymapViewer({
       : "save_failed";
     setEditState((current) => ({ ...current, operation: "idle", problem }));
     const encoderError = encoderFeature && !encoderFeature.success ? encoderFeature.error : null;
+    const comboError = comboFeature && !comboFeature.success ? comboFeature.error : null;
     setError(
       [
         !result.studio.success ? errorLabel(result.studio.error ?? "save_failed", t) : null,
         encoderError
           ? `${t("keymap.error.encoder_save_failed")} (${errorLabel(encoderError, t)})`
           : null,
+        comboError ? `Combo の保存に失敗しました。変更は保持されています。 (${errorLabel(comboError, t)})` : null,
       ]
         .filter((message): message is string => message !== null)
         .join(" / ")
     );
     return false;
-  }, [configRpcCapable, editHostLinkUid, encoderDirty, hostLinkUid, mapEditProblem, selected, t]);
+  }, [comboAvailable, configRpcCapable, editHostLinkUid, encoderDirty, hostLinkUid, mapEditProblem, selected, t]);
 
   // Same composition as saveEdit: discard normal keys and encoder overrides
   // together via a single command, then re-sync the encoder snapshot so the
@@ -1105,6 +1130,7 @@ export default function KeymapViewer({
       result = await studioDiscardChanges(
         selected.id,
         editHostLinkUid ?? (configRpcCapable ? hostLinkUid : null),
+        comboAvailable ? editHostLinkUid ?? hostLinkUid : null,
       );
     } catch (e) {
       setEditState((current) => ({ ...current, operation: "idle" }));
@@ -1118,6 +1144,7 @@ export default function KeymapViewer({
       setEditState((current) => ({ ...current, dirty: false }));
     }
     const encoderFeature = result.result.config.results.find((r) => r.feature === "ENCODER");
+    const comboFeature = result.result.config.results.find((r) => r.feature === "COMBO");
     if (encoderFeature?.success) {
       setEncoderDirty(false);
     }
@@ -1126,6 +1153,7 @@ export default function KeymapViewer({
       setEncoderPanel(null);
       setEncoderRefreshNonce((nonce) => nonce + 1);
     }
+    if (comboFeature?.success) setComboDirty(false);
     if (result.result.overall_success) {
       setEditState((current) => ({ ...current, operation: "idle", problem: null }));
       setRestoreReport(null);
@@ -1139,6 +1167,7 @@ export default function KeymapViewer({
     }
     setEditState((current) => ({ ...current, operation: "idle" }));
     const encoderError = encoderFeature && !encoderFeature.success ? encoderFeature.error : null;
+    const comboError = comboFeature && !comboFeature.success ? comboFeature.error : null;
     setError(
       [
         !result.result.studio.success
@@ -1147,12 +1176,13 @@ export default function KeymapViewer({
         encoderError
           ? `${t("keymap.error.encoder_discard_failed")} (${errorLabel(encoderError, t)})`
           : null,
+        comboError ? `Combo の変更を破棄できませんでした。 (${errorLabel(comboError, t)})` : null,
       ]
         .filter((message): message is string => message !== null)
         .join(" / ")
     );
     return false;
-  }, [configRpcCapable, editHostLinkUid, encoderDirty, hostLinkUid, selected, setSnapshotsByDeviceId, t]);
+  }, [comboAvailable, configRpcCapable, editHostLinkUid, encoderDirty, hostLinkUid, selected, setSnapshotsByDeviceId, t]);
 
   const resetToKeymap = useCallback(async () => {
     if (!selected) return false;
@@ -1168,7 +1198,11 @@ export default function KeymapViewer({
     setEditState((current) => ({ ...current, operation: "resetting", problem: null }));
     let result: ResetToKeymapDto;
     try {
-      result = await studioResetToKeymap(selected.id, pairedHostLinkUid);
+      result = await studioResetToKeymap(
+        selected.id,
+        pairedHostLinkUid,
+        comboAvailable ? pairedHostLinkUid : null,
+      );
     } catch (e) {
       setEditState((current) => ({ ...current, operation: "idle" }));
       setError(errorLabel(String(e), t));
@@ -1187,12 +1221,14 @@ export default function KeymapViewer({
     }
 
     const encoderFeature = result.config.results.find((item) => item.feature === "ENCODER");
+    const comboFeature = result.config.results.find((item) => item.feature === "COMBO");
     if (encoderFeature?.success) {
       setEncoderDirty(false);
     }
     if (encoderFeature?.attempted) {
       setEncoderRefreshNonce((nonce) => nonce + 1);
     }
+    if (comboFeature?.success) setComboDirty(false);
     if (result.studio.success && result.snapshot) {
       setEditState((current) => ({ ...current, dirty: false }));
     }
@@ -1214,16 +1250,19 @@ export default function KeymapViewer({
       encoderFeature && !encoderFeature.success
         ? `${t("keymap.error.encoder_reset_failed")} (${errorLabel(encoderFeature.error ?? "reset_failed", t)})`
         : null,
+      comboFeature && !comboFeature.success
+        ? `Combo を .keymap に戻せませんでした。 (${errorLabel(comboFeature.error ?? "reset_failed", t)})`
+        : null,
     ].filter((message): message is string => message !== null);
     setError(messages.length > 0 ? messages.join(" / ") : t("keymap.error.reset_partial"));
     return false;
-  }, [configRpcCapable, editHostLinkUid, hostLinkUid, selected, setSnapshotsByDeviceId, t]);
+  }, [comboAvailable, configRpcCapable, editHostLinkUid, hostLinkUid, selected, setSnapshotsByDeviceId, t]);
 
   const endEdit = useCallback(async () => {
     if (!selected) return;
     let studioDirty = editState.dirty;
     if (studioDirty) studioDirty = await studioHasUnsaved(selected.id).catch(() => true);
-    if (studioDirty || encoderDirty) {
+    if (studioDirty || encoderDirty || comboDirty || comboDraftActive) {
       const discard = window.confirm(t("keymap.edit.confirm_discard_end"));
       if (!discard) return;
       const discarded = await discardEdit();
@@ -1247,12 +1286,12 @@ export default function KeymapViewer({
       setEditState((current) => ({ ...current, operation: "idle" }));
       setError(errorLabel(code, t));
     }
-  }, [discardEdit, editState.dirty, encoderDirty, selected, t]);
+  }, [comboDirty, comboDraftActive, discardEdit, editState.dirty, encoderDirty, selected, t]);
 
   const selectStudioDevice = useCallback(async (nextId: string) => {
     if (nextId === selectedId) return;
     if (editState.mode === "editing" && selected) {
-      if (editState.dirty || encoderDirty) {
+      if (editState.dirty || encoderDirty || comboDirty || comboDraftActive) {
         if (!window.confirm(t("keymap.edit.confirm_discard_switch"))) return;
         if (!(await discardEdit())) return;
       }
@@ -1266,7 +1305,7 @@ export default function KeymapViewer({
       setEditState({ mode: "viewing", dirty: false, operation: "idle", problem: null });
     }
     setSelectedId(nextId);
-  }, [discardEdit, editState.dirty, editState.mode, encoderDirty, selected, selectedId, t]);
+  }, [comboDirty, comboDraftActive, discardEdit, editState.dirty, editState.mode, encoderDirty, selected, selectedId, t]);
 
   const canLeaveForNavigation = useCallback(
     () => pendingKeyWrites === 0 && pendingEncoderWrites === 0 && editState.operation === "idle",
@@ -1276,12 +1315,12 @@ export default function KeymapViewer({
   const hasUnsavedForNavigation = useCallback(async () => {
     if (!selected || editState.mode !== "editing") return false;
     if (pendingKeyWrites > 0 || pendingEncoderWrites > 0) return true;
-    if (encoderDirty) return true;
+    if (encoderDirty || comboDirty || comboDraftActive) return true;
     if (editState.dirty) {
       return await studioHasUnsaved(selected.id).catch(() => true);
     }
     return await studioHasUnsaved(selected.id).catch(() => false);
-  }, [editState.dirty, editState.mode, encoderDirty, pendingEncoderWrites, pendingKeyWrites, selected]);
+  }, [comboDirty, comboDraftActive, editState.dirty, editState.mode, encoderDirty, pendingEncoderWrites, pendingKeyWrites, selected]);
 
   const finishEditForNavigation = useCallback(async () => {
     if (!selected) return true;
@@ -1767,6 +1806,12 @@ export default function KeymapViewer({
                   label={t("keymap.view.keymap")}
                 />
                 <ViewTab
+                  active={viewMode === "combo"}
+                  onClick={() => setViewMode("combo")}
+                  icon={<Group size={13} />}
+                  label="Combo"
+                />
+                <ViewTab
                   active={viewMode === "heatmap"}
                   onClick={() => setViewMode("heatmap")}
                   icon={<BarChart3 size={13} />}
@@ -1821,6 +1866,21 @@ export default function KeymapViewer({
                   } : undefined}
                 />
               )}
+              {viewMode === "combo" && (
+                <ComboEditor
+                  deviceId={selected.id}
+                  hostLinkUid={configRpcCapable ? hostLinkUid : null}
+                  layoutKeys={snapshot.selected_layout_keys}
+                  keyLabels={new Map((layer?.bindings ?? []).map((binding) => [binding.position, binding.primary_label]))}
+                  catalog={catalog}
+                  layers={snapshot.layers}
+                  editing={editing}
+                  disabled={editState.operation !== "idle"}
+                  onDirtyChange={setComboDirty}
+                  onAvailabilityChange={setComboAvailable}
+                  onDraftChange={setComboDraftActive}
+                />
+              )}
               {viewMode === "heatmap" && (
                 <HeatmapContent snapshot={snapshot} statsUid={statsUid} />
               )}
@@ -1840,7 +1900,8 @@ export default function KeymapViewer({
       </div>
       {editing && selected && (
         <EditBar
-          dirty={editState.dirty || encoderDirty}
+          dirty={editState.dirty || encoderDirty || comboDirty}
+          draftActive={comboDraftActive}
           operation={editState.operation}
           pendingCount={pendingKeyWrites + pendingEncoderWrites}
           problem={editState.problem}
@@ -2277,8 +2338,9 @@ function KeymapContent({
   );
 }
 
-function EditBar({ dirty, operation, pendingCount, problem, keyWriteError, encoderWriteError, notice, onResyncKey, onResyncEncoder, onSave, onDiscard, onResetToKeymap, onEnd }: {
+function EditBar({ dirty, draftActive, operation, pendingCount, problem, keyWriteError, encoderWriteError, notice, onResyncKey, onResyncEncoder, onSave, onDiscard, onResetToKeymap, onEnd }: {
   dirty: boolean;
+  draftActive: boolean;
   operation: EditState["operation"];
   pendingCount: number;
   problem: EditState["problem"];
@@ -2294,7 +2356,7 @@ function EditBar({ dirty, operation, pendingCount, problem, keyWriteError, encod
 }) {
   const { t } = useLang();
   const pending = pendingCount > 0;
-  const busy = operation !== "idle" || pending;
+  const busy = operation !== "idle" || pending || draftActive;
   const message = keyWriteError
     ? t("keymap.edit.key_write_failed")
     : encoderWriteError
@@ -2303,6 +2365,8 @@ function EditBar({ dirty, operation, pendingCount, problem, keyWriteError, encod
     ? t(`keymap.edit.problem.${problem}` as TranslationKey)
     : notice
       ? t(`keymap.edit.${notice}` as TranslationKey)
+    : draftActive
+      ? "Combo の編集中です。適用するか、別のスロットへ移動して変更を破棄してください。"
     : dirty
       ? t("keymap.edit.dirty")
       : "";
@@ -2378,6 +2442,274 @@ function EditBar({ dirty, operation, pendingCount, problem, keyWriteError, encod
       </div>
     </div>
   );
+}
+
+/** Combo は Studio keymap RPC とは別の Config RPC 機能であるため、通常の
+ * キー編集可否とは独立して Host Link UID と CONFIG_RPC の両方を確認して表示する。 */
+function comboKeySetsMatch(a: number[], b: number[]): boolean {
+  return a.length === b.length && a.every((position, index) => position === b[index]);
+}
+
+function comboLayerMasksOverlap(a: number, b: number): boolean {
+  // A zero mask means all layers in the Host Link contract.
+  return a === 0 || b === 0 || (a & b) !== 0;
+}
+
+function comboValidationMessage(
+  draft: ComboItemDto,
+  slot: number,
+  items: Record<number, ComboItemDto>,
+  maxKeys: number,
+): string | null {
+  if (draft.key_positions.length < 2 || draft.key_positions.length > maxKeys) {
+    return `キーは2〜${maxKeys}個選択してください。`;
+  }
+  const sameCombo = Object.entries(items).find(([otherSlot, item]) =>
+    Number(otherSlot) !== slot
+      && comboKeySetsMatch(draft.key_positions, item.key_positions)
+      && comboLayerMasksOverlap(draft.layer_mask, item.layer_mask)
+  );
+  if (sameCombo) {
+    return `Combo ${Number(sameCombo[0]) + 1} と同じキーが、重なるレイヤーで使われています。キーまたはレイヤーを変更してください。`;
+  }
+  return null;
+}
+
+function comboBindingLabel(binding: ComboItemDto["binding"]): string {
+  return binding.label?.full_label
+    ?? `動作 #${binding.behavior_id}（値: ${binding.param1}, ${binding.param2}）`;
+}
+
+function comboLayerLabel(layerMask: number, layers: StudioLayer[]): string {
+  if (layerMask === 0) return "すべて";
+  const selected = layers
+    .filter((layer) => (layerMask & (1 << layer.index)) !== 0)
+    .map((layer) => layer.name);
+  return selected.length > 0 ? selected.join(", ") : "指定なし";
+}
+
+function ComboEditor({ deviceId, hostLinkUid, layoutKeys, keyLabels, catalog, layers, editing, disabled, onDirtyChange, onAvailabilityChange, onDraftChange }: {
+  deviceId: string;
+  hostLinkUid: string | null;
+  layoutKeys: StudioPhysicalKey[];
+  keyLabels: Map<number, string>;
+  catalog: KeyCatalogEntry[];
+  layers: StudioLayer[];
+  editing: boolean;
+  disabled: boolean;
+  onDirtyChange: (dirty: boolean) => void;
+  onAvailabilityChange: (available: boolean) => void;
+  onDraftChange: (active: boolean) => void;
+}) {
+  const [info, setInfo] = useState<ComboInfoDto | null>(null);
+  const [items, setItems] = useState<Record<number, ComboItemDto>>({});
+  const [slot, setSlot] = useState(0);
+  const [draft, setDraft] = useState<ComboItemDto>({
+    slot: 0, name: "combo", key_positions: [], slow_release: false,
+    binding: { behavior_id: 0, param1: 0, param2: 0, label: null }, layer_mask: 0, timeout_ms: 50,
+    require_prior_idle_ms: null,
+  });
+  const [status, setStatus] = useState<"loading" | "ready" | "error" | "unsupported">("loading");
+  const [message, setMessage] = useState<string | null>(null);
+  const [working, setWorking] = useState(false);
+  const [selectedBehavior, setSelectedBehavior] = useState<EditBehavior | null>(null);
+  const [behaviorPicker, setBehaviorPicker] = useState<PickerRect | null>(null);
+  const [draftActive, setDraftActive] = useState(false);
+
+  const markDraftActive = () => {
+    setDraftActive(true);
+    onDraftChange(true);
+  };
+
+  const clearDraftActive = () => {
+    setDraftActive(false);
+    onDraftChange(false);
+  };
+
+  const load = useCallback(async () => {
+    if (!hostLinkUid) { setStatus("unsupported"); return; }
+    setStatus("loading"); setMessage(null);
+    try {
+      const nextInfo = await readComboInfo(hostLinkUid);
+      const nextItems: Record<number, ComboItemDto> = {};
+      const masks = nextInfo.occupied_slots | nextInfo.stale_slots | nextInfo.invalid_slots;
+      for (let current = 0; current < nextInfo.max_combos; current += 1) {
+        if ((masks & (1 << current)) === 0) continue;
+        try { nextItems[current] = await readCombo(deviceId, hostLinkUid, current); } catch { /* invalid placeholder */ }
+      }
+      // The current Tauri process may predate the Combo DTO label field while
+      // the Vite frontend is hot-reloaded. Resolve labels through the existing
+      // Studio command as well, so passive Combo display never falls back to a
+      // build-specific behavior id merely because the desktop app was not
+      // restarted yet.
+      const unresolved = Object.values(nextItems)
+        .filter((item) => item.binding.label === null)
+        .map((item) => ({
+          behavior_id: item.binding.behavior_id,
+          param1: item.binding.param1,
+          param2: item.binding.param2,
+        }));
+      if (unresolved.length > 0) {
+        const labels = await resolveStudioBehaviorLabels(deviceId, unresolved).catch(() => []);
+        const labelByBinding = new Map(labels.map((label) => [
+          `${label.behavior_id}:${label.param1}:${label.param2}`,
+          label,
+        ]));
+        for (const item of Object.values(nextItems)) {
+          const label = labelByBinding.get(`${item.binding.behavior_id}:${item.binding.param1}:${item.binding.param2}`);
+          if (label) item.binding.label = label;
+        }
+      }
+      const dirty = await studioComboHasUnsaved(hostLinkUid);
+      setInfo(nextInfo); setItems(nextItems); onDirtyChange(dirty); onAvailabilityChange(true); setStatus("ready");
+    } catch (error) { onAvailabilityChange(false); setMessage(String(error)); setStatus("error"); }
+  }, [deviceId, hostLinkUid, onAvailabilityChange, onDirtyChange]);
+
+  useEffect(() => { void load(); }, [load]);
+  useEffect(() => () => onDraftChange(false), [onDraftChange]);
+  useEffect(() => {
+    const item = items[slot];
+    setSelectedBehavior(null);
+    clearDraftActive();
+    setDraft(item ?? {
+      slot, name: `combo${slot}`, key_positions: [], slow_release: false,
+      binding: { behavior_id: 0, param1: 0, param2: 0, label: null }, layer_mask: 0, timeout_ms: 50,
+      require_prior_idle_ms: null,
+    });
+  }, [items, slot]);
+
+  const setNumber = (field: "layer_mask" | "timeout_ms" | "require_prior_idle_ms", value: string) => {
+    const parsed = value === "" ? null : Number(value);
+    markDraftActive();
+    setDraft((current) => ({ ...current, [field]: parsed === null ? null : Number.isFinite(parsed) ? parsed : 0 } as ComboItemDto));
+  };
+  const apply = async () => {
+    if (!hostLinkUid) return;
+    const validationMessage = comboValidationMessage(draft, slot, items, info?.max_keys_per_combo ?? 8);
+    if (validationMessage) { setMessage(validationMessage); return; }
+    setWorking(true); setMessage(null);
+    try {
+      const result = await studioSetCombo(deviceId, hostLinkUid, { ...draft, slot, behavior: selectedBehavior });
+      setItems((current) => ({ ...current, [slot]: result }));
+      clearDraftActive();
+      onDirtyChange(true); setMessage("適用しました。下部の「保存」で永続化します。");
+    } catch (error) {
+      const detail = String(error);
+      setMessage(detail.includes("config_rpc_status_invalid_argument")
+        ? "入力内容を確認してください。重複するキーとレイヤーの組み合わせは登録できません。"
+        : `適用できませんでした: ${detail}`);
+    }
+    finally { setWorking(false); }
+  };
+  const remove = async (targetSlot = slot) => {
+    if (!hostLinkUid || !items[targetSlot]) return;
+    setWorking(true); setMessage(null);
+    try { await studioComboDelete(hostLinkUid, targetSlot); setItems((current) => { const next = { ...current }; delete next[targetSlot]; return next; }); onDirtyChange(true); }
+    catch (error) { setMessage(`削除できませんでした: ${String(error)}`); }
+    finally { setWorking(false); }
+  };
+  const togglePosition = (position: number) => setDraft((current) => {
+    markDraftActive();
+    const included = current.key_positions.includes(position);
+    const positions = included ? current.key_positions.filter((value) => value !== position) : [...current.key_positions, position].sort((a, b) => a - b);
+    return { ...current, key_positions: positions };
+  });
+  if (status === "unsupported") return <InfoNotice>Combo 編集には、UID が一致する Host Link 接続と Config RPC が必要です。</InfoNotice>;
+  if (status === "loading") return <div className="py-10 text-center text-sm text-muted">Combo を読み込んでいます…</div>;
+  if (status === "error" || !info) return <Notice>Combo を読み込めませんでした。<button className="ml-2 underline" onClick={() => void load()}>再試行</button>{message ? ` (${message})` : ""}</Notice>;
+  const availableSlots = Array.from({ length: info.max_combos }, (_, index) => index);
+  const mutationDisabled = !editing || disabled || working;
+  const selectionDisabled = disabled || working;
+  const validationMessage = comboValidationMessage(draft, slot, items, info.max_keys_per_combo);
+  const hasBinding = selectedBehavior !== null || items[slot] !== undefined;
+  const canApply = !mutationDisabled && draftActive && validationMessage === null && hasBinding;
+  const configuredSlots = availableSlots.filter((current) => items[current] !== undefined);
+  const nextEmptySlot = availableSlots.find((current) => items[current] === undefined);
+  const selectSlot = (nextSlot: number) => {
+    if (nextSlot !== slot && draftActive && !window.confirm("適用していない変更があります。変更を破棄して移動しますか？")) return;
+    setSlot(nextSlot);
+  };
+  return <div className="grid gap-5 lg:grid-cols-[10rem_minmax(0,1fr)]">
+    <aside className="rounded-xl bg-background p-3">
+      <div className="mb-2 text-xs font-medium text-muted">Combo {info.combo_count} / {info.max_combos}</div>
+      <div className="space-y-1">
+        {configuredSlots.map((current) => {
+          const item = items[current];
+          const selected = slot === current;
+          return <div key={current} className={`group flex items-center gap-1 rounded-md px-2 py-2 text-xs ${selected ? "bg-accent text-white" : "bg-surface text-ink ring-1 ring-border hover:bg-plate"}`}>
+            <button disabled={selectionDisabled} onClick={() => selectSlot(current)} className="min-w-0 flex-1 text-left">
+              <div className="truncate font-medium">{item.name}</div>
+              <div className={`mt-0.5 truncate font-mono text-[10px] ${selected ? "text-white/80" : "text-muted"}`}>{comboBindingLabel(item.binding)}</div>
+              <div className={`mt-1 truncate text-[10px] ${selected ? "text-white/80" : "text-faint"}`}>{comboLayerLabel(item.layer_mask, layers)}</div>
+            </button>
+            {editing && <button type="button" disabled={mutationDisabled} onClick={() => void remove(current)} title={`${item.name} を削除`} aria-label={`${item.name} を削除`} className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg disabled:opacity-50 ${selected ? "text-white/75 hover:bg-white/15 hover:text-white" : "text-disabled hover:bg-red-50 hover:text-red-500"}`}><Trash2 size={14} /></button>}
+          </div>;
+        })}
+        {configuredSlots.length === 0 && <div className="px-2 py-3 text-xs text-faint">設定済みのComboはありません。</div>}
+      </div>
+      {editing && <button
+        type="button"
+        disabled={selectionDisabled || nextEmptySlot === undefined}
+        title={nextEmptySlot === undefined ? "登録できるcomboの最大数に達しています。" : "Comboを追加"}
+        onClick={() => { if (nextEmptySlot !== undefined) selectSlot(nextEmptySlot); }}
+        className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-pill bg-surface px-3 py-1.5 text-sm font-medium text-ink ring-1 ring-border hover:bg-plate disabled:opacity-50"
+      ><Plus size={14} />追加</button>}
+      {editing && nextEmptySlot !== undefined && !items[slot] && <div className="mt-2 text-center text-[10px] text-faint">新規Comboを編集中</div>}
+      {editing && nextEmptySlot === undefined && <div className="mt-2 text-center text-[10px] text-faint">登録上限に達しています</div>}
+    </aside>
+    <div className="space-y-4">
+      <div className="flex flex-wrap items-center justify-between gap-2"><div><div className="text-sm font-medium text-ink">Combo {slot + 1}</div><div className="text-xs text-muted">2〜{info.max_keys_per_combo} 個のキーを選択します</div></div>{editing && <div className="flex gap-2"><button disabled={!canApply} onClick={() => void apply()} className="rounded-pill bg-accent px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50">適用</button></div>}</div>
+      <KeymapCanvas
+        keys={layoutKeys}
+        keyTitle={(key) => keyLabels.get(key.position) ?? `位置 ${key.position}`}
+        keyStyle={(key) => draft.key_positions.includes(key.position) ? { backgroundColor: "rgb(var(--accent-rgb))", color: "#fff" } : undefined}
+        onKeyClick={editing ? (key) => togglePosition(key.position) : undefined}
+        keyContent={(key) => <><span className="max-w-full truncate text-xs font-medium">{keyLabels.get(key.position) ?? `位置 ${key.position}`}</span><span className="mt-0.5 text-[10px] opacity-65">{key.position}</span></>}
+      />
+      <div className="grid gap-3 sm:grid-cols-2">
+        <label className="text-sm text-muted">name<input value={draft.name} maxLength={15} disabled={mutationDisabled} onChange={(event) => { markDraftActive(); setDraft((current) => ({ ...current, name: event.target.value })); }} className="mt-1 w-full rounded-md bg-background px-3 py-2 text-ink ring-1 ring-border" /></label>
+        <label title="comboを成立させるために、最初のキーを押してから残りのキーを押し終えるまでの制限時間です。" className="text-sm text-muted">timeout-ms<input type="number" min="1" max="1000" value={draft.timeout_ms} disabled={mutationDisabled} onChange={(event) => setNumber("timeout_ms", event.target.value)} className="mt-1 w-full rounded-md bg-background px-3 py-2 text-ink ring-1 ring-border" /></label>
+        <label className="text-sm text-muted">layers<input type="number" min="0" value={draft.layer_mask} disabled={mutationDisabled} onChange={(event) => setNumber("layer_mask", event.target.value)} className="mt-1 w-full rounded-md bg-background px-3 py-2 text-ink ring-1 ring-border" /></label>
+        <label title="comboの最初のキーを押す直前に通常キーが入力されていた場合、指定時間が経過するまでcomboを成立させません。高速入力中の意図しないcomboを防止できます。" className="text-sm text-muted">require-prior-idle-ms<input type="number" min="1" max="1000" value={draft.require_prior_idle_ms ?? ""} disabled={mutationDisabled} onChange={(event) => setNumber("require_prior_idle_ms", event.target.value)} className="mt-1 w-full rounded-md bg-background px-3 py-2 text-ink ring-1 ring-border" /></label>
+        <label title="オフの場合、comboのキーを1つでも離すとcomboを解除します。オンの場合、すべてのキーを離したときに解除します。" className="flex items-center gap-2 pt-6 text-sm text-ink"><input type="checkbox" checked={draft.slow_release} disabled={mutationDisabled} onChange={(event) => { markDraftActive(); setDraft((current) => ({ ...current, slow_release: event.target.checked })); }} />slow-release</label>
+      </div>
+      <div className="rounded-xl bg-background p-3">
+        <div title="comboが成立したときに実行する動作です。" className="mb-1 text-sm font-medium text-ink">bindings</div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-muted">
+            {selectedBehavior ? optimisticLabelsForBehavior(selectedBehavior, catalog).full_label : comboBindingLabel(draft.binding)}
+          </span>
+          <button
+            type="button"
+            disabled={mutationDisabled}
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              setBehaviorPicker({ left: rect.left, top: rect.top, width: rect.width, height: rect.height });
+            }}
+            className="rounded-pill bg-surface px-3 py-1.5 text-sm text-ink ring-1 ring-border disabled:opacity-50"
+          >
+            動作を選択
+          </button>
+        </div>
+      </div>
+      {(validationMessage || message) && <div className={`text-sm ${validationMessage ? "text-red-700" : "text-muted"}`}>{validationMessage ?? message}</div>}
+      <div className="border-t border-border pt-3 text-sm text-muted">適用後の保存・破棄・.keymap への復元は、画面下部の共通操作から行います。</div>
+    </div>
+      {behaviorPicker && (
+        <BindingPicker
+          catalog={catalog}
+          layers={layers}
+          rect={behaviorPicker}
+          busy={mutationDisabled}
+          onClose={() => setBehaviorPicker(null)}
+          onSelect={(behavior) => {
+            setSelectedBehavior(behavior);
+            markDraftActive();
+            setBehaviorPicker(null);
+          }}
+        />
+      )}
+  </div>;
 }
 
 type PickerTab = "key" | "layer" | "tap_hold" | "bt_out" | "advanced";
@@ -2623,6 +2955,22 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [onClose]);
 
+  const renderSearch = (autoFocus = false) => (
+    <div className="mt-3 flex items-center gap-2 rounded-pill bg-background px-3 py-2 ring-1 ring-border">
+      <Search size={15} className="text-faint" />
+      <input
+        autoFocus={autoFocus}
+        value={query}
+        onChange={(event) => setQuery(event.target.value)}
+        placeholder={t("keymap.edit.search")}
+        className="min-w-0 flex-1 bg-transparent text-sm text-ink outline-none placeholder:text-faint"
+      />
+    </div>
+  );
+
+  const commandMatchesQuery = (label: string, title: string) =>
+    !queryLower || label.toLowerCase().includes(queryLower) || title.toLowerCase().includes(queryLower);
+
   const renderCatalogButtons = (
     onEntrySelect: (entry: KeyCatalogEntry) => void,
     entriesDisabled = false,
@@ -2661,7 +3009,7 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant
     confirmBeforeSelect = false,
   ) => (
     <div className="flex flex-wrap gap-1.5">
-      {commands.map((command) => (
+      {commands.filter((command) => commandMatchesQuery(command.label, command.title)).map((command) => (
         <button
           key={command.title}
           type="button"
@@ -2717,16 +3065,7 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant
         </div>
         {tab === "key" ? (
           <>
-            <div className="mt-3 flex items-center gap-2 rounded-pill bg-background px-3 py-2 ring-1 ring-border">
-              <Search size={15} className="text-faint" />
-              <input
-                autoFocus
-                value={query}
-                onChange={(event) => setQuery(event.target.value)}
-                placeholder={t("keymap.edit.search")}
-                className="min-w-0 flex-1 bg-transparent text-sm text-ink outline-none placeholder:text-faint"
-              />
-            </div>
+            {renderSearch(true)}
             <div className="mt-3 flex gap-2">
               {!isEncoder && (
                 <button
@@ -2894,6 +3233,7 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant
             <div className="mb-1.5 text-xs font-medium uppercase text-faint">
               {t("keymap.edit.tap_key")}
             </div>
+            {renderSearch(true)}
             <div className="mb-3">
               <ModifierToggleRow
                 label={t("keymap.edit.key_modifiers")}
@@ -2966,7 +3306,9 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant
             </div>
           </div>
         ) : (
-          <div className="mt-3 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+          <>
+            {renderSearch(true)}
+            <div className="mt-3 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
             <div>
               <div className="mb-1.5 text-xs font-medium uppercase text-faint">
                 {t("keymap.edit.mouse")}
@@ -3051,7 +3393,8 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant
               )}
             </div>
             </>)}
-          </div>
+            </div>
+          </>
         )}
       </div>
     </>

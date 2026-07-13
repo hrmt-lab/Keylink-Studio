@@ -15,6 +15,8 @@ Keylink Studio は、Windows で常駐し、USB または BLE HOG で HID device
 - キーボードから PC 側アクションを実行する
 - キーボードから届くキー統計・レイヤー状態・キー押下イベントを UI に表示する
 - ZMK Studio RPC でキーマップを表示・編集する
+- Host Link Config RPC でエンコーダの CW / CCW override を編集する
+- Host Link Config RPC でCombo tableを表示・編集・保存する
 
 このリポジトリに含まれるのは PC 側のアプリです。Host Link の命令を受け取って layer や表示に反映する ZMK 側 firmware は、別途同じ packet protocol に対応している必要があります。Host Link は USB HID と BLE HOG のどちらでも同じ packet を使います。ZMK Studio キーマップ機能は Host Link とは別経路で、ZMK Studio 対応 firmware を使います。
 
@@ -50,6 +52,7 @@ flowchart LR
 | TOML | 設定ファイル形式 |
 | Host Link HID | PC とキーボードの間で独自 packet を送受信する HID 経路。USB HID または BLE HOG を使う |
 | ZMK Studio RPC | キーマップ表示・編集用の Studio 経路 |
+| Host Link Config RPC | エンコーダ overrideとCombo tableの取得、編集、保存、破棄、初期値復元用の Host Link 経路 |
 | ZMK | キーボード側 firmware |
 
 ## Rust: 実際の処理を担当する部分
@@ -130,7 +133,7 @@ cargo run -p rawhid-host-cli -- run
 | `Actions.tsx` | `HOST_ACTION` バインディング設定 |
 | `TimeSync.tsx` | 時刻同期設定 |
 | `AiUsage.tsx` | Codex / Claude Code 使用量設定と状態表示 |
-| `KeymapViewer.tsx` | ZMK Studio キーマップ表示・編集、ヒートマップ、テスター |
+| `KeymapViewer.tsx` | ZMK Studio キーマップ、エンコーダ、Combo編集、ヒートマップ、テスター |
 | `Devices.tsx` | Raw HID / ZMK Studio device scan と結果。Host Link は `device_uid_hash` 単位で USB / BLE endpoint を集約表示 |
 | `Settings.tsx` | 外観、起動、polling、HID 基本設定 |
 
@@ -260,6 +263,10 @@ sequenceDiagram
     UI->>T: studio_end_edit
     T->>S: serial を閉じる
 ```
+
+エンコーダ編集はこの Studio RPC の流れに Host Link Config RPC を追加する形です。Studio の `serial_number` と Host Link の `device_uid_hash` が同じ UID のときだけ組み合わせます。キー変更とエンコーダ override は別々に保存されるため、保存・破棄・`.keymap に戻す` は両方を実行し、結果も別々に表示します。
+
+Combo編集も同じHost Link Config RPCを使い、`COMBO GET_INFO`でfeature対応を確認します。通常キー、Encoder、Comboは独立した変更面として扱い、共通編集バーから保存・破棄・`.keymapに戻す`を実行して結果をfeature別に返します。ComboのExport／Restore統合は未実装です。
 
 編集中は Studio transport を保持するため、同じ device を別 command が二重に開かないように backend 側で `port_busy` を返します。同じ device の読み取りは保持中の session 経由で snapshot を返します。BLE Studio 編集では UI 側でキー書き込みを 1 件ずつ順番に処理し、pending 件数を下部バーに表示します。未保存変更があるまま他画面へ移動しようとした場合、UI は遷移前に止めて保存して移動 / 破棄して移動 / キャンセルを提示します。書き込み失敗時は未送信キューを破棄し、復旧用の再読み込みで編集セッションを破棄してから実機状態を読み直します。
 

@@ -374,6 +374,15 @@ export interface RestoreChangedEncoder {
   encoder_id: number;
 }
 
+export interface RestoreChangedCombo {
+  name: string;
+  action: "add" | "update";
+}
+
+export interface KeymapExportReport {
+  warnings: RestoreIssue[];
+}
+
 export interface RestoreReport {
   can_apply: boolean;
   behavior_verification: BehaviorVerification;
@@ -389,9 +398,15 @@ export interface RestoreReport {
   encoder_unchanged_skipped: number;
   encoder_blocked: number;
   changed_encoders: RestoreChangedEncoder[];
+  combo_added: number;
+  combo_updated: number;
+  combo_unchanged_skipped: number;
+  combo_blocked: number;
+  changed_combos: RestoreChangedCombo[];
   apply_status: "preview" | "complete" | "partial";
   applied_keys: RestoreChangedKey[];
   applied_encoders: RestoreChangedEncoder[];
+  applied_combos: RestoreChangedCombo[];
 }
 
 export type KeyCatalogCategory =

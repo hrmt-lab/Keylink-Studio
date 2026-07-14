@@ -24,6 +24,7 @@ import type {
   StudioKeymapSnapshot,
   StudioRawBinding,
   RestoreReport,
+  KeymapExportReport,
 } from "./types";
 
 export interface ConfigLocationResult {
@@ -73,7 +74,7 @@ export const probeStudioDevices = () => invoke<StudioDeviceStatus[]>("probe_stud
 export const readStudioKeymap = (deviceId: string) =>
   invoke<StudioKeymapSnapshot>("read_studio_keymap", { deviceId });
 export const studioExportKeymap = (deviceId: string, path: string, hostLinkUid: string | null) =>
-  invoke<void>("studio_export_keymap", { deviceId, path, hostLinkUid });
+  invoke<KeymapExportReport>("studio_export_keymap", { deviceId, path, hostLinkUid });
 export const studioPreviewKeymapRestore = (deviceId: string, path: string, hostLinkUid: string | null) =>
   invoke<RestoreReport>("studio_preview_keymap_restore", { deviceId, path, hostLinkUid });
 export const studioApplyKeymapRestore = (deviceId: string, path: string, hostLinkUid: string | null) =>

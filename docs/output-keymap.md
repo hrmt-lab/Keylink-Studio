@@ -1,6 +1,12 @@
   # キーマップ バックアップ/復元機能 統合プラン 改訂版
 
-  ## Context
+## 実装状況
+
+通常キー、エンコーダ override、Combo設定を含むExport／Restoreは実装済みである。Exportは読取可能なComboを`combos.entries`へ保存する。Restoreは通常キー・エンコーダ・Comboを同一の確認ダイアログでfeature別に集計し、Comboは同名更新または空きslotへの追加として適用する。バックアップにない既存Comboは削除しない。
+
+Export成功時は`Export完了`、差分がないRestore時は`Restore対象なし`を完了ダイアログで表示する。Restore適用後は下部の共通編集バーで未保存変更を確認し、`保存`または`変更を破棄`を選ぶ。重複する成功通知は表示しない。
+
+## Context
  
   ZMK Studio RPC での編集はデバイスの settings(NVS) に保存されるだけで、FW ソースの .keymap
   は変わらない。
@@ -114,7 +120,7 @@
       - Keymap Viewer の keymap 操作行に Export / Restore を追加する。icon は lucide Download / Upload。
       - Export は閲覧中・編集中どちらでも可能。ただし読み取り中、pending write 中、保存/破棄/終了中は無効。
       - Restore は選択 device が available/unlocked のとき有効。未編集中なら内部で edit session を開始する。
-      - Restore 手順は open dialog -> session確保 -> preview -> confirm -> apply。
+      - Restore 手順は open dialog -> session確保 -> preview -> confirm -> apply。確認では通常キー、エンコーダ、Comboをfeature別に集計する。
       - 既に未保存変更がある場合は「現在の未保存変更を破棄して読み込む」確認を出し、同意時だけ force discard して続行
         する。
 

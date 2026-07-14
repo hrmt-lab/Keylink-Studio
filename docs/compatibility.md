@@ -46,11 +46,11 @@ Host Link v1 は 32 byte packet と packet type ごとの個別 layout を使う
 | `LAYER_STATE` | 表示専用の layer state 受信 | `LAYER_STATE` uplink 送信、`LAYER_STATE` capability | `APP_LAYER` として echo back しない |
 | `KEY_PRESS` | key tester のリアルタイム表示 | `KEY_PRESS` uplink 送信、`KEY_PRESS` capability | 累積記録はしない |
 | Config RPC / encoder | `ENCODER` の情報取得、CW / CCW override 編集、保存、破棄、override解除 | `CONFIG_RPC` capability と `ENCODER GET_INFO` / `GET_BINDINGS` / `SET_BINDINGS` / `GET_DIRTY` / `SAVE` / `DISCARD` / `CLEAR_OVERRIDE` | Host は `seq + feature + op` で応答を照合し、timeout 時は1回再試行 |
-| Config RPC / combo | core／CLI／Tauri／Keymap Viewerで全8 operation対応 | `COMBO GET_INFO` / `GET_COMBO` / `SET_COMBO` / `GET_DIRTY` / `SAVE` / `DISCARD` / `DELETE_COMBO` / `RESET_TO_KEYMAP`、Settings load／保存 | CLI mutationは対象UID必須。ComboのExport／Restoreは未実装 |
+| Config RPC / combo | core／CLI／Tauri／Keymap Viewerで全8 operation、`.keymap.json` Export／Restore対応 | `COMBO GET_INFO` / `GET_COMBO` / `SET_COMBO` / `GET_DIRTY` / `SAVE` / `DISCARD` / `DELETE_COMBO` / `RESET_TO_KEYMAP`、Settings load／保存 | CLI mutationは対象UID必須。Restoreは同名更新または空きslot追加で、バックアップにない既存Comboを削除しない |
 | ZMK Studio keymap editing | ZMK Studio RPC client | ZMK Studio 対応 firmware と unlocked Studio state | Host Link v2 とは別 transport |
 
 ## 補足
 
 - `DEVICE_HELLO` v2 は `capabilities` と `device_uid_hash` を返します。v1 の `protocol_min` / `protocol_max` はありません。
 - `device_uid_hash = 0` は host 側で `None` に正規化します。
-- Config RPCは`ENCODER` / `COMBO` featureをHost／Firmwareとも実装済みです。ComboはKeymap Viewerの共通保存／破棄／`.keymapに戻す`へ統合済みで、Export／Restoreだけが未実装です。tap danceなど52 byte payloadを超えるデータの分割方式は将来拡張です。
+- Config RPCは`ENCODER` / `COMBO` featureをHost／Firmwareとも実装済みです。ComboはKeymap Viewerの共通保存／破棄／`.keymapに戻す`と`.keymap.json` Export／Restoreへ統合済みです。tap danceなど52 byte payloadを超えるデータの分割方式は将来拡張です。

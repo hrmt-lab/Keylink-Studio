@@ -16,7 +16,9 @@ use zmk_studio_api::{
 };
 
 use crate::config::StudioConfig;
-use crate::packet::{EncoderBinding, EncoderBindingSource, EncoderGetBindings};
+use crate::packet::{
+    ComboBinding, ComboItem, EncoderBinding, EncoderBindingSource, EncoderGetBindings,
+};
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -160,6 +162,8 @@ pub struct KeymapBackup {
     pub layers: Vec<BackupLayer>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoders: Option<BackupEncoders>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub combos: Option<BackupCombos>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -216,6 +220,22 @@ pub struct BackupEncoderBinding {
     pub label: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupCombos {
+    pub entries: Vec<BackupCombo>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct BackupCombo {
+    pub name: String,
+    pub key_positions: Vec<u16>,
+    pub slow_release: bool,
+    pub binding: BackupEncoderBinding,
+    pub layer_mask: u32,
+    pub timeout_ms: u16,
+    pub require_prior_idle_ms: Option<u16>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct RestorePlan {
     pub report: RestoreReport,
@@ -242,11 +262,23 @@ pub struct RestoreReport {
     pub encoder_blocked: usize,
     #[serde(default)]
     pub changed_encoders: Vec<RestoreChangedEncoder>,
+    #[serde(default)]
+    pub combo_added: usize,
+    #[serde(default)]
+    pub combo_updated: usize,
+    #[serde(default)]
+    pub combo_unchanged_skipped: usize,
+    #[serde(default)]
+    pub combo_blocked: usize,
+    #[serde(default)]
+    pub changed_combos: Vec<RestoreChangedCombo>,
     pub apply_status: RestoreApplyStatus,
     #[serde(default)]
     pub applied_keys: Vec<RestoreChangedKey>,
     #[serde(default)]
     pub applied_encoders: Vec<RestoreChangedEncoder>,
+    #[serde(default)]
+    pub applied_combos: Vec<RestoreChangedCombo>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -267,6 +299,12 @@ pub struct RestoreChangedKey {
 pub struct RestoreChangedEncoder {
     pub layer_index: usize,
     pub encoder_id: u8,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RestoreChangedCombo {
+    pub name: String,
+    pub action: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -309,6 +347,23 @@ pub struct EncoderRestorePlan {
     pub unchanged_skipped: usize,
     pub blocked: usize,
     pub changed_encoders: Vec<RestoreChangedEncoder>,
+    pub warnings: Vec<RestoreIssue>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComboRestoreWrite {
+    pub item: ComboItem,
+    pub changed: RestoreChangedCombo,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ComboRestorePlan {
+    pub writes: Vec<ComboRestoreWrite>,
+    pub added: usize,
+    pub updated: usize,
+    pub unchanged_skipped: usize,
+    pub blocked: usize,
+    pub changed_combos: Vec<RestoreChangedCombo>,
     pub warnings: Vec<RestoreIssue>,
 }
 
@@ -862,6 +917,7 @@ pub fn keymap_backup_from_snapshot(
     behavior_catalog: BTreeMap<i32, String>,
     app_version: &str,
     encoders: Option<BackupEncoders>,
+    combos: Option<BackupCombos>,
 ) -> KeymapBackup {
     let positions = snapshot
         .selected_layout_keys
@@ -886,6 +942,15 @@ pub fn keymap_backup_from_snapshot(
                         .entry(i32::from(side.behavior_id))
                         .or_insert_with(|| side.behavior.clone());
                 }
+            }
+        }
+    }
+    if let Some(backup_combos) = &combos {
+        for combo in &backup_combos.entries {
+            if !is_placeholder_behavior_name(&combo.binding.behavior) {
+                catalog
+                    .entry(i32::from(combo.binding.behavior_id))
+                    .or_insert_with(|| combo.binding.behavior.clone());
             }
         }
     }
@@ -926,6 +991,7 @@ pub fn keymap_backup_from_snapshot(
             })
             .collect(),
         encoders,
+        combos,
     }
 }
 
@@ -1071,9 +1137,15 @@ pub fn plan_keymap_restore(
             encoder_unchanged_skipped: 0,
             encoder_blocked: 0,
             changed_encoders: Vec::new(),
+            combo_added: 0,
+            combo_updated: 0,
+            combo_unchanged_skipped: 0,
+            combo_blocked: 0,
+            changed_combos: Vec::new(),
             apply_status: RestoreApplyStatus::Preview,
             applied_keys: Vec::new(),
             applied_encoders: Vec::new(),
+            applied_combos: Vec::new(),
         },
         writes,
     }
@@ -1228,6 +1300,204 @@ pub fn plan_encoder_restore(
         warnings,
         writes,
     }
+}
+
+pub fn plan_combo_restore(
+    current: &[ComboItem],
+    max_combos: u8,
+    max_keys_per_combo: u8,
+    valid_positions: &BTreeSet<u16>,
+    layer_count: usize,
+    target_behavior_names: Option<&BTreeMap<i32, String>>,
+    backup: &BackupCombos,
+) -> ComboRestorePlan {
+    let mut writes = Vec::new();
+    let mut added = 0;
+    let mut updated = 0;
+    let mut unchanged_skipped = 0;
+    let mut blocked = 0;
+    let mut warnings = Vec::new();
+    let mut effective = current.to_vec();
+    let mut backup_names = BTreeSet::new();
+
+    for source in &backup.entries {
+        let normalized_name = normalize_behavior_name(&source.name);
+        if !backup_names.insert(normalized_name.clone()) {
+            blocked += 1;
+            warnings.push(issue(
+                "combo_duplicate_name",
+                None,
+                None,
+                &format!("duplicate Combo name in backup: {}", source.name),
+            ));
+            continue;
+        }
+
+        let existing = effective
+            .iter()
+            .find(|item| normalize_behavior_name(item.name.as_str()) == normalized_name)
+            .copied();
+        let slot = if let Some(item) = existing {
+            item.slot
+        } else if let Some(slot) =
+            (0..max_combos).find(|slot| !effective.iter().any(|item| item.slot == *slot))
+        {
+            slot
+        } else {
+            blocked += 1;
+            warnings.push(issue(
+                "combo_no_space",
+                None,
+                None,
+                &format!("no empty Combo slot for {}", source.name),
+            ));
+            continue;
+        };
+
+        if source.key_positions.len() > usize::from(max_keys_per_combo)
+            || source
+                .key_positions
+                .iter()
+                .any(|position| !valid_positions.contains(position))
+        {
+            blocked += 1;
+            warnings.push(issue(
+                "combo_key_positions",
+                None,
+                None,
+                &format!("invalid key positions for Combo {}", source.name),
+            ));
+            continue;
+        }
+        let valid_layer_mask = if layer_count >= 32 {
+            u32::MAX
+        } else if layer_count == 0 {
+            0
+        } else {
+            (1u32 << layer_count) - 1
+        };
+        if source.layer_mask & !valid_layer_mask != 0 {
+            blocked += 1;
+            warnings.push(issue(
+                "combo_layers",
+                None,
+                None,
+                &format!("invalid layer selection for Combo {}", source.name),
+            ));
+            continue;
+        }
+
+        let target_name = target_behavior_names
+            .and_then(|names| names.get(&i32::from(source.binding.behavior_id)));
+        if target_name.is_none()
+            || is_placeholder_behavior_name(&source.binding.behavior)
+            || target_name.is_some_and(|target| {
+                normalize_behavior_name(target) != normalize_behavior_name(&source.binding.behavior)
+            })
+        {
+            blocked += 1;
+            warnings.push(issue(
+                "combo_behavior_mismatch",
+                None,
+                None,
+                &format!("behavior could not be verified for Combo {}", source.name),
+            ));
+            continue;
+        }
+
+        let item = match ComboItem::new(
+            slot,
+            &source.name,
+            &source.key_positions,
+            source.slow_release,
+            ComboBinding {
+                behavior_id: source.binding.behavior_id,
+                param1: source.binding.param1,
+                param2: source.binding.param2,
+            },
+            source.layer_mask,
+            source.timeout_ms,
+            source.require_prior_idle_ms,
+        ) {
+            Ok(item) => item,
+            Err(_) => {
+                blocked += 1;
+                warnings.push(issue(
+                    "combo_invalid",
+                    None,
+                    None,
+                    &format!("invalid Combo settings for {}", source.name),
+                ));
+                continue;
+            }
+        };
+
+        if effective.iter().any(|other| {
+            other.slot != slot
+                && combo_same_key_set(other, &item)
+                && combo_layers_overlap(other.layer_mask, item.layer_mask)
+        }) {
+            blocked += 1;
+            warnings.push(issue(
+                "combo_conflict",
+                None,
+                None,
+                &format!("key and layer conflict for Combo {}", source.name),
+            ));
+            continue;
+        }
+        if existing.is_some_and(|current| combo_same_content(&current, &item)) {
+            unchanged_skipped += 1;
+            continue;
+        }
+
+        let action = if existing.is_some() { "update" } else { "add" };
+        let changed = RestoreChangedCombo {
+            name: source.name.clone(),
+            action: action.to_string(),
+        };
+        if action == "update" {
+            updated += 1;
+        } else {
+            added += 1;
+        }
+        effective.retain(|other| other.slot != slot);
+        effective.push(item);
+        writes.push(ComboRestoreWrite {
+            item,
+            changed: changed.clone(),
+        });
+    }
+
+    ComboRestorePlan {
+        changed_combos: writes.iter().map(|write| write.changed.clone()).collect(),
+        writes,
+        added,
+        updated,
+        unchanged_skipped,
+        blocked,
+        warnings,
+    }
+}
+
+fn combo_same_key_set(left: &ComboItem, right: &ComboItem) -> bool {
+    left.key_count == right.key_count
+        && left.key_positions[..usize::from(left.key_count)]
+            == right.key_positions[..usize::from(right.key_count)]
+}
+
+fn combo_layers_overlap(left: u32, right: u32) -> bool {
+    left == 0 || right == 0 || left & right != 0
+}
+
+fn combo_same_content(left: &ComboItem, right: &ComboItem) -> bool {
+    left.name == right.name
+        && combo_same_key_set(left, right)
+        && left.flags == right.flags
+        && left.binding == right.binding
+        && left.layer_mask == right.layer_mask
+        && left.timeout_ms == right.timeout_ms
+        && left.require_prior_idle_ms == right.require_prior_idle_ms
 }
 
 fn same_encoder_side(current: &EncoderBinding, backup: &BackupEncoderBinding) -> bool {
@@ -3560,7 +3830,8 @@ mod tests {
     #[test]
     fn keymap_backup_round_trips_raw_bindings() {
         let snapshot = test_snapshot();
-        let backup = keymap_backup_from_snapshot(&snapshot, BTreeMap::new(), "0.0.0-test", None);
+        let backup =
+            keymap_backup_from_snapshot(&snapshot, BTreeMap::new(), "0.0.0-test", None, None);
         let text = serialize_keymap_backup(&backup).unwrap();
         let parsed = parse_keymap_backup(&text).unwrap();
 
@@ -3573,7 +3844,8 @@ mod tests {
     #[test]
     fn keymap_restore_plans_one_changed_raw_write_and_skips_unchanged() {
         let current = test_snapshot();
-        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test", None);
+        let mut backup =
+            keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test", None, None);
         backup.layers[0].bindings[0].param1 = 0x0007_0005;
         let target_names =
             BTreeMap::from([(1, "key press".to_string()), (2, "mod_tap".to_string())]);
@@ -3597,7 +3869,8 @@ mod tests {
     #[test]
     fn keymap_restore_placeholder_catalog_skips_behavior_verification_but_writes_raw() {
         let current = test_snapshot();
-        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test", None);
+        let mut backup =
+            keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test", None, None);
         backup.behavior_catalog.clear();
         backup.layers[0].bindings[0].behavior = "behavior 1".to_string();
         backup.layers[0].bindings[1].behavior = "behavior 2".to_string();
@@ -3616,7 +3889,8 @@ mod tests {
     #[test]
     fn keymap_restore_uses_common_positions_for_structure_mismatch() {
         let current = test_snapshot();
-        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test", None);
+        let mut backup =
+            keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test", None, None);
         backup.layers.push(backup.layers[0].clone());
         backup.layers[1].index = 1;
         backup.layers[0].bindings.pop();
@@ -3647,7 +3921,8 @@ mod tests {
         current.layers[1].index = 1;
         current.layers[1].id = 11;
         current.layers[1].name = "Fn".to_string();
-        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test", None);
+        let mut backup =
+            keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test", None, None);
         backup.device.name = "Other".to_string();
         backup.device.connection_type = "ble_studio".to_string();
         backup.layout.selected_physical_layout_name = Some("Other layout".to_string());
@@ -3670,8 +3945,13 @@ mod tests {
             parse_keymap_backup(&" ".repeat(KEYMAP_BACKUP_MAX_BYTES + 1)),
             Err(KeymapFileError::FileTooLarge)
         ));
-        let mut backup =
-            keymap_backup_from_snapshot(&test_snapshot(), BTreeMap::new(), "0.0.0-test", None);
+        let mut backup = keymap_backup_from_snapshot(
+            &test_snapshot(),
+            BTreeMap::new(),
+            "0.0.0-test",
+            None,
+            None,
+        );
         backup.schema_version = 999;
         let text = serialize_keymap_backup(&backup).unwrap();
         assert!(matches!(
@@ -3702,7 +3982,8 @@ mod tests {
     #[test]
     fn verified_behavior_conflicts_are_blocked() {
         let current = test_snapshot();
-        let mut backup = keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test", None);
+        let mut backup =
+            keymap_backup_from_snapshot(&current, BTreeMap::new(), "0.0.0-test", None, None);
         backup.layers[0].bindings[0].param1 = 0x0007_0005;
         let target_names =
             BTreeMap::from([(1, "sticky key".to_string()), (2, "mod-tap".to_string())]);
@@ -3791,8 +4072,13 @@ mod tests {
             encoder_count: 2,
             overrides: vec![test_encoder_override(0, 10, 0, 5, "key press")],
         };
-        let backup =
-            keymap_backup_from_snapshot(&snapshot, BTreeMap::new(), "0.0.0-test", Some(encoders));
+        let backup = keymap_backup_from_snapshot(
+            &snapshot,
+            BTreeMap::new(),
+            "0.0.0-test",
+            Some(encoders),
+            None,
+        );
         assert_eq!(
             backup.behavior_catalog.get(&5),
             Some(&"key press".to_string())
@@ -3808,12 +4094,112 @@ mod tests {
 
         // Legacy JSON without an `encoders` field must still parse.
         let mut legacy =
-            keymap_backup_from_snapshot(&snapshot, BTreeMap::new(), "0.0.0-test", None);
+            keymap_backup_from_snapshot(&snapshot, BTreeMap::new(), "0.0.0-test", None, None);
         legacy.encoders = None;
         let legacy_text = serialize_keymap_backup(&legacy).unwrap();
         assert!(!legacy_text.contains("\"encoders\""));
         let legacy_parsed = parse_keymap_backup(&legacy_text).unwrap();
         assert!(legacy_parsed.encoders.is_none());
+        assert!(legacy_parsed.combos.is_none());
+    }
+
+    fn backup_combo(name: &str, positions: &[u16], timeout_ms: u16) -> BackupCombo {
+        BackupCombo {
+            name: name.to_string(),
+            key_positions: positions.to_vec(),
+            slow_release: false,
+            binding: BackupEncoderBinding {
+                behavior_id: 5,
+                param1: 4,
+                param2: 0,
+                behavior: "Key Press".to_string(),
+                label: "A".to_string(),
+            },
+            layer_mask: 0,
+            timeout_ms,
+            require_prior_idle_ms: None,
+        }
+    }
+
+    fn current_combo(slot: u8, name: &str, positions: &[u16], timeout_ms: u16) -> ComboItem {
+        ComboItem::new(
+            slot,
+            name,
+            positions,
+            false,
+            ComboBinding {
+                behavior_id: 5,
+                param1: 4,
+                param2: 0,
+            },
+            0,
+            timeout_ms,
+            None,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn keymap_backup_round_trips_with_combos() {
+        let combos = BackupCombos {
+            entries: vec![backup_combo("Copy", &[1, 2], 50)],
+        };
+        let backup = keymap_backup_from_snapshot(
+            &test_snapshot(),
+            BTreeMap::new(),
+            "0.0.0-test",
+            None,
+            Some(combos.clone()),
+        );
+        let parsed = parse_keymap_backup(&serialize_keymap_backup(&backup).unwrap()).unwrap();
+        assert_eq!(parsed.combos, Some(combos));
+        assert_eq!(
+            parsed.behavior_catalog.get(&5),
+            Some(&"Key Press".to_string())
+        );
+    }
+
+    #[test]
+    fn combo_restore_updates_by_name_adds_without_deleting_and_skips_unchanged() {
+        let current = vec![
+            current_combo(0, "Existing", &[1, 2], 50),
+            current_combo(1, "Keep", &[5, 6], 50),
+            current_combo(2, "Same", &[7, 8], 50),
+        ];
+        let backup = BackupCombos {
+            entries: vec![
+                backup_combo("Existing", &[1, 2], 60),
+                backup_combo("Added", &[3, 4], 50),
+                backup_combo("Same", &[7, 8], 50),
+            ],
+        };
+        let names = BTreeMap::from([(5, "Key Press".to_string())]);
+        let positions = (1..=8).collect();
+        let plan = plan_combo_restore(&current, 8, 8, &positions, 4, Some(&names), &backup);
+
+        assert_eq!(plan.updated, 1);
+        assert_eq!(plan.added, 1);
+        assert_eq!(plan.unchanged_skipped, 1);
+        assert_eq!(plan.blocked, 0);
+        assert_eq!(plan.writes.len(), 2);
+        assert_eq!(plan.writes[0].item.slot, 0);
+        assert_eq!(plan.writes[1].item.slot, 3);
+        assert!(current.iter().any(|item| item.name.as_str() == "Keep"));
+    }
+
+    #[test]
+    fn combo_restore_blocks_key_and_layer_conflicts() {
+        let current = vec![current_combo(0, "Other", &[3, 4], 50)];
+        let backup = BackupCombos {
+            entries: vec![backup_combo("Added", &[3, 4], 50)],
+        };
+        let names = BTreeMap::from([(5, "Key Press".to_string())]);
+        let positions = BTreeSet::from([3, 4]);
+        let plan = plan_combo_restore(&current, 8, 8, &positions, 4, Some(&names), &backup);
+
+        assert_eq!(plan.blocked, 1);
+        assert!(plan.writes.is_empty());
+        assert_eq!(plan.warnings[0].code, "combo_conflict");
     }
 
     #[test]

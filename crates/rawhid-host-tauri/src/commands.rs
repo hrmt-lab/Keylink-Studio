@@ -23,11 +23,12 @@ use rawhid_host_core::{
     runner::{uplink_device_key, RunEvent, Runner},
     stats::{KeyStatsSummary, SharedKeyStatsStore, StatsPeriod},
     studio::{
-        key_catalog, keymap_backup_from_snapshot, parse_keymap_backup, plan_encoder_restore,
-        plan_keymap_restore, probe_studio_devices as probe_all_studio_devices,
-        read_keymap_for_device, resolve_behavior_labels_for_device, serialize_keymap_backup,
-        BackupEncoderBinding, BackupEncoderOverride, BackupEncoders, EditBehavior,
-        EncoderResolveError, EncoderRestoreWrite, KeyCatalogEntry, KeymapFileError,
+        key_catalog, keymap_backup_from_snapshot, parse_keymap_backup, plan_combo_restore,
+        plan_encoder_restore, plan_keymap_restore,
+        probe_studio_devices as probe_all_studio_devices, read_keymap_for_device,
+        resolve_behavior_labels_for_device, serialize_keymap_backup, BackupCombo, BackupCombos,
+        BackupEncoderBinding, BackupEncoderOverride, BackupEncoders, ComboRestoreWrite,
+        EditBehavior, EncoderResolveError, EncoderRestoreWrite, KeyCatalogEntry, KeymapFileError,
         RestoreApplyStatus, RestoreChangedKey, RestoreIssue, RestoreReport,
         StudioBindingLabelPatch, StudioDeviceStatus, StudioEditSession, StudioError,
         StudioKeymapSnapshot, StudioRawBinding, KEYMAP_BACKUP_MAX_BYTES,
@@ -363,13 +364,33 @@ pub async fn probe_devices(state: State<'_, AppState>) -> Result<Vec<ProbeResult
 pub async fn probe_studio_devices(
     state: State<'_, AppState>,
 ) -> Result<Vec<StudioDeviceStatus>, String> {
-    if state.studio_edit.lock().unwrap().is_some() {
-        return Err("port_busy".to_string());
-    }
+    let edit = Arc::clone(&state.studio_edit);
     let studio_config = state.config.lock().unwrap().studio.clone();
-    tauri::async_runtime::spawn_blocking(move || probe_all_studio_devices(&studio_config))
-        .await
-        .map_err(|_| "studio_probe_failed".to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        {
+            let mut guard = edit.lock().unwrap();
+            if let Some(session) = guard.as_mut() {
+                match session.has_unsaved() {
+                    Ok(_) => return Err("port_busy".to_string()),
+                    Err(error) if studio_session_connection_lost(&error) => {
+                        tracing::info!(
+                            device_id = %session.device_id,
+                            "released disconnected Studio edit session before scan"
+                        );
+                        *guard = None;
+                    }
+                    Err(_) => return Err("port_busy".to_string()),
+                }
+            }
+        }
+        Ok(probe_all_studio_devices(&studio_config))
+    })
+    .await
+    .map_err(|_| "studio_probe_failed".to_string())?
+}
+
+fn studio_session_connection_lost(error: &StudioError) -> bool {
+    matches!(error, StudioError::Disconnected | StudioError::Timeout)
 }
 
 #[tauri::command]
@@ -395,13 +416,18 @@ pub async fn read_studio_keymap(
     .map_err(|_| "studio_read_failed".to_string())?
 }
 
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct KeymapExportReport {
+    pub warnings: Vec<RestoreIssue>,
+}
+
 #[tauri::command]
 pub async fn studio_export_keymap(
     device_id: String,
     path: String,
     host_link_uid: Option<String>,
     state: State<'_, AppState>,
-) -> Result<(), String> {
+) -> Result<KeymapExportReport, String> {
     let edit = Arc::clone(&state.studio_edit);
     let studio_config = state.config.lock().unwrap().studio.clone();
     let host_link_tx = host_link_sender(state.inner())?;
@@ -421,17 +447,49 @@ pub async fn studio_export_keymap(
                 }
             };
 
-            let encoders = match host_link_uid {
+            let encoders = match host_link_uid.as_deref() {
                 None => None,
                 Some(uid) => Some(export_encoder_overrides(
                     &device_id,
-                    &uid,
+                    uid,
+                    &edit,
+                    &studio_config,
+                    host_link_tx.clone(),
+                    host_link_timeout,
+                    &snapshot,
+                )?),
+            };
+
+            let (combos, warnings) = match host_link_uid.as_deref() {
+                None => (
+                    None,
+                    vec![RestoreIssue {
+                        code: "combo_export_unavailable".to_string(),
+                        layer_index: None,
+                        position: None,
+                        message: "Host Link is not connected; Combo settings were not exported"
+                            .to_string(),
+                    }],
+                ),
+                Some(uid) => match export_combo_table(
+                    &device_id,
+                    uid,
                     &edit,
                     &studio_config,
                     host_link_tx,
                     host_link_timeout,
-                    &snapshot,
-                )?),
+                ) {
+                    Ok(combos) => (Some(combos), Vec::new()),
+                    Err(message) => (
+                        None,
+                        vec![RestoreIssue {
+                            code: "combo_export_unavailable".to_string(),
+                            layer_index: None,
+                            position: None,
+                            message,
+                        }],
+                    ),
+                },
             };
 
             let backup = keymap_backup_from_snapshot(
@@ -439,8 +497,10 @@ pub async fn studio_export_keymap(
                 Default::default(),
                 env!("CARGO_PKG_VERSION"),
                 encoders,
+                combos,
             );
-            serialize_keymap_backup(&backup).map_err(keymap_file_error_code)
+            let text = serialize_keymap_backup(&backup).map_err(keymap_file_error_code)?;
+            Ok((text, KeymapExportReport { warnings }))
         })();
 
         write_completed_keymap_export(&PathBuf::from(path), prepared)
@@ -454,10 +514,11 @@ pub async fn studio_export_keymap(
 /// path from truncating or replacing the destination before encoder reads end.
 fn write_completed_keymap_export(
     path: &std::path::Path,
-    prepared: Result<String, String>,
-) -> Result<(), String> {
-    let text = prepared?;
-    write_keymap_backup_file(path, &text)
+    prepared: Result<(String, KeymapExportReport), String>,
+) -> Result<KeymapExportReport, String> {
+    let (text, report) = prepared?;
+    write_keymap_backup_file(path, &text)?;
+    Ok(report)
 }
 
 /// Reads every runtime encoder override for `device_id` over Host Link Config
@@ -551,6 +612,65 @@ fn backup_encoder_binding(
     }
 }
 
+fn export_combo_table(
+    device_id: &str,
+    host_link_uid: &str,
+    edit: &Arc<Mutex<Option<StudioEditSession>>>,
+    studio_config: &rawhid_host_core::config::StudioConfig,
+    host_link_tx: mpsc::Sender<MonitorCommand>,
+    host_link_timeout: Duration,
+) -> Result<BackupCombos, String> {
+    let uid = parse_host_link_uid(host_link_uid)?;
+    let info = match host_link_call(
+        &host_link_tx,
+        host_link_timeout,
+        uid,
+        HostLinkRequest::ComboGetInfo,
+    )? {
+        HostLinkResponse::ComboInfo(info) => info,
+        _ => return Err("hostlink_invalid_response".to_string()),
+    };
+    let mut entries = Vec::new();
+    for slot in 0..info.max_combos {
+        if info.occupied_slots & (1u32 << slot) == 0 {
+            continue;
+        }
+        let item = match host_link_call(
+            &host_link_tx,
+            host_link_timeout,
+            uid,
+            HostLinkRequest::ComboGet { slot },
+        )? {
+            HostLinkResponse::ComboItem(item) => item,
+            _ => return Err("hostlink_invalid_response".to_string()),
+        };
+        let label = label_combo_binding_for_device(
+            device_id,
+            edit,
+            studio_config,
+            item.binding,
+            host_link_timeout,
+        );
+        entries.push(BackupCombo {
+            name: item.name.as_str().to_string(),
+            key_positions: item.key_positions[..usize::from(item.key_count)].to_vec(),
+            slow_release: item.flags.slow_release(),
+            binding: backup_encoder_binding(
+                EncoderBinding {
+                    behavior_id: item.binding.behavior_id,
+                    param1: item.binding.param1,
+                    param2: item.binding.param2,
+                },
+                label,
+            ),
+            layer_mask: item.layer_mask,
+            timeout_ms: item.timeout_ms,
+            require_prior_idle_ms: item.require_prior_idle_ms,
+        });
+    }
+    Ok(BackupCombos { entries })
+}
+
 #[tauri::command]
 pub async fn studio_preview_keymap_restore(
     device_id: String,
@@ -580,11 +700,20 @@ pub async fn studio_preview_keymap_restore(
         let encoder_ctx = prepare_encoder_restore_context(
             &backup,
             host_link_uid.as_deref(),
-            host_link_tx,
+            host_link_tx.clone(),
             host_link_timeout,
             &snapshot,
             &mut ids,
         )?;
+        let combo_ctx = prepare_combo_restore_context(
+            &backup,
+            host_link_uid.as_deref(),
+            host_link_tx.clone(),
+            host_link_timeout,
+            &mut ids,
+        )
+        .ok()
+        .flatten();
 
         let target_names = {
             let mut guard = edit.lock().unwrap();
@@ -608,6 +737,14 @@ pub async fn studio_preview_keymap_restore(
             &backup,
             &snapshot,
             encoder_ctx.as_ref(),
+            target_names.as_ref(),
+            host_link_uid.is_some(),
+        );
+        merge_combo_restore_into_report(
+            &mut report,
+            &backup,
+            &snapshot,
+            combo_ctx.as_ref(),
             target_names.as_ref(),
             host_link_uid.is_some(),
         );
@@ -648,13 +785,22 @@ pub async fn studio_apply_keymap_restore(
         let mut encoder_ctx = prepare_encoder_restore_context(
             &backup,
             host_link_uid.as_deref(),
-            host_link_tx,
+            host_link_tx.clone(),
             host_link_timeout,
             &snapshot,
             &mut ids,
         )?;
+        let mut combo_ctx = prepare_combo_restore_context(
+            &backup,
+            host_link_uid.as_deref(),
+            host_link_tx.clone(),
+            host_link_timeout,
+            &mut ids,
+        )
+        .ok()
+        .flatten();
 
-        let (mut next, mut report, encoder_writes, key_failed) = {
+        let (mut next, mut report, encoder_writes, combo_writes, key_failed) = {
             let mut guard = edit.lock().unwrap();
             let session = guard
                 .as_mut()
@@ -676,6 +822,14 @@ pub async fn studio_apply_keymap_restore(
                 &backup,
                 &snapshot,
                 encoder_ctx.as_ref(),
+                target_names.as_ref(),
+                host_link_uid.is_some(),
+            );
+            let combo_writes = merge_combo_restore_into_report(
+                &mut report,
+                &backup,
+                &snapshot,
+                combo_ctx.as_ref(),
                 target_names.as_ref(),
                 host_link_uid.is_some(),
             );
@@ -709,7 +863,7 @@ pub async fn studio_apply_keymap_restore(
                     }
                 }
             }
-            (next, report, encoder_writes, key_failed)
+            (next, report, encoder_writes, combo_writes, key_failed)
         };
 
         if !key_failed {
@@ -774,6 +928,36 @@ pub async fn studio_apply_keymap_restore(
             }
         }
 
+        if let Some(ctx) = combo_ctx.as_mut() {
+            for write in &combo_writes {
+                let result = host_link_call(
+                    &ctx.tx,
+                    ctx.timeout,
+                    ctx.uid,
+                    HostLinkRequest::ComboSet { item: write.item },
+                );
+                match result {
+                    Ok(HostLinkResponse::Done) => {
+                        report.applied_combos.push(write.changed.clone());
+                    }
+                    other => {
+                        let message = match other {
+                            Err(error) => error,
+                            Ok(_) => "hostlink_invalid_response".to_string(),
+                        };
+                        report.apply_status = RestoreApplyStatus::Partial;
+                        report.errors.push(RestoreIssue {
+                            code: "combo_apply_failed".to_string(),
+                            layer_index: None,
+                            position: None,
+                            message,
+                        });
+                        break;
+                    }
+                }
+            }
+        }
+
         if report.apply_status != RestoreApplyStatus::Partial {
             report.apply_status = RestoreApplyStatus::Complete;
         } else {
@@ -818,6 +1002,70 @@ struct EncoderRestoreContext {
     uid: u64,
     encoder_count: u8,
     current_bindings: BTreeMap<(u32, u8), EncoderGetBindings>,
+}
+
+struct ComboRestoreContext {
+    tx: mpsc::Sender<MonitorCommand>,
+    timeout: Duration,
+    uid: u64,
+    max_combos: u8,
+    max_keys_per_combo: u8,
+    current: Vec<ComboItem>,
+}
+
+fn prepare_combo_restore_context(
+    backup: &rawhid_host_core::studio::KeymapBackup,
+    host_link_uid: Option<&str>,
+    host_link_tx: mpsc::Sender<MonitorCommand>,
+    host_link_timeout: Duration,
+    ids: &mut BTreeSet<i32>,
+) -> Result<Option<ComboRestoreContext>, String> {
+    let Some(backup_combos) = backup.combos.as_ref() else {
+        return Ok(None);
+    };
+    for combo in &backup_combos.entries {
+        ids.insert(i32::from(combo.binding.behavior_id));
+    }
+    if backup_combos.entries.is_empty() {
+        return Ok(None);
+    }
+    let Some(uid) = host_link_uid else {
+        return Ok(None);
+    };
+    let target_uid = parse_host_link_uid(uid)?;
+    let info = match host_link_call(
+        &host_link_tx,
+        host_link_timeout,
+        target_uid,
+        HostLinkRequest::ComboGetInfo,
+    )? {
+        HostLinkResponse::ComboInfo(info) => info,
+        _ => return Err("hostlink_invalid_response".to_string()),
+    };
+    let mut current = Vec::new();
+    for slot in 0..info.max_combos {
+        if info.occupied_slots & (1u32 << slot) == 0 {
+            continue;
+        }
+        let item = match host_link_call(
+            &host_link_tx,
+            host_link_timeout,
+            target_uid,
+            HostLinkRequest::ComboGet { slot },
+        )? {
+            HostLinkResponse::ComboItem(item) => item,
+            _ => return Err("hostlink_invalid_response".to_string()),
+        };
+        current.push(item);
+    }
+    Ok(Some(ComboRestoreContext {
+        tx: host_link_tx,
+        timeout: host_link_timeout,
+        uid: target_uid,
+        max_combos: info.max_combos,
+        max_keys_per_combo: info.max_keys_per_combo,
+        current,
+    }))
 }
 
 /// Builds the encoder restore context for a backup, if applicable, and folds
@@ -967,6 +1215,57 @@ fn merge_encoder_restore_into_report(
             Vec::new()
         }
     }
+}
+
+fn merge_combo_restore_into_report(
+    report: &mut RestoreReport,
+    backup: &rawhid_host_core::studio::KeymapBackup,
+    snapshot: &StudioKeymapSnapshot,
+    combo_ctx: Option<&ComboRestoreContext>,
+    target_names: Option<&BTreeMap<i32, String>>,
+    host_link_uid_present: bool,
+) -> Vec<ComboRestoreWrite> {
+    let Some(backup_combos) = backup.combos.as_ref() else {
+        return Vec::new();
+    };
+    if backup_combos.entries.is_empty() {
+        return Vec::new();
+    }
+    let Some(ctx) = combo_ctx else {
+        report.combo_blocked = backup_combos.entries.len();
+        report.warnings.push(RestoreIssue {
+            code: "combo_unavailable".to_string(),
+            layer_index: None,
+            position: None,
+            message: if host_link_uid_present {
+                "Combo configuration is not supported or could not be read".to_string()
+            } else {
+                "Host Link is not connected; Combos in the backup were not restored".to_string()
+            },
+        });
+        return Vec::new();
+    };
+    let positions = snapshot
+        .selected_layout_keys
+        .iter()
+        .filter_map(|key| u16::try_from(key.position).ok())
+        .collect();
+    let plan = plan_combo_restore(
+        &ctx.current,
+        ctx.max_combos,
+        ctx.max_keys_per_combo,
+        &positions,
+        snapshot.layers.len(),
+        target_names,
+        backup_combos,
+    );
+    report.combo_added = plan.added;
+    report.combo_updated = plan.updated;
+    report.combo_unchanged_skipped = plan.unchanged_skipped;
+    report.combo_blocked = plan.blocked;
+    report.changed_combos = plan.changed_combos;
+    report.warnings.extend(plan.warnings);
+    plan.writes
 }
 
 fn read_keymap_backup_file(
@@ -3127,8 +3426,16 @@ pub async fn studio_end_edit(device_id: String, state: State<'_, AppState>) -> R
             );
             return Ok(());
         }
-        if session.has_unsaved().map_err(studio_error_code)? {
-            return Err(studio_error_code(StudioError::UnsavedChangesExist));
+        match session.has_unsaved() {
+            Ok(true) => return Err(studio_error_code(StudioError::UnsavedChangesExist)),
+            Ok(false) => {}
+            Err(error) if studio_session_connection_lost(&error) => {
+                tracing::info!(
+                    device_id = %session.device_id,
+                    "released disconnected Studio edit session while ending edit"
+                );
+            }
+            Err(error) => return Err(studio_error_code(error)),
         }
         *guard = None;
         Ok(())
@@ -4178,6 +4485,16 @@ mod tests {
     use super::*;
     use rawhid_host_core::runner::{DeviceBatterySource, DeviceBatteryStatus};
     use rawhid_host_core::studio::{StudioLayer, StudioLayoutSource};
+
+    #[test]
+    fn studio_probe_releases_only_lost_connections() {
+        assert!(studio_session_connection_lost(&StudioError::Disconnected));
+        assert!(studio_session_connection_lost(&StudioError::Timeout));
+        assert!(!studio_session_connection_lost(&StudioError::RpcFailed));
+        assert!(!studio_session_connection_lost(
+            &StudioError::UnsavedChangesExist
+        ));
+    }
 
     fn encoder_get_bindings(
         source: EncoderBindingSource,

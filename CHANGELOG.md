@@ -4,6 +4,14 @@ Keylink Studio の主な変更点をこのファイルに記録します。
 
 ## [Unreleased]
 
+### Added
+
+- Keymap ViewerのCombo編集と`.keymap.json`バックアップにCombo設定を統合。Comboは追加、編集、削除、保存、破棄、`.keymapに戻す`、Export／Restoreに対応した。
+
+### Changed
+
+- Comboフォームに`キャンセル`を追加し、未適用入力だけを安全に戻せるようにした。Export完了とRestore対象なしは確認ダイアログと同じ形式で表示し、Restore確認では通常キー・エンコーダ・Comboを別々に集計する。
+
 ## [1.1.2] - 2026-06-28
 
 ### Fixed

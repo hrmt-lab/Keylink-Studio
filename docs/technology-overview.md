@@ -266,7 +266,7 @@ sequenceDiagram
 
 エンコーダ編集はこの Studio RPC の流れに Host Link Config RPC を追加する形です。Studio の `serial_number` と Host Link の `device_uid_hash` が同じ UID のときだけ組み合わせます。キー変更とエンコーダ override は別々に保存されるため、保存・破棄・`.keymap に戻す` は両方を実行し、結果も別々に表示します。
 
-Combo編集も同じHost Link Config RPCを使い、`COMBO GET_INFO`でfeature対応を確認します。通常キー、Encoder、Comboは独立した変更面として扱い、共通編集バーから保存・破棄・`.keymapに戻す`を実行して結果をfeature別に返します。ComboのExport／Restore統合は未実装です。
+Combo編集も同じHost Link Config RPCを使い、`COMBO GET_INFO`でfeature対応を確認します。通常キー、Encoder、Comboは独立した変更面として扱い、共通編集バーから保存・破棄・`.keymapに戻す`を実行して結果をfeature別に返します。`-keymap.json`のExportにはComboを含め、Restoreは同名Comboの更新または空きslotへの追加として安全に適用します。
 
 編集中は Studio transport を保持するため、同じ device を別 command が二重に開かないように backend 側で `port_busy` を返します。同じ device の読み取りは保持中の session 経由で snapshot を返します。BLE Studio 編集では UI 側でキー書き込みを 1 件ずつ順番に処理し、pending 件数を下部バーに表示します。未保存変更があるまま他画面へ移動しようとした場合、UI は遷移前に止めて保存して移動 / 破棄して移動 / キャンセルを提示します。書き込み失敗時は未送信キューを破棄し、復旧用の再読み込みで編集セッションを破棄してから実機状態を読み直します。
 

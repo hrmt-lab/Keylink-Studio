@@ -526,7 +526,9 @@ export default function KeymapViewer({
   const [editNotice, setEditNotice] = useState<"saved" | "discarded" | "reset_to_keymap" | null>(null);
   const [keymapFileBusy, setKeymapFileBusy] = useState<"export" | "restore" | null>(null);
   const [restoreReport, setRestoreReport] = useState<RestoreReport | null>(null);
-  const [restoreNotice, setRestoreNotice] = useState<"no_targets" | null>(null);
+  const [, setRestoreNotice] = useState<"no_targets" | null>(null);
+  const [completionDialog, setCompletionDialog] = useState<{ title: string; text?: string } | null>(null);
+  const [pendingRestore, setPendingRestore] = useState<{ path: string; report: RestoreReport } | null>(null);
   const [changedKeys, setChangedKeys] = useState<Set<string>>(() => new Set());
   const [flashKeys, setFlashKeys] = useState<Map<string, number>>(() => new Map());
   const [flashEncoderTiles, setFlashEncoderTiles] = useState<Map<string, number>>(() => new Map());
@@ -544,6 +546,7 @@ export default function KeymapViewer({
   const [comboDirtyByUid, setComboDirtyByUid] = useState<Record<string, boolean>>({});
   const [comboAvailableByUid, setComboAvailableByUid] = useState<Record<string, boolean>>({});
   const [comboDraftActive, setComboDraftActive] = useState(false);
+  const [comboRefreshNonce, setComboRefreshNonce] = useState(0);
   const [editHostLinkUid, setEditHostLinkUid] = useState<string | null>(null);
   const [encoderWriteErrorCode, setEncoderWriteErrorCode] = useState<string | null>(null);
   const [encoderRefreshNonce, setEncoderRefreshNonce] = useState(0);
@@ -1085,7 +1088,10 @@ export default function KeymapViewer({
     if (encoderFeature?.attempted && encoderFeature.success) {
       setEncoderRefreshNonce((nonce) => nonce + 1);
     }
-    if (comboFeature?.success) setComboDirty(false);
+    if (comboFeature?.success) {
+      setComboDirty(false);
+      setComboRefreshNonce((nonce) => nonce + 1);
+    }
     if (result.overall_success) {
       setEditState((current) => ({ ...current, operation: "idle", problem: null }));
       setRestoreReport(null);
@@ -1153,7 +1159,10 @@ export default function KeymapViewer({
       setEncoderPanel(null);
       setEncoderRefreshNonce((nonce) => nonce + 1);
     }
-    if (comboFeature?.success) setComboDirty(false);
+    if (comboFeature?.success) {
+      setComboDirty(false);
+      setComboRefreshNonce((nonce) => nonce + 1);
+    }
     if (result.result.overall_success) {
       setEditState((current) => ({ ...current, operation: "idle", problem: null }));
       setRestoreReport(null);
@@ -1228,7 +1237,10 @@ export default function KeymapViewer({
     if (encoderFeature?.attempted) {
       setEncoderRefreshNonce((nonce) => nonce + 1);
     }
-    if (comboFeature?.success) setComboDirty(false);
+    if (comboFeature?.success) {
+      setComboDirty(false);
+      setComboRefreshNonce((nonce) => nonce + 1);
+    }
     if (result.studio.success && result.snapshot) {
       setEditState((current) => ({ ...current, dirty: false }));
     }
@@ -1382,6 +1394,7 @@ export default function KeymapViewer({
     setError(null);
     setRestoreReport(null);
     setRestoreNotice(null);
+    setCompletionDialog(null);
     setChangedKeys(new Set());
     const encoderExportUnavailable =
       encoderLoadState === "loading" ||
@@ -1399,11 +1412,14 @@ export default function KeymapViewer({
     if (!path) return;
     setKeymapFileBusy("export");
     try {
-      const encoderExportUid =
-        encoderLoadState === "available" && (encoderCount ?? 0) > 0 ? hostLinkUid : null;
-      await studioExportKeymap(selected.id, path, encoderExportUid);
+      const configExportUid = configRpcCapable ? hostLinkUid : null;
+      const report = await studioExportKeymap(selected.id, path, configExportUid);
       setEditNotice(null);
-      window.alert(t("keymap.export.done"));
+      const comboWarning = report.warnings.some((issue) => issue.code === "combo_export_unavailable");
+      setCompletionDialog({
+        title: t("keymap.export.done"),
+        text: comboWarning ? t("keymap.export.combo_warning") : undefined,
+      });
     } catch (e) {
       setError(errorLabel(String(e), t));
     } finally {
@@ -1416,15 +1432,20 @@ export default function KeymapViewer({
     const labelPatches = snapshot ? resolvedLabelPatchesFromSnapshot(snapshot) : [];
     const hasDirty =
       editState.mode === "editing" &&
-      (editState.dirty || (await studioHasUnsaved(selected.id).catch(() => editState.dirty)));
+      (editState.dirty ||
+        encoderDirty ||
+        comboDirty ||
+        comboDraftActive ||
+        (await studioHasUnsaved(selected.id).catch(() => editState.dirty)));
     if (hasDirty) {
       const discard = window.confirm(t("keymap.restore.discard_confirm"));
       if (!discard) return false;
+      if (!(await discardEdit())) return false;
     }
     setEditState((current) => ({ ...current, operation: "setting", problem: null }));
     try {
       const result = applyBehaviorLabelPatches(
-        await studioBeginEdit(selected.id, hasDirty, labelPatches),
+        await studioBeginEdit(selected.id, false, labelPatches),
         labelPatches,
       );
       setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: result }));
@@ -1439,44 +1460,14 @@ export default function KeymapViewer({
       setError(errorLabel(code, t));
       return false;
     }
-  }, [catalog.length, configRpcCapable, editState.dirty, editState.mode, hostLinkUid, mapEditProblem, selected, setSnapshotsByDeviceId, snapshot, t]);
+  }, [catalog.length, comboDirty, comboDraftActive, configRpcCapable, discardEdit, editState.dirty, editState.mode, encoderDirty, hostLinkUid, mapEditProblem, selected, setSnapshotsByDeviceId, snapshot, t]);
 
-  const restoreKeymap = useCallback(async () => {
-    if (!selected || keymapFileBusy || pendingKeyWrites > 0 || editState.operation !== "idle") return;
-    setError(null);
-    setRestoreReport(null);
-    setRestoreNotice(null);
-    setChangedKeys(new Set());
-    const selectedPath = await open({
-      multiple: false,
-      directory: false,
-      filters: [{ name: "JSON", extensions: ["json"] }],
-    });
-    if (!selectedPath || Array.isArray(selectedPath)) return;
+  const applyKeymapRestore = useCallback(async (selectedPath: string) => {
+    if (!selected) return;
     setKeymapFileBusy("restore");
     try {
-      const ready = await ensureRestoreEditSession();
-      if (!ready) return;
-      const encoderRestoreUid = configRpcCapable && (encoderCount ?? 0) > 0 ? hostLinkUid : null;
-      const preview = await studioPreviewKeymapRestore(selected.id, selectedPath, encoderRestoreUid);
-      if (
-        preview.can_apply &&
-        preview.will_write === 0 &&
-        preview.blocked === 0 &&
-        preview.encoder_will_write === 0 &&
-        preview.encoder_blocked === 0
-      ) {
-        setRestoreReport(preview);
-        setRestoreNotice("no_targets");
-        setEditState({ mode: "editing", dirty: false, operation: "idle", problem: null });
-        return;
-      }
-      const confirmText = restoreConfirmText(preview, t);
-      if (!preview.can_apply || !window.confirm(confirmText)) {
-        setRestoreReport(preview);
-        return;
-      }
-      const [nextSnapshot, report] = await studioApplyKeymapRestore(selected.id, selectedPath, encoderRestoreUid);
+      const configRestoreUid = configRpcCapable ? hostLinkUid : null;
+      const [nextSnapshot, report] = await studioApplyKeymapRestore(selected.id, selectedPath, configRestoreUid);
       setSnapshotsByDeviceId((current) => ({ ...current, [selected.id]: nextSnapshot }));
       setRestoreReport(report);
       setChangedKeys(new Set(report.applied_keys.map((key) => changedKeyId(key.layer_index, key.position))));
@@ -1492,11 +1483,65 @@ export default function KeymapViewer({
         setEncoderDirty(true);
         setEncoderRefreshNonce((nonce) => nonce + 1);
       }
+      if (
+        report.applied_combos.length > 0 ||
+        report.errors.some((issue) => issue.code === "combo_apply_failed")
+      ) {
+        setComboDirty(report.applied_combos.length > 0);
+        setComboRefreshNonce((nonce) => nonce + 1);
+      }
       if (report.apply_status === "partial") {
         setError(t("keymap.restore.apply_partial"));
         return;
       }
-      window.alert(t("keymap.restore.done"));
+    } catch (e) {
+      setError(errorLabel(String(e), t));
+    } finally {
+      setKeymapFileBusy(null);
+      setEditState((current) => ({ ...current, operation: "idle" }));
+    }
+  }, [configRpcCapable, hostLinkUid, selected, setSnapshotsByDeviceId, t]);
+
+  const restoreKeymap = useCallback(async () => {
+    if (!selected || keymapFileBusy || pendingKeyWrites > 0 || editState.operation !== "idle") return;
+    setError(null);
+    setRestoreReport(null);
+    setRestoreNotice(null);
+    setCompletionDialog(null);
+    setPendingRestore(null);
+    setChangedKeys(new Set());
+    const selectedPath = await open({
+      multiple: false,
+      directory: false,
+      filters: [{ name: "JSON", extensions: ["json"] }],
+    });
+    if (!selectedPath || Array.isArray(selectedPath)) return;
+    setKeymapFileBusy("restore");
+    try {
+      const ready = await ensureRestoreEditSession();
+      if (!ready) return;
+      const configRestoreUid = configRpcCapable ? hostLinkUid : null;
+      const preview = await studioPreviewKeymapRestore(selected.id, selectedPath, configRestoreUid);
+      if (
+        preview.can_apply &&
+        preview.will_write === 0 &&
+        preview.blocked === 0 &&
+        preview.encoder_will_write === 0 &&
+        preview.encoder_blocked === 0 &&
+        preview.combo_added === 0 &&
+        preview.combo_updated === 0 &&
+        preview.combo_blocked === 0
+      ) {
+        setRestoreReport(preview);
+        setCompletionDialog({ title: t("keymap.restore.no_targets") });
+        setEditState({ mode: "editing", dirty: false, operation: "idle", problem: null });
+        return;
+      }
+      if (!preview.can_apply) {
+        setRestoreReport(preview);
+        return;
+      }
+      setPendingRestore({ path: selectedPath, report: preview });
     } catch (e) {
       const code = String(e);
       setError(errorLabel(code, t));
@@ -1504,7 +1549,13 @@ export default function KeymapViewer({
       setKeymapFileBusy(null);
       setEditState((current) => ({ ...current, operation: "idle" }));
     }
-  }, [configRpcCapable, editState.operation, encoderCount, ensureRestoreEditSession, hostLinkUid, keymapFileBusy, pendingKeyWrites, selected, setSnapshotsByDeviceId, t]);
+  }, [configRpcCapable, editState.operation, ensureRestoreEditSession, hostLinkUid, keymapFileBusy, pendingKeyWrites, selected, t]);
+
+  const confirmRestore = useCallback(() => {
+    const pending = pendingRestore;
+    setPendingRestore(null);
+    if (pending) void applyKeymapRestore(pending.path);
+  }, [applyKeymapRestore, pendingRestore]);
 
   const setKey = useCallback((key: StudioPhysicalKey, targetLayer: StudioLayer, behavior: EditBehavior) => {
     if (!selected || editState.operation === "saving" || editState.operation === "discarding" || editState.operation === "ending") return;
@@ -1670,6 +1721,7 @@ export default function KeymapViewer({
   useEffect(() => {
     setRestoreReport(null);
     setRestoreNotice(null);
+    setPendingRestore(null);
     setChangedKeys(new Set());
   }, [selectedId]);
 
@@ -1735,9 +1787,6 @@ export default function KeymapViewer({
       </div>
 
       {(error || studioError) && <Notice>{error ?? friendlyError(studioError, t)}</Notice>}
-      {restoreNotice === "no_targets" && (
-        <InfoNotice>{t("keymap.restore.no_targets")}</InfoNotice>
-      )}
       {restoreReport && restoreReportNotice(restoreReport, t) && (
         <WarnNotice>{restoreReportNotice(restoreReport, t)}</WarnNotice>
       )}
@@ -1870,6 +1919,7 @@ export default function KeymapViewer({
                 <ComboEditor
                   deviceId={selected.id}
                   hostLinkUid={configRpcCapable ? hostLinkUid : null}
+                  refreshNonce={comboRefreshNonce}
                   layoutKeys={snapshot.selected_layout_keys}
                   keyLabels={new Map((layer?.bindings ?? []).map((binding) => [binding.position, binding.primary_label]))}
                   catalog={catalog}
@@ -1914,6 +1964,24 @@ export default function KeymapViewer({
           onDiscard={discardEdit}
           onResetToKeymap={resetToKeymap}
           onEnd={endEdit}
+        />
+      )}
+      {pendingRestore && (
+        <RestoreConfirmDialog
+          report={pendingRestore.report}
+          t={t}
+          onCancel={() => {
+            setRestoreReport(pendingRestore.report);
+            setPendingRestore(null);
+          }}
+          onConfirm={confirmRestore}
+        />
+      )}
+      {completionDialog && (
+        <CompletionDialog
+          title={completionDialog.title}
+          text={completionDialog.text}
+          onClose={() => setCompletionDialog(null)}
         />
       )}
       {picker && (
@@ -2365,8 +2433,6 @@ function EditBar({ dirty, draftActive, operation, pendingCount, problem, keyWrit
     ? t(`keymap.edit.problem.${problem}` as TranslationKey)
     : notice
       ? t(`keymap.edit.${notice}` as TranslationKey)
-    : draftActive
-      ? "Combo の編集中です。適用するか、別のスロットへ移動して変更を破棄してください。"
     : dirty
       ? t("keymap.edit.dirty")
       : "";
@@ -2488,9 +2554,10 @@ function comboLayerLabel(layerMask: number, layers: StudioLayer[]): string {
   return selected.length > 0 ? selected.join(", ") : "指定なし";
 }
 
-function ComboEditor({ deviceId, hostLinkUid, layoutKeys, keyLabels, catalog, layers, editing, disabled, onDirtyChange, onAvailabilityChange, onDraftChange }: {
+function ComboEditor({ deviceId, hostLinkUid, refreshNonce, layoutKeys, keyLabels, catalog, layers, editing, disabled, onDirtyChange, onAvailabilityChange, onDraftChange }: {
   deviceId: string;
   hostLinkUid: string | null;
+  refreshNonce: number;
   layoutKeys: StudioPhysicalKey[];
   keyLabels: Map<number, string>;
   catalog: KeyCatalogEntry[];
@@ -2515,6 +2582,7 @@ function ComboEditor({ deviceId, hostLinkUid, layoutKeys, keyLabels, catalog, la
   const [selectedBehavior, setSelectedBehavior] = useState<EditBehavior | null>(null);
   const [behaviorPicker, setBehaviorPicker] = useState<PickerRect | null>(null);
   const [draftActive, setDraftActive] = useState(false);
+  const [creatingSlot, setCreatingSlot] = useState<number | null>(null);
 
   const markDraftActive = () => {
     setDraftActive(true);
@@ -2561,11 +2629,17 @@ function ComboEditor({ deviceId, hostLinkUid, layoutKeys, keyLabels, catalog, la
         }
       }
       const dirty = await studioComboHasUnsaved(hostLinkUid);
-      setInfo(nextInfo); setItems(nextItems); onDirtyChange(dirty); onAvailabilityChange(true); setStatus("ready");
+      setInfo(nextInfo);
+      setItems(nextItems);
+      setSlot((current) => nextItems[current] ? current : Object.keys(nextItems).map(Number).sort((a, b) => a - b)[0] ?? 0);
+      setCreatingSlot(null);
+      onDirtyChange(dirty);
+      onAvailabilityChange(true);
+      setStatus("ready");
     } catch (error) { onAvailabilityChange(false); setMessage(String(error)); setStatus("error"); }
   }, [deviceId, hostLinkUid, onAvailabilityChange, onDirtyChange]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); }, [load, refreshNonce]);
   useEffect(() => () => onDraftChange(false), [onDraftChange]);
   useEffect(() => {
     const item = items[slot];
@@ -2591,8 +2665,9 @@ function ComboEditor({ deviceId, hostLinkUid, layoutKeys, keyLabels, catalog, la
     try {
       const result = await studioSetCombo(deviceId, hostLinkUid, { ...draft, slot, behavior: selectedBehavior });
       setItems((current) => ({ ...current, [slot]: result }));
+      setCreatingSlot(null);
       clearDraftActive();
-      onDirtyChange(true); setMessage("適用しました。下部の「保存」で永続化します。");
+      onDirtyChange(true);
     } catch (error) {
       const detail = String(error);
       setMessage(detail.includes("config_rpc_status_invalid_argument")
@@ -2604,7 +2679,7 @@ function ComboEditor({ deviceId, hostLinkUid, layoutKeys, keyLabels, catalog, la
   const remove = async (targetSlot = slot) => {
     if (!hostLinkUid || !items[targetSlot]) return;
     setWorking(true); setMessage(null);
-    try { await studioComboDelete(hostLinkUid, targetSlot); setItems((current) => { const next = { ...current }; delete next[targetSlot]; return next; }); onDirtyChange(true); }
+    try { await studioComboDelete(hostLinkUid, targetSlot); setItems((current) => { const next = { ...current }; delete next[targetSlot]; return next; }); setCreatingSlot((current) => current === targetSlot ? null : current); onDirtyChange(true); }
     catch (error) { setMessage(`削除できませんでした: ${String(error)}`); }
     finally { setWorking(false); }
   };
@@ -2614,6 +2689,17 @@ function ComboEditor({ deviceId, hostLinkUid, layoutKeys, keyLabels, catalog, la
     const positions = included ? current.key_positions.filter((value) => value !== position) : [...current.key_positions, position].sort((a, b) => a - b);
     return { ...current, key_positions: positions };
   });
+  const cancelDraft = () => {
+    setMessage(null);
+    setSelectedBehavior(null);
+    clearDraftActive();
+    if (items[slot]) {
+      setDraft(items[slot]);
+      return;
+    }
+    setCreatingSlot(null);
+    setSlot(Object.keys(items).map(Number).sort((a, b) => a - b)[0] ?? 0);
+  };
   if (status === "unsupported") return <InfoNotice>Combo 編集には、UID が一致する Host Link 接続と Config RPC が必要です。</InfoNotice>;
   if (status === "loading") return <div className="py-10 text-center text-sm text-muted">Combo を読み込んでいます…</div>;
   if (status === "error" || !info) return <Notice>Combo を読み込めませんでした。<button className="ml-2 underline" onClick={() => void load()}>再試行</button>{message ? ` (${message})` : ""}</Notice>;
@@ -2625,8 +2711,10 @@ function ComboEditor({ deviceId, hostLinkUid, layoutKeys, keyLabels, catalog, la
   const canApply = !mutationDisabled && draftActive && validationMessage === null && hasBinding;
   const configuredSlots = availableSlots.filter((current) => items[current] !== undefined);
   const nextEmptySlot = availableSlots.find((current) => items[current] === undefined);
-  const selectSlot = (nextSlot: number) => {
+  const newDraftVisible = editing && creatingSlot === slot && items[slot] === undefined;
+  const selectSlot = (nextSlot: number, creating = false) => {
     if (nextSlot !== slot && draftActive && !window.confirm("適用していない変更があります。変更を破棄して移動しますか？")) return;
+    setCreatingSlot(creating ? nextSlot : null);
     setSlot(nextSlot);
   };
   return <div className="grid gap-5 lg:grid-cols-[10rem_minmax(0,1fr)]">
@@ -2645,20 +2733,33 @@ function ComboEditor({ deviceId, hostLinkUid, layoutKeys, keyLabels, catalog, la
             {editing && <button type="button" disabled={mutationDisabled} onClick={() => void remove(current)} title={`${item.name} を削除`} aria-label={`${item.name} を削除`} className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg disabled:opacity-50 ${selected ? "text-white/75 hover:bg-white/15 hover:text-white" : "text-disabled hover:bg-red-50 hover:text-red-500"}`}><Trash2 size={14} /></button>}
           </div>;
         })}
-        {configuredSlots.length === 0 && <div className="px-2 py-3 text-xs text-faint">設定済みのComboはありません。</div>}
+        {newDraftVisible && (
+          <div className="flex items-center gap-1 rounded-md bg-accent px-2 py-2 text-xs text-white">
+            <div className="min-w-0 flex-1 text-left">
+              <div className="truncate font-medium">{draft.name || "新規Combo"}</div>
+              {selectedBehavior && (
+                <div className="mt-0.5 truncate font-mono text-[10px] text-white/80">
+                  {optimisticLabelsForBehavior(selectedBehavior, catalog).full_label}
+                </div>
+              )}
+              <div className="mt-1 truncate text-[10px] text-white/80">{comboLayerLabel(draft.layer_mask, layers)}</div>
+            </div>
+          </div>
+        )}
+        {configuredSlots.length === 0 && !newDraftVisible && <div className="px-2 py-3 text-xs text-faint">設定済みのComboはありません。</div>}
       </div>
       {editing && <button
         type="button"
         disabled={selectionDisabled || nextEmptySlot === undefined}
         title={nextEmptySlot === undefined ? "登録できるcomboの最大数に達しています。" : "Comboを追加"}
-        onClick={() => { if (nextEmptySlot !== undefined) selectSlot(nextEmptySlot); }}
+        onClick={() => { if (nextEmptySlot !== undefined) { selectSlot(nextEmptySlot, true); markDraftActive(); } }}
         className="mt-3 flex w-full items-center justify-center gap-1.5 rounded-pill bg-surface px-3 py-1.5 text-sm font-medium text-ink ring-1 ring-border hover:bg-plate disabled:opacity-50"
       ><Plus size={14} />追加</button>}
-      {editing && nextEmptySlot !== undefined && !items[slot] && <div className="mt-2 text-center text-[10px] text-faint">新規Comboを編集中</div>}
+      {newDraftVisible && <div className="mt-2 text-center text-[10px] text-faint">新規Comboを編集中</div>}
       {editing && nextEmptySlot === undefined && <div className="mt-2 text-center text-[10px] text-faint">登録上限に達しています</div>}
     </aside>
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-2"><div><div className="text-sm font-medium text-ink">Combo {slot + 1}</div><div className="text-xs text-muted">2〜{info.max_keys_per_combo} 個のキーを選択します</div></div>{editing && <div className="flex gap-2"><button disabled={!canApply} onClick={() => void apply()} className="rounded-pill bg-accent px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50">適用</button></div>}</div>
+      <div className="flex flex-wrap items-center justify-between gap-2"><div><div className="text-sm font-medium text-ink">Combo {slot + 1}</div><div className="text-xs text-muted">2〜{info.max_keys_per_combo} 個のキーを選択します</div></div></div>
       <KeymapCanvas
         keys={layoutKeys}
         keyTitle={(key) => keyLabels.get(key.position) ?? `位置 ${key.position}`}
@@ -2677,7 +2778,11 @@ function ComboEditor({ deviceId, hostLinkUid, layoutKeys, keyLabels, catalog, la
         <div title="comboが成立したときに実行する動作です。" className="mb-1 text-sm font-medium text-ink">bindings</div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm text-muted">
-            {selectedBehavior ? optimisticLabelsForBehavior(selectedBehavior, catalog).full_label : comboBindingLabel(draft.binding)}
+            {selectedBehavior
+              ? optimisticLabelsForBehavior(selectedBehavior, catalog).full_label
+              : items[slot]
+                ? comboBindingLabel(draft.binding)
+                : ""}
           </span>
           <button
             type="button"
@@ -2692,8 +2797,13 @@ function ComboEditor({ deviceId, hostLinkUid, layoutKeys, keyLabels, catalog, la
           </button>
         </div>
       </div>
-      {(validationMessage || message) && <div className={`text-sm ${validationMessage ? "text-red-700" : "text-muted"}`}>{validationMessage ?? message}</div>}
-      <div className="border-t border-border pt-3 text-sm text-muted">適用後の保存・破棄・.keymap への復元は、画面下部の共通操作から行います。</div>
+      <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
+        <div className={`text-sm ${validationMessage ? "text-red-700" : "text-muted"}`}>{validationMessage ?? message}</div>
+        {editing && <div className="ml-auto flex gap-2">
+          <button type="button" disabled={mutationDisabled || !draftActive} onClick={cancelDraft} className="btn-neu rounded-pill px-3 py-1.5 text-sm font-medium text-ink disabled:opacity-50">キャンセル</button>
+          <button disabled={!canApply} onClick={() => void apply()} className="rounded-pill bg-accent px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50">適用</button>
+        </div>}
+      </div>
     </div>
       {behaviorPicker && (
         <BindingPicker
@@ -3927,7 +4037,7 @@ function Notice({ children }: { children: ReactNode }) {
   return (
     <div className="flex items-start gap-2.5 rounded-lg bg-red-50 px-4 py-3 text-sm text-red-700 ring-1 ring-red-200">
       <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
-      <span>{children}</span>
+      <span className="whitespace-pre-line">{children}</span>
     </div>
   );
 }
@@ -3936,7 +4046,7 @@ function WarnNotice({ children }: { children: ReactNode }) {
   return (
     <div className="flex items-start gap-2.5 rounded-lg bg-amber-50 px-4 py-3 text-sm text-amber-800 ring-1 ring-amber-200">
       <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
-      <span>{children}</span>
+      <span className="whitespace-pre-line">{children}</span>
     </div>
   );
 }
@@ -3945,7 +4055,46 @@ function InfoNotice({ children }: { children: ReactNode }) {
   return (
     <div className="flex items-start gap-2.5 rounded-lg bg-accent-soft px-4 py-3 text-sm text-accent-deep ring-1 ring-accent/25">
       <AlertCircle size={15} className="mt-0.5 flex-shrink-0" />
-      <span>{children}</span>
+      <span className="whitespace-pre-line">{children}</span>
+    </div>
+  );
+}
+
+function RestoreConfirmDialog({
+  report,
+  t,
+  onCancel,
+  onConfirm,
+}: {
+  report: RestoreReport;
+  t: (key: TranslationKey, vars?: Record<string, string | number>) => string;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/25 px-5" role="dialog" aria-modal="true" aria-labelledby="restore-confirm-title">
+      <div className="w-full max-w-lg rounded-2xl bg-background p-6 shadow-2xl ring-1 ring-ink/10">
+        <h2 id="restore-confirm-title" className="text-base font-medium text-ink">Restoreを確認</h2>
+        <p className="mt-3 whitespace-pre-line text-sm leading-6 text-muted">{restoreConfirmText(report, t)}</p>
+        <div className="mt-6 flex justify-end gap-2">
+          <button type="button" onClick={onCancel} className="btn-neu rounded-full px-4 py-2 text-sm font-medium text-ink">キャンセル</button>
+          <button type="button" onClick={onConfirm} className="rounded-full bg-accent px-4 py-2 text-sm font-medium text-white shadow-sm">Restoreする</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CompletionDialog({ title, text, onClose }: { title: string; text?: string; onClose: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/25 px-5" role="dialog" aria-modal="true" aria-labelledby="completion-dialog-title">
+      <div className="w-full max-w-lg rounded-2xl bg-background p-6 shadow-2xl ring-1 ring-ink/10">
+        <h2 id="completion-dialog-title" className="text-base font-medium text-ink">{title}</h2>
+        {text && <p className="mt-3 whitespace-pre-line text-sm leading-6 text-muted">{text}</p>}
+        <div className="mt-6 flex justify-end">
+          <button type="button" onClick={onClose} className="rounded-full bg-accent px-4 py-2 text-sm font-medium text-white shadow-sm">OK</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -3975,6 +4124,17 @@ function restoreConfirmText(
       }),
     );
   }
+  const comboTotal = report.combo_added + report.combo_updated + report.combo_unchanged_skipped + report.combo_blocked;
+  if (comboTotal > 0) {
+    lines.push(
+      t("keymap.restore.combo_summary", {
+        add: report.combo_added,
+        update: report.combo_updated,
+        unchanged: report.combo_unchanged_skipped,
+        blocked: report.combo_blocked,
+      }),
+    );
+  }
   for (const code of new Set(report.warnings.map((issue) => issue.code))) {
     lines.push(restoreIssueLabel(code, t));
   }
@@ -3989,12 +4149,14 @@ function restoreReportNotice(
   t: (key: TranslationKey, vars?: Record<string, string | number>) => string,
 ): string | null {
   const hostlinkMissing = report.warnings.some((issue) => issue.code === "encoder_hostlink_missing");
+  const comboUnavailable = report.warnings.some((issue) => issue.code === "combo_unavailable");
   if (
     report.will_write === 0 &&
     report.blocked === 0 &&
     report.errors.length === 0 &&
     report.encoder_blocked === 0 &&
-    !hostlinkMissing
+    !hostlinkMissing &&
+    !comboUnavailable
   ) {
     return null;
   }
@@ -4007,6 +4169,11 @@ function restoreReportNotice(
     parts.push(restoreIssueLabel("encoder_hostlink_missing", t));
   } else if (report.encoder_blocked > 0) {
     parts.push(t("keymap.restore.encoder_partial", { count: report.encoder_blocked }));
+  }
+  if (comboUnavailable) {
+    parts.push(restoreIssueLabel("combo_unavailable", t));
+  } else if (report.combo_blocked > 0) {
+    parts.push(t("keymap.restore.combo_partial", { count: report.combo_blocked }));
   }
   for (const issue of report.errors) parts.push(restoreIssueLabel(issue.code, t));
   return parts.length > 0 ? parts.join(" ") : null;
@@ -4037,6 +4204,18 @@ function restoreIssueLabel(
       return t("keymap.restore.key_apply_failed");
     case "encoder_apply_failed":
       return t("keymap.restore.encoder_apply_failed");
+    case "combo_unavailable":
+      return t("keymap.restore.combo_unavailable");
+    case "combo_duplicate_name":
+    case "combo_no_space":
+    case "combo_key_positions":
+    case "combo_layers":
+    case "combo_behavior_mismatch":
+    case "combo_invalid":
+    case "combo_conflict":
+      return t("keymap.restore.combo_invalid");
+    case "combo_apply_failed":
+      return t("keymap.restore.combo_apply_failed");
     case "state_refresh_failed":
       return t("keymap.restore.state_refresh_failed");
     default:

@@ -169,13 +169,12 @@ api_timeout_sec = 10
 
 ## GUI 画面
 
-- Dashboard: 監視開始 / 停止、接続状況、現在レイヤー、ログ、AI Usage 簡易サマリ。Host Link デバイスは `device_uid_hash` 単位で集約し、USB / Bluetooth の接続経路アイコンを表示
+- Devices: 監視開始 / 停止、Host Link / ZMK Studio の検出結果、USB / Bluetooth 接続種別、capability、バッテリー状態、ログを表示。Host Link は `device_uid_hash` 単位で集約し、同じキーボードが USB と BLE HOG の両方で見えている場合は 1 カードにまとめて両方のアイコンを表示
 - Layer Rules: アプリごとのレイヤールール編集。変更は自動保存です。
 - Actions: キーボードのキーから PC 側操作を実行する `HOST_ACTION` バインディング設定
 - Time Sync: `TIME_SYNC` の有効化、表示形式、同期間隔などの設定
 - AI Usage: Codex / Claude Code 使用量送信の設定、状態表示、手動更新
 - Keymap Viewer: ZMK Studio キーマップ表示、ヒートマップ、キーテスター、キーマップ編集。統計とリアルタイム押下イベントは Studio の `serial_number` が Host Link の `device_uid_hash` と同じ 16 桁 hex UID を返す場合、UID 優先で紐付け
-- Devices: Host Link / ZMK Studio の検出結果、USB / Bluetooth 接続種別、capability、バッテリー状態表示。Host Link は `device_uid_hash` 単位で集約し、同じキーボードが USB と BLE HOG の両方で見えている場合は 1 カードにまとめて両方のアイコンを表示
 - Settings: 外観、Polling、HID、起動設定
 
 UI は日本語 / 英語の切り替えに対応しています。外観のアクセント色は Settings から変更できます。
@@ -196,7 +195,7 @@ ZMK Studio で保存されるキーマップは firmware の `.keymap` ソース
 
 編集モードの `.keymap に戻す` は、ZMK Studio で保存したキー、レイヤー、物理レイアウトを削除して firmware の `.keymap` 状態へ戻します。Host Link が同じ UID で接続されている場合は、Keylink Studio のエンコーダ overrideとCombo tableも `.keymap` の初期値へ戻します。この操作は Bluetooth pairing、Host Link identity、アプリ設定、キー統計を削除しません。Studio RPC、Encoder、Comboは別経路／featureのため、部分失敗した場合は結果を表示して再試行できます。
 
-Keymap Viewer の `Export` / `Restore` は現在、通常キーとエンコーダを対象にします。ComboのExport / Restore統合は未実装です。通常キーの`Restore`は現在キーボードにも存在する layer index と key position の raw binding だけを未保存変更として読み込み、永続化には既存の`保存`を使います。
+Keymap Viewer の `Export` / `Restore` は、通常キー、エンコーダ、読取可能なCombo設定を対象にします。通常キーの`Restore`は現在キーボードにも存在する layer index と key position の raw binding だけを未保存変更として読み込み、永続化には既存の`保存`を使います。エンコーダとComboの復元内容も未保存変更として扱い、画面下部の`保存`で永続化します。
 
 このバックアップは運用復旧用であり、`.keymap` 生成や firmware ソースへの反映は行いません。レイヤー名、レイヤー数、レイヤー順、物理レイアウト選択は復元対象外です。behavior 名検証ができない接続では強警告を出し、同一 firmware / 近い構成への復元を前提に raw binding を復元します。BLE Studio 由来のバックアップも復元対象ですが、検証できない場合は USB より安全確認が弱くなります。復元または手動編集で変更したキーは、編集セッション中に色付きで表示されます。
 

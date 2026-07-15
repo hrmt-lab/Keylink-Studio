@@ -60,10 +60,10 @@ Validation:
 | `0x60` | `KEY_STATS` | Firmware -> Host | key stats diff |
 | `0x70` | `LAYER_STATE` | Firmware -> Host | display-only layer state |
 | `0x80` | `KEY_PRESS` | Firmware -> Host | real-time key press state |
-| `0x90` | `CONFIG_REQUEST` | Host -> Firmware | reserved for Config RPC |
-| `0x91` | `CONFIG_RESPONSE` | Firmware -> Host | reserved for Config RPC |
+| `0x90` | `CONFIG_REQUEST` | Host -> Firmware | Config RPC request |
+| `0x91` | `CONFIG_RESPONSE` | Firmware -> Host | Config RPC response |
 
-`CONFIG_REQUEST` / `CONFIG_RESPONSE` は v2 header 上の既知 type として予約されていますが、現在の host 実装では typed decode しません。通常 uplink としても扱いません。
+`CONFIG_REQUEST` / `CONFIG_RESPONSE` はEncoder／Combo設定のConfig RPCに使用します。Hostは`CONFIG_RESPONSE`を型付きでdecodeし、進行中requestと`seq`、`feature`、`op`が一致するresponseを処理します。wire contractとoperationの詳細は[Host Link Config RPC Packet Specification](hostlink-config-rpc-packet-spec.md)を参照してください。
 
 ## Payload Layouts
 
@@ -196,7 +196,7 @@ header `seq` は duplicate 抑制に使います。
 | 6 | `KEY_STATS` | `KEY_STATS` uplink |
 | 7 | `LAYER_STATE` | `LAYER_STATE` uplink |
 | 8 | `KEY_PRESS` | `KEY_PRESS` uplink |
-| 9 | `CONFIG_RPC` | reserved Config RPC support |
+| 9 | `CONFIG_RPC` | `CONFIG_REQUEST` / `CONFIG_RESPONSE` support |
 
 Keylink Studio は capability を機能 gate として扱います。`BATTERY_STATUS` は既存互換のため capability 未広告でも表示対象として受ける場合がありますが、その他の uplink は該当 capability がない device からは破棄します。
 

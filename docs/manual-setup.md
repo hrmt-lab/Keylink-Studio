@@ -96,7 +96,7 @@ Comboの`combo-set` / `combo-delete` / `combo-save` / `combo-discard` / `combo-r
 2. `.\dev.ps1` でアプリを起動します。
 3. `Devices` 画面で `Scan` を実行します。
 4. 対象デバイスが表示され、`HOST_HELLO` / `DEVICE_HELLO` verification が成功することを確認します。Host Link デバイスカードのアイコンで USB / Bluetooth の接続種別を確認できます。同じ `device_uid_hash` の USB / BLE endpoint が両方見えている場合は、1 カードにまとまって両方のアイコンが表示されます。
-5. `Dashboard` で監視を開始します。
+5. `Devices` 画面右上の`監視開始`を押します。
 
 HELLO verification に失敗する場合は、ZMK 側の Raw HID、Usage Page / Usage、reserved bytes zero、`seq` の扱いを確認してください。
 BLE 接続で不安定な場合は、`hid.hello_timeout_ms` を確認してください。既定は 750ms です。設定画面で変更した場合、監視中なら設定保存後に runner が再構築され、手動のアプリ再起動は不要です。

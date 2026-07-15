@@ -1793,14 +1793,9 @@ export default function KeymapViewer({
 
       <div className="space-y-5">
         <section className="rounded-card bg-surface p-4 space-y-3">
-          <div className="flex items-center justify-between">
-            <h2 className="text-sm font-medium text-ink">{t("keymap.devices")}</h2>
-            <span className="text-xs text-faint font-mono">{devices.length}</span>
-          </div>
-
           {devices.length === 0 ? (
             <div className="rounded-lg bg-background px-4 py-8 text-center text-sm text-faint">
-              {studioScanning ? t("keymap.scanning") : t("keymap.no_devices")}
+              {studioScanning ? t("keymap.scanning") : null}
             </div>
           ) : (
             <div className="flex max-h-36 gap-2 overflow-x-auto overflow-y-auto p-1">

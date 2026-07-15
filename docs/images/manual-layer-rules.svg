@@ -12,7 +12,7 @@
 <line x1="200" y1="0" x2="200" y2="580" stroke="#E8ECF1"/>
 <text x="20" y="37" font-size="14" font-weight="bold" fill="#1A1A2E">Keylink Studio</text>
 
-<text x="30" y="72" font-size="13" fill="#4B5563">Dashboard</text>
+<text x="30" y="72" font-size="13" fill="#4B5563">デバイス</text>
 <!-- レイヤールール ← selected -->
 <rect x="8" y="88" width="184" height="34" rx="8" fill="#FEF0EB"/>
 <rect x="20" y="98" width="3" height="14" rx="2" fill="#EF5B25"/>
@@ -22,8 +22,7 @@
 <text x="30" y="186" font-size="13" fill="#4B5563">時刻同期</text>
 <text x="30" y="224" font-size="13" fill="#4B5563">AI 使用量</text>
 <text x="30" y="262" font-size="13" fill="#4B5563">キーマップ表示</text>
-<text x="30" y="300" font-size="13" fill="#4B5563">デバイス</text>
-<text x="30" y="338" font-size="13" fill="#4B5563">設定</text>
+<text x="30" y="300" font-size="13" fill="#4B5563">設定</text>
 
 <rect x="14" y="540" width="76" height="28" rx="14" fill="#F0F4F8"/>
 <rect x="16" y="542" width="36" height="24" rx="12" fill="#EF5B25"/>

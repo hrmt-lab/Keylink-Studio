@@ -128,13 +128,12 @@ cargo run -p rawhid-host-cli -- run
 
 | Page | What it does |
 | --- | --- |
-| `Dashboard.tsx` | 監視開始 / 停止、状態、ログ、AI Usage 簡易サマリ |
+| `Devices.tsx` | 監視開始 / 停止、Raw HID / ZMK Studio device scan、接続状態、ログ。Host Link は `device_uid_hash` 単位で USB / BLE endpoint を集約表示 |
 | `Rules.tsx` | アプリごとの layer rule 設定 |
 | `Actions.tsx` | `HOST_ACTION` バインディング設定 |
 | `TimeSync.tsx` | 時刻同期設定 |
 | `AiUsage.tsx` | Codex / Claude Code 使用量設定と状態表示 |
 | `KeymapViewer.tsx` | ZMK Studio キーマップ、エンコーダ、Combo編集、ヒートマップ、テスター |
-| `Devices.tsx` | Raw HID / ZMK Studio device scan と結果。Host Link は `device_uid_hash` 単位で USB / BLE endpoint を集約表示 |
 | `Settings.tsx` | 外観、起動、polling、HID 基本設定 |
 
 `ui/src/i18n.tsx` に日本語 / 英語の表示文言があります。新しい UI 文言を追加する場合は、両言語へ追加します。
@@ -154,12 +153,14 @@ React だけでは、Windows の前面アプリ取得や HID device 制御は扱
 
 ```mermaid
 sequenceDiagram
+    participant A as App
     participant UI as React UI
     participant T as Tauri Command
     participant R as Rust Runner
     participant K as ZMK Keyboard
+    A->>R: アプリ初期化時に worker を起動
     UI->>T: start_monitoring
-    T->>R: runner を起動
+    T->>R: 自動処理を有効化
     R->>R: active app / config / AI snapshot を確認
     R->>K: APP_LAYER / TIME_SYNC / AI_USAGE
     K-->>R: BATTERY / HOST_ACTION / KEY_STATS / LAYER_STATE / KEY_PRESS

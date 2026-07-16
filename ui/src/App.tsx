@@ -82,6 +82,7 @@ function AppInner() {
   const [pendingNavigationCanLeave, setPendingNavigationCanLeave] = useState(false);
   const [pendingNavigationAction, setPendingNavigationAction] =
     useState<PendingNavigationAction | null>(null);
+  const [pendingNavigationError, setPendingNavigationError] = useState<PendingNavigationAction | null>(null);
   const [config, setConfig] = useState<AppConfig | null>(null);
   const [status, setStatus] = useState<MonitorStatus>({
     running: false,
@@ -226,6 +227,7 @@ function AppInner() {
     const guard = page === "keymap_viewer" ? keymapNavigationGuardRef.current : null;
     if (guard && await guard.hasUnsaved()) {
       setPendingNavigationCanLeave(guard.canLeave());
+      setPendingNavigationError(null);
       setPendingNavigation(nextPage);
       return;
     }
@@ -236,6 +238,7 @@ function AppInner() {
     if (pendingNavigationAction) return;
     setPendingNavigation(null);
     setPendingNavigationCanLeave(false);
+    setPendingNavigationError(null);
   }, [pendingNavigationAction]);
 
   const completePendingNavigation = useCallback(async (action: PendingNavigationAction) => {
@@ -244,14 +247,19 @@ function AppInner() {
     if (!guard || !guard.canLeave()) return;
 
     setPendingNavigationAction(action);
+    setPendingNavigationError(null);
     try {
       const ok = action === "save"
         ? await guard.saveAndLeave()
         : await guard.discardAndLeave();
-      if (!ok) return;
+      if (!ok) {
+        setPendingNavigationError(action);
+        return;
+      }
       setPage(pendingNavigation);
       setPendingNavigation(null);
       setPendingNavigationCanLeave(false);
+      setPendingNavigationError(null);
     } finally {
       setPendingNavigationAction(null);
     }
@@ -321,6 +329,7 @@ function AppInner() {
         <UnsavedNavigationDialog
           busyAction={pendingNavigationAction}
           canLeave={pendingNavigationCanLeave}
+          failedAction={pendingNavigationError}
           onSave={() => void completePendingNavigation("save")}
           onDiscard={() => void completePendingNavigation("discard")}
           onCancel={closePendingNavigation}
@@ -333,12 +342,14 @@ function AppInner() {
 function UnsavedNavigationDialog({
   busyAction,
   canLeave,
+  failedAction,
   onSave,
   onDiscard,
   onCancel,
 }: {
   busyAction: PendingNavigationAction | null;
   canLeave: boolean;
+  failedAction: PendingNavigationAction | null;
   onSave: () => void;
   onDiscard: () => void;
   onCancel: () => void;
@@ -359,6 +370,13 @@ function UnsavedNavigationDialog({
               : t("keymap.edit.leave_unsaved_busy")}
           </p>
         </div>
+        {failedAction && (
+          <div className="mt-4 rounded-xl bg-red-50 px-3 py-2.5 text-sm leading-5 text-red-700 ring-1 ring-red-100" role="alert">
+            {failedAction === "save"
+              ? t("keymap.edit.leave_save_failed")
+              : t("keymap.edit.leave_discard_failed")}
+          </div>
+        )}
         <div className="mt-5 flex flex-wrap justify-end gap-2">
           <button
             type="button"

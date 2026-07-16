@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type Dispatch, type SetStateAction } from "react";
 import { open, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { Crosshair, AlertCircle, BarChart3, Keyboard, Lock, RefreshCw, RotateCcw, XCircle, Pencil, Save, Trash2, LogOut, Search, Plus, Group, Usb, Bluetooth, Download, Upload } from "lucide-react";
+import { Crosshair, AlertCircle, BarChart3, Keyboard, Lock, RefreshCw, RotateCcw, XCircle, Pencil, Save, Trash2, LogOut, Search, Plus, Group, Usb, Bluetooth, Download, Upload, Check, ChevronDown } from "lucide-react";
 import {
   getKeyStats,
   onKeyPressEvent,
@@ -1052,11 +1052,10 @@ export default function KeymapViewer({
     }
   }, [catalog.length, configRpcCapable, hostLinkUid, mapEditProblem, selected, setSnapshotsByDeviceId, snapshot, t]);
 
-  // Saves the normal-key (Studio RPC) and encoder (Config RPC) sides in a
-  // single Rust-side command that composes both outcomes into a structured
-  // result: a failure on one side must not strand the other, and only the
-  // failed side keeps its dirty state for the next retry
-  // (keymap-encoder-editing-plan.md).
+  // Saves the Studio and dirty Config RPC features in a single Rust-side
+  // command that composes the outcomes into a structured result. Clean Config
+  // features are omitted so an unrelated Host Link failure cannot block a
+  // Studio-only save.
   const saveEdit = useCallback(async () => {
     if (!selected) return false;
     setEditNotice(null);
@@ -1065,10 +1064,11 @@ export default function KeymapViewer({
     setEditState((current) => ({ ...current, operation: "saving", problem: null }));
     let result: SaveOrDiscardResultDto;
     try {
+      const pairedHostLinkUid = editHostLinkUid ?? (configRpcCapable ? hostLinkUid : null);
       result = await studioSaveChanges(
         selected.id,
-        editHostLinkUid ?? (configRpcCapable ? hostLinkUid : null),
-        comboAvailable ? editHostLinkUid ?? hostLinkUid : null,
+        encoderDirty ? pairedHostLinkUid : null,
+        comboAvailable && comboDirty ? pairedHostLinkUid : null,
       );
     } catch (e) {
       const code = String(e);
@@ -1120,11 +1120,10 @@ export default function KeymapViewer({
         .join(" / ")
     );
     return false;
-  }, [comboAvailable, configRpcCapable, editHostLinkUid, encoderDirty, hostLinkUid, mapEditProblem, selected, t]);
+  }, [comboAvailable, comboDirty, configRpcCapable, editHostLinkUid, encoderDirty, hostLinkUid, mapEditProblem, selected, t]);
 
-  // Same composition as saveEdit: discard normal keys and encoder overrides
-  // together via a single command, then re-sync the encoder snapshot so the
-  // UI matches the device state after DISCARD.
+  // Same composition as saveEdit: discard Studio changes and only the dirty
+  // Config RPC features, then re-sync snapshots after DISCARD.
   const discardEdit = useCallback(async () => {
     if (!selected) return false;
     setEditNotice(null);
@@ -1133,10 +1132,11 @@ export default function KeymapViewer({
     setEditState((current) => ({ ...current, operation: "discarding", problem: null }));
     let result: DiscardChangesDto;
     try {
+      const pairedHostLinkUid = editHostLinkUid ?? (configRpcCapable ? hostLinkUid : null);
       result = await studioDiscardChanges(
         selected.id,
-        editHostLinkUid ?? (configRpcCapable ? hostLinkUid : null),
-        comboAvailable ? editHostLinkUid ?? hostLinkUid : null,
+        encoderDirty ? pairedHostLinkUid : null,
+        comboAvailable && comboDirty ? pairedHostLinkUid : null,
       );
     } catch (e) {
       setEditState((current) => ({ ...current, operation: "idle" }));
@@ -1191,7 +1191,7 @@ export default function KeymapViewer({
         .join(" / ")
     );
     return false;
-  }, [comboAvailable, configRpcCapable, editHostLinkUid, encoderDirty, hostLinkUid, selected, setSnapshotsByDeviceId, t]);
+  }, [comboAvailable, comboDirty, configRpcCapable, editHostLinkUid, encoderDirty, hostLinkUid, selected, setSnapshotsByDeviceId, t]);
 
   const resetToKeymap = useCallback(async () => {
     if (!selected) return false;
@@ -1367,10 +1367,19 @@ export default function KeymapViewer({
 
   const discardAndLeaveForNavigation = useCallback(async () => {
     if (!canLeaveForNavigation()) return false;
+    if (comboDraftActive && !editState.dirty && !encoderDirty && !comboDirty) {
+      const studioDirty = selected
+        ? await studioHasUnsaved(selected.id).catch(() => true)
+        : false;
+      if (!studioDirty) {
+        setComboDraftActive(false);
+        return await finishEditForNavigation();
+      }
+    }
     const discarded = await discardEdit();
     if (!discarded) return false;
     return await finishEditForNavigation();
-  }, [canLeaveForNavigation, discardEdit, finishEditForNavigation]);
+  }, [canLeaveForNavigation, comboDirty, comboDraftActive, discardEdit, editState.dirty, encoderDirty, finishEditForNavigation, selected]);
 
   useEffect(() => {
     if (!onRegisterNavigationGuard) return undefined;
@@ -1921,6 +1930,9 @@ export default function KeymapViewer({
                   layers={snapshot.layers}
                   editing={editing}
                   disabled={editState.operation !== "idle"}
+                  editBusy={structuralEditBusy}
+                  editAvailable={viewerAvailable && !selectedLocked}
+                  onToggleEdit={() => editing ? void endEdit() : void beginEdit(false)}
                   onDirtyChange={setComboDirty}
                   onAvailabilityChange={setComboAvailable}
                   onDraftChange={setComboDraftActive}
@@ -2471,7 +2483,7 @@ function EditBar({ dirty, draftActive, operation, pendingCount, problem, keyWrit
         <button
           onClick={onSave}
           disabled={busy || !dirty}
-          className="flex items-center gap-1.5 rounded-pill bg-accent px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+          className="btn-neu flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium text-ink disabled:opacity-60"
         >
           <Save size={14} />
           {operation === "saving" ? t("keymap.edit.saving") : t("keymap.edit.save")}
@@ -2479,7 +2491,7 @@ function EditBar({ dirty, draftActive, operation, pendingCount, problem, keyWrit
         <button
           onClick={onDiscard}
           disabled={busy || !dirty}
-          className="flex items-center gap-1.5 rounded-pill bg-background px-3 py-1.5 text-sm font-medium text-muted ring-1 ring-border disabled:opacity-50"
+          className="btn-neu flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium text-ink disabled:opacity-60"
         >
           <Trash2 size={14} />
           {t("keymap.edit.discard")}
@@ -2487,7 +2499,7 @@ function EditBar({ dirty, draftActive, operation, pendingCount, problem, keyWrit
         <button
           onClick={onResetToKeymap}
           disabled={busy}
-          className="flex items-center gap-1.5 rounded-pill bg-red-50 px-3 py-1.5 text-sm font-medium text-red-700 ring-1 ring-red-100 disabled:opacity-50"
+          className="btn-neu flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium text-red-700 disabled:opacity-60"
         >
           <RotateCcw size={14} />
           {operation === "resetting" ? t("keymap.reset.resetting") : t("keymap.reset.action")}
@@ -2495,7 +2507,7 @@ function EditBar({ dirty, draftActive, operation, pendingCount, problem, keyWrit
         <button
           onClick={onEnd}
           disabled={busy}
-          className="flex items-center gap-1.5 rounded-pill bg-background px-3 py-1.5 text-sm font-medium text-muted ring-1 ring-border disabled:opacity-50"
+          className="btn-neu flex items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium text-ink disabled:opacity-60"
         >
           <LogOut size={14} />
           {t("keymap.edit.end")}
@@ -2545,11 +2557,11 @@ function comboLayerLabel(layerMask: number, layers: StudioLayer[]): string {
   if (layerMask === 0) return "すべて";
   const selected = layers
     .filter((layer) => (layerMask & (1 << layer.index)) !== 0)
-    .map((layer) => layer.name);
+    .map((layer) => `${layer.index}: ${layer.name}`);
   return selected.length > 0 ? selected.join(", ") : "指定なし";
 }
 
-function ComboEditor({ deviceId, hostLinkUid, refreshNonce, layoutKeys, keyLabels, catalog, layers, editing, disabled, onDirtyChange, onAvailabilityChange, onDraftChange }: {
+function ComboEditor({ deviceId, hostLinkUid, refreshNonce, layoutKeys, keyLabels, catalog, layers, editing, disabled, editBusy, editAvailable, onToggleEdit, onDirtyChange, onAvailabilityChange, onDraftChange }: {
   deviceId: string;
   hostLinkUid: string | null;
   refreshNonce: number;
@@ -2559,10 +2571,14 @@ function ComboEditor({ deviceId, hostLinkUid, refreshNonce, layoutKeys, keyLabel
   layers: StudioLayer[];
   editing: boolean;
   disabled: boolean;
+  editBusy: boolean;
+  editAvailable: boolean;
+  onToggleEdit: () => void;
   onDirtyChange: (dirty: boolean) => void;
   onAvailabilityChange: (available: boolean) => void;
   onDraftChange: (active: boolean) => void;
 }) {
+  const { t } = useLang();
   const [info, setInfo] = useState<ComboInfoDto | null>(null);
   const [items, setItems] = useState<Record<number, ComboItemDto>>({});
   const [slot, setSlot] = useState(0);
@@ -2576,6 +2592,7 @@ function ComboEditor({ deviceId, hostLinkUid, refreshNonce, layoutKeys, keyLabel
   const [working, setWorking] = useState(false);
   const [selectedBehavior, setSelectedBehavior] = useState<EditBehavior | null>(null);
   const [behaviorPicker, setBehaviorPicker] = useState<PickerRect | null>(null);
+  const [layerPicker, setLayerPicker] = useState<PickerRect | null>(null);
   const [draftActive, setDraftActive] = useState(false);
   const [creatingSlot, setCreatingSlot] = useState<number | null>(null);
 
@@ -2647,7 +2664,7 @@ function ComboEditor({ deviceId, hostLinkUid, refreshNonce, layoutKeys, keyLabel
     });
   }, [items, slot]);
 
-  const setNumber = (field: "layer_mask" | "timeout_ms" | "require_prior_idle_ms", value: string) => {
+  const setNumber = (field: "timeout_ms" | "require_prior_idle_ms", value: string) => {
     const parsed = value === "" ? null : Number(value);
     markDraftActive();
     setDraft((current) => ({ ...current, [field]: parsed === null ? null : Number.isFinite(parsed) ? parsed : 0 } as ComboItemDto));
@@ -2684,6 +2701,33 @@ function ComboEditor({ deviceId, hostLinkUid, refreshNonce, layoutKeys, keyLabel
     const positions = included ? current.key_positions.filter((value) => value !== position) : [...current.key_positions, position].sort((a, b) => a - b);
     return { ...current, key_positions: positions };
   });
+  const setAllLayers = () => {
+    if (draft.layer_mask === 0) return;
+    markDraftActive();
+    setDraft((current) => ({ ...current, layer_mask: 0 }));
+  };
+  const toggleLayer = (layerIndex: number) => {
+    if (draft.layer_mask !== 0 && draft.layer_mask === (1 << layerIndex)) return;
+    markDraftActive();
+    setDraft((current) => {
+      const bit = 1 << layerIndex;
+      const currentMask = current.layer_mask;
+      const selectedMask = currentMask === 0
+        ? 0
+        : currentMask;
+      const nextMask = currentMask === 0
+        ? bit
+        : (currentMask & bit) !== 0
+          ? currentMask & ~bit
+          : currentMask | bit;
+      if (nextMask === 0 && selectedMask !== 0) return current;
+      const allKnownLayers = layers.reduce((mask, layer) => mask | (1 << layer.index), 0);
+      return {
+        ...current,
+        layer_mask: allKnownLayers !== 0 && nextMask === allKnownLayers ? 0 : nextMask,
+      };
+    });
+  };
   const cancelDraft = () => {
     setMessage(null);
     setSelectedBehavior(null);
@@ -2719,25 +2763,25 @@ function ComboEditor({ deviceId, hostLinkUid, refreshNonce, layoutKeys, keyLabel
         {configuredSlots.map((current) => {
           const item = items[current];
           const selected = slot === current;
-          return <div key={current} className={`group flex items-center gap-1 rounded-md px-2 py-2 text-xs ${selected ? "bg-accent text-white" : "bg-surface text-ink ring-1 ring-border hover:bg-plate"}`}>
+          return <div key={current} className={`group flex items-center gap-1 rounded-md bg-surface px-2 py-2 text-xs text-ink ${selected ? "ring-2 ring-accent" : "ring-1 ring-border hover:bg-plate"}`}>
             <button disabled={selectionDisabled} onClick={() => selectSlot(current)} className="min-w-0 flex-1 text-left">
               <div className="truncate font-medium">{item.name}</div>
-              <div className={`mt-0.5 truncate font-mono text-[10px] ${selected ? "text-white/80" : "text-muted"}`}>{comboBindingLabel(item.binding)}</div>
-              <div className={`mt-1 truncate text-[10px] ${selected ? "text-white/80" : "text-faint"}`}>{comboLayerLabel(item.layer_mask, layers)}</div>
+              <div className="mt-0.5 truncate font-mono text-[10px] text-muted">{comboBindingLabel(item.binding)}</div>
+              <div className="mt-1 truncate text-[10px] text-faint">{comboLayerLabel(item.layer_mask, layers)}</div>
             </button>
-            {editing && <button type="button" disabled={mutationDisabled} onClick={() => void remove(current)} title={`${item.name} を削除`} aria-label={`${item.name} を削除`} className={`flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg disabled:opacity-50 ${selected ? "text-white/75 hover:bg-white/15 hover:text-white" : "text-disabled hover:bg-red-50 hover:text-red-500"}`}><Trash2 size={14} /></button>}
+            {editing && <button type="button" disabled={mutationDisabled} onClick={() => void remove(current)} title={`${item.name} を削除`} aria-label={`${item.name} を削除`} className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg text-disabled hover:bg-red-50 hover:text-red-500 disabled:opacity-50"><Trash2 size={14} /></button>}
           </div>;
         })}
         {newDraftVisible && (
-          <div className="flex items-center gap-1 rounded-md bg-accent px-2 py-2 text-xs text-white">
+          <div className="flex items-center gap-1 rounded-md bg-surface px-2 py-2 text-xs text-ink ring-2 ring-accent">
             <div className="min-w-0 flex-1 text-left">
               <div className="truncate font-medium">{draft.name || "新規Combo"}</div>
               {selectedBehavior && (
-                <div className="mt-0.5 truncate font-mono text-[10px] text-white/80">
+                <div className="mt-0.5 truncate font-mono text-[10px] text-muted">
                   {optimisticLabelsForBehavior(selectedBehavior, catalog).full_label}
                 </div>
               )}
-              <div className="mt-1 truncate text-[10px] text-white/80">{comboLayerLabel(draft.layer_mask, layers)}</div>
+              <div className="mt-1 truncate text-[10px] text-faint">{comboLayerLabel(draft.layer_mask, layers)}</div>
             </div>
           </div>
         )}
@@ -2754,18 +2798,51 @@ function ComboEditor({ deviceId, hostLinkUid, refreshNonce, layoutKeys, keyLabel
       {editing && nextEmptySlot === undefined && <div className="mt-2 text-center text-[10px] text-faint">登録上限に達しています</div>}
     </aside>
     <div className="space-y-4">
-      <div className="flex flex-wrap items-center justify-between gap-2"><div><div className="text-sm font-medium text-ink">Combo {slot + 1}</div><div className="text-xs text-muted">2〜{info.max_keys_per_combo} 個のキーを選択します</div></div></div>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div><div className="text-sm font-medium text-ink">Combo {slot + 1}</div><div className="text-xs text-muted">2〜{info.max_keys_per_combo} 個のキーを選択します</div></div>
+        {editAvailable && (
+          <button
+            type="button"
+            onClick={onToggleEdit}
+            disabled={editBusy}
+            className={`btn-neu flex shrink-0 items-center gap-1.5 rounded-full px-3 py-1.5 text-sm font-medium disabled:opacity-60 ${
+              editing ? "text-accent-deep" : "text-ink"
+            }`}
+          >
+            <Pencil size={14} />
+            {editing ? t("keymap.edit.on") : t("keymap.edit")}
+          </button>
+        )}
+      </div>
       <KeymapCanvas
         keys={layoutKeys}
         keyTitle={(key) => keyLabels.get(key.position) ?? `位置 ${key.position}`}
-        keyStyle={(key) => draft.key_positions.includes(key.position) ? { backgroundColor: "rgb(var(--accent-rgb))", color: "#fff" } : undefined}
+        keyStyle={(key) => draft.key_positions.includes(key.position) ? {
+          backgroundColor: "rgb(var(--accent-rgb) / 0.18)",
+          boxShadow: "inset 0 0 0 2px rgb(var(--accent-rgb) / 0.72)",
+        } : undefined}
         onKeyClick={editing ? (key) => togglePosition(key.position) : undefined}
         keyContent={(key) => <><span className="max-w-full truncate text-xs font-medium">{keyLabels.get(key.position) ?? `位置 ${key.position}`}</span><span className="mt-0.5 text-[10px] opacity-65">{key.position}</span></>}
       />
       <div className="grid gap-3 sm:grid-cols-2">
         <label className="text-sm text-muted">name<input value={draft.name} maxLength={15} disabled={mutationDisabled} onChange={(event) => { markDraftActive(); setDraft((current) => ({ ...current, name: event.target.value })); }} className="mt-1 w-full rounded-md bg-background px-3 py-2 text-ink ring-1 ring-border" /></label>
         <label title="comboを成立させるために、最初のキーを押してから残りのキーを押し終えるまでの制限時間です。" className="text-sm text-muted">timeout-ms<input type="number" min="1" max="1000" value={draft.timeout_ms} disabled={mutationDisabled} onChange={(event) => setNumber("timeout_ms", event.target.value)} className="mt-1 w-full rounded-md bg-background px-3 py-2 text-ink ring-1 ring-border" /></label>
-        <label className="text-sm text-muted">layers<input type="number" min="0" value={draft.layer_mask} disabled={mutationDisabled} onChange={(event) => setNumber("layer_mask", event.target.value)} className="mt-1 w-full rounded-md bg-background px-3 py-2 text-ink ring-1 ring-border" /></label>
+        <label className="text-sm text-muted">layers
+          <button
+            type="button"
+            disabled={mutationDisabled}
+            aria-haspopup="dialog"
+            aria-expanded={layerPicker !== null}
+            onClick={(event) => {
+              const rect = event.currentTarget.getBoundingClientRect();
+              setLayerPicker({ left: rect.left, top: rect.top, width: rect.width, height: rect.height });
+            }}
+            className="mt-1 flex w-full items-center justify-between gap-3 rounded-md bg-background px-3 py-2 text-left text-ink ring-1 ring-border hover:bg-plate disabled:cursor-default disabled:bg-background disabled:text-ink disabled:opacity-100 disabled:hover:bg-background"
+          >
+            <span className="truncate">{comboLayerLabel(draft.layer_mask, layers)}</span>
+            <ChevronDown size={16} className="flex-shrink-0 text-muted" aria-hidden="true" />
+          </button>
+        </label>
         <label title="comboの最初のキーを押す直前に通常キーが入力されていた場合、指定時間が経過するまでcomboを成立させません。高速入力中の意図しないcomboを防止できます。" className="text-sm text-muted">require-prior-idle-ms<input type="number" min="1" max="1000" value={draft.require_prior_idle_ms ?? ""} disabled={mutationDisabled} onChange={(event) => setNumber("require_prior_idle_ms", event.target.value)} className="mt-1 w-full rounded-md bg-background px-3 py-2 text-ink ring-1 ring-border" /></label>
         <label title="オフの場合、comboのキーを1つでも離すとcomboを解除します。オンの場合、すべてのキーを離したときに解除します。" className="flex items-center gap-2 pt-6 text-sm text-ink"><input type="checkbox" checked={draft.slow_release} disabled={mutationDisabled} onChange={(event) => { markDraftActive(); setDraft((current) => ({ ...current, slow_release: event.target.checked })); }} />slow-release</label>
       </div>
@@ -2779,17 +2856,19 @@ function ComboEditor({ deviceId, hostLinkUid, refreshNonce, layoutKeys, keyLabel
                 ? comboBindingLabel(draft.binding)
                 : ""}
           </span>
-          <button
-            type="button"
-            disabled={mutationDisabled}
-            onClick={(event) => {
-              const rect = event.currentTarget.getBoundingClientRect();
-              setBehaviorPicker({ left: rect.left, top: rect.top, width: rect.width, height: rect.height });
-            }}
-            className="rounded-pill bg-surface px-3 py-1.5 text-sm text-ink ring-1 ring-border disabled:opacity-50"
-          >
-            動作を選択
-          </button>
+          {editing && (
+            <button
+              type="button"
+              disabled={mutationDisabled}
+              onClick={(event) => {
+                const rect = event.currentTarget.getBoundingClientRect();
+                setBehaviorPicker({ left: rect.left, top: rect.top, width: rect.width, height: rect.height });
+              }}
+              className="rounded-pill bg-surface px-3 py-1.5 text-sm text-ink ring-1 ring-border disabled:opacity-50"
+            >
+              動作を選択
+            </button>
+          )}
         </div>
       </div>
       <div className="flex flex-wrap items-center justify-between gap-3 border-t border-border pt-3">
@@ -2814,7 +2893,74 @@ function ComboEditor({ deviceId, hostLinkUid, refreshNonce, layoutKeys, keyLabel
           }}
         />
       )}
+      {layerPicker && (
+        <LayerMaskPicker
+          rect={layerPicker}
+          layers={layers}
+          layerMask={draft.layer_mask}
+          onClose={() => setLayerPicker(null)}
+          onSelectAll={setAllLayers}
+          onToggleLayer={toggleLayer}
+        />
+      )}
   </div>;
+}
+
+function LayerMaskPicker({ rect, layers, layerMask, onClose, onSelectAll, onToggleLayer }: {
+  rect: PickerRect;
+  layers: StudioLayer[];
+  layerMask: number;
+  onClose: () => void;
+  onSelectAll: () => void;
+  onToggleLayer: (layerIndex: number) => void;
+}) {
+  const height = Math.min(72 + layers.length * 40, 320);
+  const position = popoverPosition(rect, Math.min(320, window.innerWidth - 24), height);
+  return (
+    <>
+      <button type="button" aria-label="レイヤー選択を閉じる" className="fixed inset-0 z-40 cursor-default bg-transparent" onClick={onClose} />
+      <div
+        className="fixed z-50 w-[min(320px,calc(100vw-24px))] overflow-hidden rounded-card bg-surface p-2 shadow-neu-up ring-1 ring-border"
+        style={{ left: position.left, top: position.top, maxHeight: "min(320px, calc(100vh - 24px))" }}
+        role="dialog"
+        aria-label="対象レイヤー"
+      >
+        <div className="px-2 py-1.5 text-xs text-muted">対象レイヤー</div>
+        <button
+          type="button"
+          role="checkbox"
+          aria-checked={layerMask === 0}
+          onClick={onSelectAll}
+          className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm text-ink hover:bg-plate"
+        >
+          <span className={`flex h-4 w-4 items-center justify-center rounded border ${layerMask === 0 ? "border-accent bg-accent text-white" : "border-border bg-background"}`}>
+            {layerMask === 0 && <Check size={12} strokeWidth={3} />}
+          </span>
+          すべてのレイヤー
+        </button>
+        <div className="my-1 border-t border-border" />
+        <div className="max-h-56 overflow-y-auto">
+          {layers.map((layer) => {
+            const selected = layerMask !== 0 && (layerMask & (1 << layer.index)) !== 0;
+            return <button
+              key={layer.id}
+              type="button"
+              role="checkbox"
+              aria-checked={selected}
+              onClick={() => onToggleLayer(layer.index)}
+              className="flex w-full items-center gap-2 rounded-lg px-2 py-2 text-left text-sm text-ink hover:bg-plate"
+            >
+              <span className={`flex h-4 w-4 items-center justify-center rounded border ${selected ? "border-accent bg-accent text-white" : "border-border bg-background"}`}>
+                {selected && <Check size={12} strokeWidth={3} />}
+              </span>
+              <span className="font-mono text-xs text-muted">{layer.index}</span>
+              <span className="truncate">{layer.name}</span>
+            </button>;
+          })}
+        </div>
+      </div>
+    </>
+  );
 }
 
 type PickerTab = "key" | "layer" | "tap_hold" | "bt_out" | "advanced";

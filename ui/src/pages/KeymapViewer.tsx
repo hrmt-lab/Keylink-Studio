@@ -2796,7 +2796,7 @@ function ComboEditor({ deviceId, hostLinkUid, refreshNonce, layoutKeys, keyLabel
         <div className={`text-sm ${validationMessage ? "text-red-700" : "text-muted"}`}>{validationMessage ?? message}</div>
         {editing && <div className="ml-auto flex gap-2">
           <button type="button" disabled={mutationDisabled || !draftActive} onClick={cancelDraft} className="btn-neu rounded-pill px-3 py-1.5 text-sm font-medium text-ink disabled:opacity-50">キャンセル</button>
-          <button disabled={!canApply} onClick={() => void apply()} className="rounded-pill bg-accent px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50">適用</button>
+          <button type="button" disabled={!canApply} onClick={() => void apply()} className="btn-neu rounded-pill px-3 py-1.5 text-sm font-medium text-ink disabled:opacity-50">適用</button>
         </div>}
       </div>
     </div>

@@ -465,6 +465,8 @@ export interface EncoderInfoDto {
   layer_count: number;
   encoder_count: number;
   capabilities: number;
+  scroll_value: number | null;
+  encoder_tap_ms: number | null;
 }
 
 export interface EncoderBindingDto {

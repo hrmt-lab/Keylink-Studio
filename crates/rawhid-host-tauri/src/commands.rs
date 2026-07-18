@@ -2752,6 +2752,8 @@ pub struct EncoderInfoDto {
     pub layer_count: u8,
     pub encoder_count: u8,
     pub capabilities: u8,
+    pub scroll_value: Option<u16>,
+    pub encoder_tap_ms: Option<u16>,
 }
 
 #[tauri::command]
@@ -2772,6 +2774,8 @@ pub async fn read_encoder_info(
             layer_count: info.layer_count,
             encoder_count: info.encoder_count,
             capabilities: info.capabilities,
+            scroll_value: info.scroll_value,
+            encoder_tap_ms: info.encoder_tap_ms,
         })
     })
     .await
@@ -4775,6 +4779,8 @@ mod tests {
                 layer_count: 2,
                 encoder_count: 2,
                 capabilities: 0,
+                scroll_value: None,
+                encoder_tap_ms: None,
             },
             &reset_snapshot(&[7, 3]),
         );

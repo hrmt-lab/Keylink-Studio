@@ -2686,33 +2686,24 @@ fn mouse_move_labels(value: u32) -> (String, String, String) {
 }
 
 fn mouse_scroll_labels(value: u32) -> (String, String, String) {
-    match value {
-        0x0000_000A => (
-            "Scroll Up".to_string(),
-            String::new(),
-            "&msc SCRL_UP".to_string(),
-        ),
-        0x0000_FFF6 => (
-            "Scroll Down".to_string(),
-            String::new(),
-            "&msc SCRL_DOWN".to_string(),
-        ),
-        0xFFF6_0000 => (
-            "Scroll Left".to_string(),
-            String::new(),
-            "&msc SCRL_LEFT".to_string(),
-        ),
-        0x000A_0000 => (
-            "Scroll Right".to_string(),
-            String::new(),
-            "&msc SCRL_RIGHT".to_string(),
-        ),
-        _ => (
-            format!("Scroll {}", value),
-            String::new(),
-            format!("&msc {}", value),
-        ),
-    }
+    let horizontal = (value >> 16) as u16 as i16;
+    let vertical = value as u16 as i16;
+
+    let (label, zmk) = match (horizontal, vertical) {
+        (0, amount) if amount > 0 => ("Scroll Up", "&msc SCRL_UP"),
+        (0, amount) if amount < 0 => ("Scroll Down", "&msc SCRL_DOWN"),
+        (amount, 0) if amount < 0 => ("Scroll Left", "&msc SCRL_LEFT"),
+        (amount, 0) if amount > 0 => ("Scroll Right", "&msc SCRL_RIGHT"),
+        _ => {
+            return (
+                format!("Scroll {}", value),
+                String::new(),
+                format!("&msc {}", value),
+            )
+        }
+    };
+
+    (label.to_string(), String::new(), zmk.to_string())
 }
 
 fn bluetooth_labels(command: u32, value: u32) -> (String, String, String) {

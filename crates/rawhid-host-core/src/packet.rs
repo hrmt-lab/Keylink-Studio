@@ -264,6 +264,12 @@ pub struct EncoderGetInfo {
     pub layer_count: u8,
     pub encoder_count: u8,
     pub capabilities: u8,
+    /// The keyboard's `ZMK_POINTING_DEFAULT_SCRL_VAL`, when firmware exposes
+    /// the extended GET_INFO response. `None` means an older firmware.
+    pub scroll_value: Option<u16>,
+    /// The sensor-rotate behavior's `tap-ms`, paired with `scroll_value` in
+    /// the extended response. This is informational to the host.
+    pub encoder_tap_ms: Option<u16>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -920,7 +926,14 @@ impl ConfigResponse {
             && self.feature == ConfigFeature::Encoder as u8
             && self.op == ConfigOp::GetInfo as u8
         {
-            4
+            if self
+                .encoder_get_info
+                .is_some_and(|info| info.scroll_value.is_some() && info.encoder_tap_ms.is_some())
+            {
+                8
+            } else {
+                4
+            }
         } else if self.status == ConfigStatus::Ok
             && self.feature == ConfigFeature::Encoder as u8
             && self.op == ConfigOp::GetBindings as u8
@@ -966,6 +979,13 @@ impl ConfigResponse {
             p[1] = info.encoder_count;
             p[2] = info.capabilities;
             p[3] = 0;
+            if let (Some(scroll_value), Some(encoder_tap_ms)) =
+                (info.scroll_value, info.encoder_tap_ms)
+            {
+                let extension = &mut bytes[PAYLOAD_OFFSET + 4..PAYLOAD_OFFSET + 8];
+                extension[0..2].copy_from_slice(&scroll_value.to_le_bytes());
+                extension[2..4].copy_from_slice(&encoder_tap_ms.to_le_bytes());
+            }
         }
         if let Some(bindings) = self.encoder_get_bindings {
             let p = &mut bytes[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 28];
@@ -1019,9 +1039,9 @@ impl ConfigResponse {
             && header.feature == ConfigFeature::Encoder as u8
             && header.op == ConfigOp::GetInfo as u8
         {
-            if header.payload_len != 4 {
+            if header.payload_len != 4 && header.payload_len != 8 {
                 return Err(PacketError::InvalidPayloadLength {
-                    max: 4,
+                    max: 8,
                     actual: header.payload_len,
                 });
             }
@@ -1033,6 +1053,20 @@ impl ConfigResponse {
                 layer_count: p[0],
                 encoder_count: p[1],
                 capabilities: p[2],
+                scroll_value: (header.payload_len == 8).then(|| {
+                    u16::from_le_bytes(
+                        bytes[PAYLOAD_OFFSET + 4..PAYLOAD_OFFSET + 6]
+                            .try_into()
+                            .unwrap(),
+                    )
+                }),
+                encoder_tap_ms: (header.payload_len == 8).then(|| {
+                    u16::from_le_bytes(
+                        bytes[PAYLOAD_OFFSET + 6..PAYLOAD_OFFSET + 8]
+                            .try_into()
+                            .unwrap(),
+                    )
+                }),
             });
         } else if status == ConfigStatus::Ok
             && header.feature == ConfigFeature::Encoder as u8
@@ -2440,6 +2474,8 @@ mod tests {
             layer_count: 4,
             encoder_count: 2,
             capabilities: 0,
+            scroll_value: Some(80),
+            encoder_tap_ms: Some(40),
         };
         let payload = ConfigResponse::encoder_get_info_ok(12, info).encode_payload();
 
@@ -2450,6 +2486,7 @@ mod tests {
         assert_eq!(decoded.op, ConfigOp::GetInfo as u8);
         assert_eq!(decoded.status, ConfigStatus::Ok);
         assert_eq!(decoded.encoder_get_info, Some(info));
+        assert_eq!(payload[8], 8);
     }
 
     #[test]
@@ -2588,6 +2625,8 @@ mod tests {
             layer_count: 4,
             encoder_count: 2,
             capabilities: 0,
+            scroll_value: None,
+            encoder_tap_ms: None,
         };
         let mut payload = ConfigResponse::encoder_get_info_ok(12, info).encode_payload();
         payload[PAYLOAD_OFFSET + 3] = 1;

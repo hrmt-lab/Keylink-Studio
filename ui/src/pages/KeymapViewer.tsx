@@ -406,7 +406,7 @@ function optimisticLabelsForBehavior(
     case "mouse_move":
       return commandLabel("mouse move", mouseCommandLabel(MOUSE_MOVE_COMMANDS, behavior.value, "&mmv"), [behavior.value, 0]);
     case "mouse_scroll":
-      return commandLabel("mouse scroll", mouseCommandLabel(MOUSE_SCROLL_COMMANDS, behavior.value, "&msc"), [behavior.value, 0]);
+      return commandLabel("mouse scroll", mouseScrollCommandLabel(behavior.value), [behavior.value, 0]);
     case "caps_word":
       return commandLabel("caps word", "&caps_word", [0, 0]);
     case "key_repeat":
@@ -499,6 +499,21 @@ function mouseCommandLabel(
   fallbackPrefix: string,
 ): string {
   return commands.find((command) => command.value === value)?.title ?? `${fallbackPrefix} ${value}`;
+}
+
+function mouseScrollCommandLabel(value: number): string {
+  const x = (value >>> 16) & 0xffff;
+  const y = value & 0xffff;
+  const signed = (component: number) =>
+    component & 0x8000 ? component - 0x1_0000 : component;
+  const horizontal = signed(x);
+  const vertical = signed(y);
+
+  if (horizontal === 0 && vertical > 0) return "&msc SCRL_UP";
+  if (horizontal === 0 && vertical < 0) return "&msc SCRL_DOWN";
+  if (horizontal < 0 && vertical === 0) return "&msc SCRL_LEFT";
+  if (horizontal > 0 && vertical === 0) return "&msc SCRL_RIGHT";
+  return `&msc 0x${value.toString(16).padStart(8, "0")}`;
 }
 
 export default function KeymapViewer({
@@ -643,12 +658,14 @@ export default function KeymapViewer({
   }, [editHostLinkUid, hostLinkUid]);
 
   const [encoderCount, setEncoderCount] = useState<number | null>(null);
+  const [scrollValue, setScrollValue] = useState(10);
   const [encoderBindings, setEncoderBindings] = useState<EncoderBindingsDto[]>([]);
   const [encoderError, setEncoderError] = useState<string | null>(null);
 
   useEffect(() => {
     const generation = ++encoderInfoGenerationRef.current;
     setEncoderCount(null);
+    setScrollValue(10);
     setEncoderError(null);
     const selectedDeviceChanged = encoderCacheDeviceRef.current !== selectedId;
     const physicalDeviceChanged =
@@ -683,6 +700,9 @@ export default function KeymapViewer({
         const info = await readEncoderInfo(uid);
         if (!cancelled && generation === encoderInfoGenerationRef.current) {
           setEncoderCount(info.encoder_count);
+          setScrollValue(info.scroll_value && info.scroll_value > 0 && info.scroll_value <= 0x7fff
+            ? info.scroll_value
+            : 10);
           setEncoderLoadState("available");
         }
       } catch (err) {
@@ -1997,6 +2017,7 @@ export default function KeymapViewer({
           layers={snapshot?.layers ?? []}
           rect={picker.rect}
           busy={editState.operation !== "idle"}
+          scrollValue={scrollValue}
           onClose={() => setPicker(null)}
           onSelect={(behavior) => void setKey(picker.key, picker.layer, behavior)}
         />
@@ -2010,6 +2031,7 @@ export default function KeymapViewer({
             rect={encoderPanel.rect}
             catalog={catalog}
             layers={snapshot?.layers ?? []}
+            scrollValue={scrollValue}
             busy={
               pendingEncoderWrites > 0 ||
               editState.operation === "saving" ||
@@ -2885,6 +2907,7 @@ function ComboEditor({ deviceId, hostLinkUid, refreshNonce, layoutKeys, keyLabel
           layers={layers}
           rect={behaviorPicker}
           busy={mutationDisabled}
+          allowInputTwoAxis
           onClose={() => setBehaviorPicker(null)}
           onSelect={(behavior) => {
             setSelectedBehavior(behavior);
@@ -3039,12 +3062,16 @@ const MOUSE_MOVE_COMMANDS = [
   { label: "Move Right", title: "&mmv MOVE_RIGHT", value: 0x0258_0000 },
 ];
 
-const MOUSE_SCROLL_COMMANDS = [
-  { label: "Scroll Up", title: "&msc SCRL_UP", value: 0x0000_000a },
-  { label: "Scroll Down", title: "&msc SCRL_DOWN", value: 0x0000_fff6 },
-  { label: "Scroll Left", title: "&msc SCRL_LEFT", value: 0xfff6_0000 },
-  { label: "Scroll Right", title: "&msc SCRL_RIGHT", value: 0x000a_0000 },
-];
+function mouseScrollCommands(scrollValue: number) {
+  const value = Math.max(1, Math.min(0x7fff, Math.trunc(scrollValue)));
+  const negative = (0x1_0000 - value) & 0xffff;
+  return [
+    { label: "Scroll Up", title: "&msc SCRL_UP", value },
+    { label: "Scroll Down", title: "&msc SCRL_DOWN", value: negative },
+    { label: "Scroll Left", title: "&msc SCRL_LEFT", value: negative * 0x1_0000 },
+    { label: "Scroll Right", title: "&msc SCRL_RIGHT", value: value * 0x1_0000 },
+  ];
+}
 
 const UTILITY_COMMANDS: Array<{ label: string; title: string; behavior: EditBehavior }> = [
   { label: "Caps Word", title: "&caps_word", behavior: { kind: "caps_word" } },
@@ -3119,7 +3146,7 @@ function ModifierToggleRow({ label, selectedIds, onToggle, busy }: {
   );
 }
 
-function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant = "key" }: {
+function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant = "key", scrollValue = 10, allowInputTwoAxis = false }: {
   catalog: KeyCatalogEntry[];
   layers: StudioLayer[];
   rect: PickerRect;
@@ -3130,9 +3157,13 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant
    *  (layer/tap-hold tabs, &trans, modifier-only keys, non-select &bt commands,
    *  utility/system/sticky behaviors); see keymap-encoder-editing-plan.md. */
   variant?: "key" | "encoder";
+  scrollValue?: number;
+  /** Combo and encoder Config RPCs permit behaviors without ZMK Studio metadata. */
+  allowInputTwoAxis?: boolean;
 }) {
   const { t } = useLang();
   const isEncoder = variant === "encoder";
+  const inputTwoAxisUnavailable = !isEncoder && !allowInputTwoAxis;
   const [tab, setTab] = useState<PickerTab>("key");
   const [layerBehavior, setLayerBehavior] = useState<LayerBehaviorKind | null>(null);
   const [tapHoldBehavior, setTapHoldBehavior] = useState<TapHoldBehaviorKind | null>(null);
@@ -3256,7 +3287,12 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant
   );
 
   const renderCommandButtons = (
-    commands: Array<{ label: string; title: string; behavior: EditBehavior }>,
+    commands: Array<{
+      label: string;
+      title: string;
+      behavior: EditBehavior;
+      unavailable?: boolean;
+    }>,
     confirmBeforeSelect = false,
   ) => (
     <div className="flex flex-wrap gap-1.5">
@@ -3264,14 +3300,15 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant
         <button
           key={command.title}
           type="button"
-          disabled={busy}
+          disabled={busy || command.unavailable}
           onClick={() => {
+            if (command.unavailable) return;
             if (confirmBeforeSelect && !window.confirm(t("keymap.edit.confirm_system_behavior"))) {
               return;
             }
             onSelect(command.behavior);
           }}
-          title={command.title}
+          title={command.unavailable ? t("keymap.edit.input_two_axis_unsupported") : command.title}
           className="rounded-md bg-background px-2.5 py-1.5 text-sm font-medium text-ink ring-1 ring-border hover:bg-plate disabled:opacity-50"
         >
           {command.label}
@@ -3572,10 +3609,12 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant
                 ...MOUSE_MOVE_COMMANDS.map((command) => ({
                   ...command,
                   behavior: { kind: "mouse_move", value: command.value } as EditBehavior,
+                  unavailable: inputTwoAxisUnavailable,
                 })),
-                ...MOUSE_SCROLL_COMMANDS.map((command) => ({
+                ...mouseScrollCommands(scrollValue).map((command) => ({
                   ...command,
                   behavior: { kind: "mouse_scroll", value: command.value } as EditBehavior,
+                  unavailable: inputTwoAxisUnavailable,
                 })),
               ])}
             </div>
@@ -3661,11 +3700,12 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant
  *  panel cancels without sending, leaving the encoder on its `.keymap`
  *  bindings (keymap-encoder-editing-plan.md).
  */
-function EncoderPanel({ binding, rect, catalog, layers, busy, onClose, onWrite }: {
+function EncoderPanel({ binding, rect, catalog, layers, scrollValue, busy, onClose, onWrite }: {
   binding: EncoderBindingsDto;
   rect: PickerRect;
   catalog: KeyCatalogEntry[];
   layers: StudioLayer[];
+  scrollValue: number;
   busy: boolean;
   onClose: () => void;
   onWrite: (cw: EditBehavior | null, ccw: EditBehavior | null) => void;
@@ -3769,6 +3809,7 @@ function EncoderPanel({ binding, rect, catalog, layers, busy, onClose, onWrite }
           layers={layers}
           rect={rect}
           busy={busy}
+          scrollValue={scrollValue}
           onClose={() => setPickDirection(null)}
           onSelect={handleSelect}
         />

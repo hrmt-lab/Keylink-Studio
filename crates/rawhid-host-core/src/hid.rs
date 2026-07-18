@@ -1210,6 +1210,8 @@ mod tests {
                 layer_count: 4,
                 encoder_count: 2,
                 capabilities: 0,
+                scroll_value: None,
+                encoder_tap_ms: None,
             },
         )
         .encode_payload();
@@ -1243,6 +1245,8 @@ mod tests {
                 layer_count: 1,
                 encoder_count: 1,
                 capabilities: 0,
+                scroll_value: None,
+                encoder_tap_ms: None,
             },
         )
         .encode_payload();
@@ -1252,6 +1256,8 @@ mod tests {
                 layer_count: 5,
                 encoder_count: 2,
                 capabilities: 0,
+                scroll_value: None,
+                encoder_tap_ms: None,
             },
         )
         .encode_payload();

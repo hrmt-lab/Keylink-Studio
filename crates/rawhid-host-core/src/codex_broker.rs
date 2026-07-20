@@ -1068,16 +1068,30 @@ async fn resolve_codex_executable(configured: Option<&Path>) -> Result<PathBuf, 
             "codex was not found on PATH".to_string(),
         ));
     }
-    let path = String::from_utf8_lossy(&output.stdout)
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| {
-            CodexBrokerError::ExecutableNotFound("codex was not found on PATH".to_string())
-        })?;
+    let path = select_codex_executable(&output.stdout).ok_or_else(|| {
+        CodexBrokerError::ExecutableNotFound("codex was not found on PATH".to_string())
+    })?;
     fs::canonicalize(&path)
         .map_err(|_| CodexBrokerError::ExecutableNotFound(path.display().to_string()))
+}
+
+fn select_codex_executable(output: &[u8]) -> Option<PathBuf> {
+    String::from_utf8_lossy(output)
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(PathBuf::from)
+        .find(|path| {
+            if !cfg!(windows) {
+                return true;
+            }
+            path.extension().is_some_and(|extension| {
+                matches!(
+                    extension.to_string_lossy().to_ascii_lowercase().as_str(),
+                    "com" | "exe" | "bat" | "cmd"
+                )
+            })
+        })
 }
 
 async fn verify_codex_and_schema(
@@ -1177,7 +1191,13 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
 
 fn make_cli_connection_command(executable: &Path, token_path: &Path, broker_port: u16) -> String {
     fn quote(value: &Path) -> String {
-        format!("'{}'", value.to_string_lossy().replace('\'', "''"))
+        let value = value.to_string_lossy();
+        let value = if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+            format!(r"\\{unc}")
+        } else {
+            value.strip_prefix(r"\\?\").unwrap_or(&value).to_string()
+        };
+        format!("'{}'", value.replace('\'', "''"))
     }
     format!(
         "$env:KEYLINK_CODEX_BROKER_TOKEN = Get-Content -LiteralPath {} -Raw; & {} --remote ws://127.0.0.1:{} --remote-auth-token-env KEYLINK_CODEX_BROKER_TOKEN",
@@ -1295,4 +1315,37 @@ fn schedule_waiting_for_client_after_grace(status: Arc<RwLock<CodexBrokerStatus>
             current.phase = CodexBrokerPhase::WaitingForClient;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{make_cli_connection_command, select_codex_executable};
+    use std::path::{Path, PathBuf};
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_path_resolution_skips_extensionless_npm_shim() {
+        let output = b"C:\\Users\\test\\AppData\\Roaming\\npm\\codex\r\nC:\\Users\\test\\AppData\\Roaming\\npm\\codex.cmd\r\n";
+
+        assert_eq!(
+            select_codex_executable(output),
+            Some(PathBuf::from(
+                r"C:\Users\test\AppData\Roaming\npm\codex.cmd"
+            ))
+        );
+    }
+
+    #[test]
+    fn cli_command_removes_windows_verbatim_path_prefixes() {
+        let command = make_cli_connection_command(
+            Path::new(r"\\?\C:\Users\test\AppData\Roaming\npm\codex.cmd"),
+            Path::new(r"\\?\C:\Users\test\AppData\Local\Temp\broker.token"),
+            4501,
+        );
+
+        assert!(command.contains(r"& 'C:\Users\test\AppData\Roaming\npm\codex.cmd'"));
+        assert!(command
+            .contains(r"Get-Content -LiteralPath 'C:\Users\test\AppData\Local\Temp\broker.token'"));
+        assert!(!command.contains(r"\\?\"));
+    }
 }

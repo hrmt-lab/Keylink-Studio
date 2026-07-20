@@ -69,7 +69,7 @@ pub struct AppState {
     pub monitor_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<MonitorCommand>>>>,
     pub ai_usage_refreshing: Arc<AtomicBool>,
     pub ai_usage_runtime: Arc<Mutex<Option<AiUsageRuntime>>>,
-    pub codex_activity: CodexActivityRuntime,
+    pub codex_activity: Arc<CodexActivityRuntime>,
     pub codex_broker: CodexBrokerManager,
     pub key_stats: SharedKeyStatsStore,
     pub studio_edit: Arc<Mutex<Option<StudioEditSession>>>,
@@ -147,7 +147,7 @@ pub enum HostLinkResponse {
 impl AppState {
     pub fn new(config: AppConfig, config_path: Option<PathBuf>) -> Self {
         let codex_broker = CodexBrokerManager::new();
-        let codex_activity = CodexActivityRuntime::start(codex_broker.clone());
+        let codex_activity = Arc::new(CodexActivityRuntime::start(codex_broker.clone()));
         let ai_usage_runtime = AiUsageRuntime::start(config.ai_usage.clone());
         let ai_usage_statuses = ai_usage_runtime
             .as_ref()

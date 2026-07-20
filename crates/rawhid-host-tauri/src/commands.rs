@@ -14,13 +14,14 @@ use rawhid_host_core::hid::DeviceInfo;
 use rawhid_host_core::{
     active_app::SystemActiveAppProvider,
     ai_usage::{AiUsageRefreshError, AiUsageRuntime, AiUsageShared},
-    codex_activity::AiClientStateSnapshot,
+    codex_activity::{AiClientStateSnapshot, CodexActivityRuntime},
     codex_broker::{CodexBrokerConfig, CodexBrokerStatus},
     config::{load_config, ActionsConfig, AppConfig, ConfigPaths},
     hid::{HidDeviceManager, HidError, ProbeResult},
     packet::{
-        ComboBinding, ComboInfo, ComboItem, ConfigStatus, EncoderBinding, EncoderBindingFlags,
-        EncoderBindingSource, EncoderGetBindings, EncoderGetInfo, UplinkPacket,
+        AiClientStatePacket, ComboBinding, ComboInfo, ComboItem, ConfigStatus, EncoderBinding,
+        EncoderBindingFlags, EncoderBindingSource, EncoderGetBindings, EncoderGetInfo,
+        UplinkPacket,
     },
     runner::{uplink_device_key, RunEvent, Runner},
     stats::{KeyStatsSummary, SharedKeyStatsStore, StatsPeriod},
@@ -54,6 +55,12 @@ pub struct MonitorExtras {
     pub ai_usage_runtime: Arc<std::sync::Mutex<Option<AiUsageRuntime>>>,
     pub ai_usage_refreshing: Arc<AtomicBool>,
     pub key_stats: SharedKeyStatsStore,
+    pub codex_activity: Arc<CodexActivityRuntime>,
+}
+
+#[derive(Default)]
+struct AiClientStateSendTracker {
+    last_device_generation: Option<u64>,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -3604,6 +3611,7 @@ pub fn start_host_link_worker(
         ai_usage_runtime: Arc::clone(&state.ai_usage_runtime),
         ai_usage_refreshing: Arc::clone(&state.ai_usage_refreshing),
         key_stats: Arc::clone(&state.key_stats),
+        codex_activity: Arc::clone(&state.codex_activity),
     };
 
     let (tx, rx) = mpsc::channel();
@@ -3845,6 +3853,58 @@ fn apply_runner_view(s: &mut MonitorStatus, runner: &MonitorRunner) {
     s.ai_usage = runner.ai_usage_statuses();
     s.device_battery = runner.battery_statuses();
     s.device_layers = runner.layer_states();
+}
+
+fn sync_ai_client_state(
+    runner: &mut MonitorRunner,
+    activity: &CodexActivityRuntime,
+    tracker: &mut AiClientStateSendTracker,
+) -> Result<(), String> {
+    let device_generation = runner.device_generation();
+    let mut sent_change = false;
+
+    while let Some(change) = activity.try_recv_change() {
+        if !runner.has_ai_client_state_device() {
+            tracker.last_device_generation = None;
+            continue;
+        }
+        let state = change.state;
+        let packet = AiClientStatePacket::new(
+            state.client_type,
+            state.client_variant as u8,
+            state.session_active,
+            state.activity_state,
+            state.revision,
+        )
+        .map_err(|error| error.to_string())?;
+        runner
+            .send_ai_client_state(packet)
+            .map_err(|error| error.to_string())?;
+        sent_change = true;
+    }
+
+    if !sent_change
+        && tracker.last_device_generation != Some(device_generation)
+        && runner.has_ai_client_state_device()
+    {
+        let state = activity.snapshot();
+        let packet = AiClientStatePacket::new(
+            state.client_type,
+            state.client_variant as u8,
+            state.session_active,
+            state.activity_state,
+            state.revision,
+        )
+        .map_err(|error| error.to_string())?;
+        runner
+            .send_ai_client_state(packet)
+            .map_err(|error| error.to_string())?;
+    }
+
+    if runner.has_ai_client_state_device() {
+        tracker.last_device_generation = Some(device_generation);
+    }
+    Ok(())
 }
 
 fn apply_monitor_config(
@@ -4224,6 +4284,7 @@ fn run_monitor_loop(
 
     let mut interval = Duration::from_millis(config.polling.interval_ms.max(1));
     let mut uplink_interval = Duration::from_millis(config.polling.uplink_interval_ms.max(5));
+    let mut ai_client_state_send = AiClientStateSendTracker::default();
 
     loop {
         let mut should_stop = false;
@@ -4342,6 +4403,21 @@ fn run_monitor_loop(
                     emit_status(&app, &s);
                 }
             }
+        }
+
+        if let Err(error) = sync_ai_client_state(
+            &mut runner,
+            &extras.codex_activity,
+            &mut ai_client_state_send,
+        ) {
+            let msg = format!("AI client state send error: {error}");
+            let entry = add_log(&log_entries, &log_counter, "error", &msg);
+            {
+                let mut s = status.lock().unwrap();
+                s.last_error = Some(msg);
+                emit_status(&app, &s);
+            }
+            let _ = app.emit("log-added", entry);
         }
 
         // Wait for the next control-loop tick, draining uplink every uplink_interval_ms.

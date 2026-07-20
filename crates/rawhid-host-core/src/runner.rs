@@ -15,8 +15,8 @@ use crate::{
     config::{AppConfig, UnmatchedAction},
     hid::{DeviceInfo, HidDeviceManager, HidError, HidTransport, ProbeResult},
     packet::{
-        ComboInfo, ComboItem, EncoderBinding, EncoderGetBindings, EncoderGetInfo, UplinkPacket,
-        CAPABILITY_CONFIG_RPC,
+        AiClientStatePacket, ComboInfo, ComboItem, EncoderBinding, EncoderGetBindings,
+        EncoderGetInfo, UplinkPacket, CAPABILITY_AI_CLIENT_STATE, CAPABILITY_CONFIG_RPC,
     },
     stats::SharedKeyStatsStore,
     time::{Clock, SystemClock, TimeError, TimeSnapshot, TimeSyncState},
@@ -495,6 +495,23 @@ where
 
     pub fn verified_devices(&self) -> Vec<DeviceInfo> {
         self.hid.verified_devices().to_vec()
+    }
+
+    /// Generation of the verified Host Link device set. A change means the
+    /// current AI client state must be sent again to newly connected devices.
+    pub fn device_generation(&self) -> u64 {
+        self.hid.device_generation()
+    }
+
+    pub fn has_ai_client_state_device(&self) -> bool {
+        self.hid
+            .verified_devices()
+            .iter()
+            .any(|device| device.capabilities & CAPABILITY_AI_CLIENT_STATE != 0)
+    }
+
+    pub fn send_ai_client_state(&mut self, state: AiClientStatePacket) -> Result<usize, HidError> {
+        self.hid.send_ai_client_state(state)
     }
 
     pub fn ai_usage_statuses(&self) -> Vec<AiUsageProviderStatus> {

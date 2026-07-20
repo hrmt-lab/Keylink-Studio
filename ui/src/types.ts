@@ -106,6 +106,7 @@ export type CodexBrokerPhase =
   | "starting"
   | "waiting_for_client"
   | "connected"
+  | "reconnecting"
   | "stopping"
   | "error";
 

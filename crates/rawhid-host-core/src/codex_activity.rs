@@ -447,6 +447,14 @@ impl CodexEventAdapter {
         if self.server_requests.remove(&key).is_some() {
             return vec![AiClientEvent::RequestResolved { key }];
         }
+        self.handle_thread_response(key, metadata)
+    }
+
+    fn handle_thread_response(
+        &mut self,
+        key: String,
+        metadata: JsonRpcMetadata,
+    ) -> Vec<AiClientEvent> {
         let Some(request) = self.client_requests.remove(&key) else {
             return Vec::new();
         };
@@ -462,23 +470,35 @@ impl CodexEventAdapter {
             self.announced_thread_id = None;
             return vec![AiClientEvent::SessionEnded];
         }
-        self.confirmed_thread_id = Some(result_thread_id.clone());
         match request {
-            PendingClientRequest::ThreadStart => vec![AiClientEvent::SessionStarted {
-                thread_id: result_thread_id,
-            }],
-            PendingClientRequest::ThreadResume {
-                requested_thread_id,
-            } if requested_thread_id == result_thread_id => {
+            PendingClientRequest::ThreadStart => {
+                self.confirmed_thread_id = Some(result_thread_id.clone());
                 vec![AiClientEvent::SessionStarted {
                     thread_id: result_thread_id,
                 }]
             }
-            PendingClientRequest::ThreadResume { .. } => Vec::new(),
+            PendingClientRequest::ThreadResume {
+                requested_thread_id,
+            } if requested_thread_id == result_thread_id => {
+                self.confirmed_thread_id = Some(result_thread_id.clone());
+                vec![AiClientEvent::SessionStarted {
+                    thread_id: result_thread_id,
+                }]
+            }
+            PendingClientRequest::ThreadResume { .. } => {
+                self.confirmed_thread_id = None;
+                vec![AiClientEvent::SessionEnded]
+            }
         }
     }
 
     fn adapt_server_message(&mut self, metadata: JsonRpcMetadata) -> Vec<AiClientEvent> {
+        if metadata.kind == JsonRpcKind::Response {
+            let Some(key) = metadata.id.as_ref().and_then(rpc_key) else {
+                return Vec::new();
+            };
+            return self.handle_thread_response(key, metadata);
+        }
         match (metadata.kind, metadata.method.as_deref()) {
             (JsonRpcKind::Notification, Some("thread/started")) => {
                 let Some(thread_id) = metadata.thread_id else {
@@ -713,4 +733,308 @@ fn initial_revision() -> u16 {
         .map(|duration| duration.as_nanos() as u64)
         .unwrap_or_default();
     (nanos ^ u64::from(std::process::id())) as u16
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const THREAD_A: &str = "thread-a";
+    const THREAD_B: &str = "thread-b";
+    const TURN_A: &str = "turn-a";
+
+    fn apply_one(
+        reducer: &mut AiClientStateReducer,
+        event: AiClientEvent,
+        now: Instant,
+    ) -> AiClientStateChange {
+        let changes = reducer.apply(event, now);
+        assert_eq!(changes.len(), 1);
+        changes[0]
+    }
+
+    fn start_session(reducer: &mut AiClientStateReducer, now: Instant) -> AiClientStateChange {
+        apply_one(
+            reducer,
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        )
+    }
+
+    fn start_turn(reducer: &mut AiClientStateReducer, now: Instant) -> AiClientStateChange {
+        apply_one(
+            reducer,
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_A.to_string(),
+                turn_id: TURN_A.to_string(),
+            },
+            now,
+        )
+    }
+
+    fn message(direction: BrokerDirection, json: &str) -> CodexBrokerEvent {
+        CodexBrokerEvent::Message {
+            connection_id: "connection-1".to_string(),
+            direction,
+            metadata: Box::new(crate::codex_broker::classify_json_rpc(json)),
+        }
+    }
+
+    #[test]
+    fn first_state_uses_initial_revision_and_subsequent_states_wrap() {
+        let now = Instant::now();
+        let mut reducer = AiClientStateReducer::with_initial_revision(u16::MAX);
+
+        let session = start_session(&mut reducer, now);
+        assert_eq!(session.reason, AiClientStateChangeReason::SessionStarted);
+        assert_eq!(session.state.revision, u16::MAX);
+        assert_eq!(session.state.activity_state, AiActivityState::Available);
+
+        let turn = start_turn(&mut reducer, now);
+        assert_eq!(turn.state.revision, 0);
+        assert_eq!(turn.state.activity_state, AiActivityState::Working);
+    }
+
+    #[test]
+    fn approval_has_priority_over_input_and_resolution_restores_prior_state() {
+        let now = Instant::now();
+        let mut reducer = AiClientStateReducer::with_initial_revision(10);
+        start_session(&mut reducer, now);
+        start_turn(&mut reducer, now);
+
+        let input = apply_one(
+            &mut reducer,
+            AiClientEvent::RequestStarted {
+                key: "input".to_string(),
+                kind: RequestKind::Input,
+                thread_id: THREAD_A.to_string(),
+                turn_id: Some(TURN_A.to_string()),
+            },
+            now,
+        );
+        assert_eq!(input.state.activity_state, AiActivityState::WaitingInput);
+
+        let approval = apply_one(
+            &mut reducer,
+            AiClientEvent::RequestStarted {
+                key: "approval".to_string(),
+                kind: RequestKind::Approval,
+                thread_id: THREAD_A.to_string(),
+                turn_id: Some(TURN_A.to_string()),
+            },
+            now,
+        );
+        assert_eq!(
+            approval.state.activity_state,
+            AiActivityState::WaitingApproval
+        );
+
+        let after_approval = apply_one(
+            &mut reducer,
+            AiClientEvent::RequestResolved {
+                key: "approval".to_string(),
+            },
+            now,
+        );
+        assert_eq!(
+            after_approval.state.activity_state,
+            AiActivityState::WaitingInput
+        );
+
+        let after_input = apply_one(
+            &mut reducer,
+            AiClientEvent::RequestResolved {
+                key: "input".to_string(),
+            },
+            now,
+        );
+        assert_eq!(after_input.state.activity_state, AiActivityState::Working);
+    }
+
+    #[test]
+    fn completed_failed_and_interrupted_turns_follow_the_contract() {
+        let now = Instant::now();
+        let outcomes = [
+            (TurnOutcome::Completed, AiActivityState::Completed),
+            (TurnOutcome::Failed, AiActivityState::Error),
+            (TurnOutcome::InterruptedWithError, AiActivityState::Error),
+            (TurnOutcome::Interrupted, AiActivityState::Available),
+        ];
+
+        for (outcome, expected) in outcomes {
+            let mut reducer = AiClientStateReducer::with_initial_revision(1);
+            start_session(&mut reducer, now);
+            start_turn(&mut reducer, now);
+            let change = apply_one(
+                &mut reducer,
+                AiClientEvent::TurnFinished {
+                    thread_id: THREAD_A.to_string(),
+                    turn_id: TURN_A.to_string(),
+                    outcome,
+                },
+                now,
+            );
+            assert_eq!(change.state.activity_state, expected);
+            assert!(change.state.session_active);
+        }
+    }
+
+    #[test]
+    fn reconnecting_same_thread_preserves_state_and_revision_until_grace_expires() {
+        let now = Instant::now();
+        let mut reducer = AiClientStateReducer::with_initial_revision(100);
+        start_session(&mut reducer, now);
+        let working = start_turn(&mut reducer, now);
+
+        assert!(reducer
+            .apply(AiClientEvent::ClientDisconnected, now)
+            .is_empty());
+        assert!(reducer
+            .apply(
+                AiClientEvent::SessionStarted {
+                    thread_id: THREAD_A.to_string(),
+                },
+                now + Duration::from_secs(1),
+            )
+            .is_empty());
+        assert_eq!(reducer.snapshot(), working.state);
+
+        assert!(reducer
+            .apply(
+                AiClientEvent::ClientDisconnected,
+                now + Duration::from_secs(2)
+            )
+            .is_empty());
+        let changes = reducer.tick(now + Duration::from_secs(6));
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].state.activity_state, AiActivityState::None);
+        assert!(!changes[0].state.session_active);
+        assert_eq!(
+            changes[0].state.revision,
+            working.state.revision.wrapping_add(1)
+        );
+    }
+
+    #[test]
+    fn replacing_a_session_emits_none_before_new_thread_becomes_available() {
+        let now = Instant::now();
+        let mut reducer = AiClientStateReducer::with_initial_revision(1);
+        start_session(&mut reducer, now);
+
+        let ended = apply_one(
+            &mut reducer,
+            AiClientEvent::SessionRequested {
+                requested_thread_id: Some(THREAD_B.to_string()),
+            },
+            now,
+        );
+        assert_eq!(ended.reason, AiClientStateChangeReason::SessionReplaced);
+        assert_eq!(ended.state.activity_state, AiActivityState::None);
+
+        let new_session = apply_one(
+            &mut reducer,
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_B.to_string(),
+            },
+            now,
+        );
+        assert_eq!(new_session.state.activity_state, AiActivityState::Available);
+        assert!(new_session.state.session_active);
+    }
+
+    #[test]
+    fn adapter_correlates_thread_turn_and_response_required_requests() {
+        let mut adapter = CodexEventAdapter::default();
+        assert!(adapter
+            .adapt(CodexBrokerEvent::ClientConnected {
+                connection_id: "connection-1".to_string(),
+            })
+            .is_empty());
+
+        let events = adapter.adapt(message(
+            BrokerDirection::CliToAppServer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"thread/start","params":{}}"#,
+        ));
+        assert!(matches!(
+            events.as_slice(),
+            [AiClientEvent::SessionRequested {
+                requested_thread_id: None
+            }]
+        ));
+
+        let events = adapter.adapt(message(
+            BrokerDirection::AppServerToCli,
+            r#"{"jsonrpc":"2.0","id":1,"result":{"thread":{"id":"thread-a"}}}"#,
+        ));
+        assert!(matches!(
+            events.as_slice(),
+            [AiClientEvent::SessionStarted { thread_id }] if thread_id == THREAD_A
+        ));
+
+        assert!(adapter
+            .adapt(message(
+                BrokerDirection::AppServerToCli,
+                r#"{"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":"thread-a"}}}"#,
+            ))
+            .is_empty());
+
+        let events = adapter.adapt(message(
+            BrokerDirection::AppServerToCli,
+            r#"{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thread-a","turn":{"id":"turn-a","status":"inProgress"}}}"#,
+        ));
+        assert!(matches!(
+            events.as_slice(),
+            [AiClientEvent::TurnStarted { thread_id, turn_id }]
+                if thread_id == THREAD_A && turn_id == TURN_A
+        ));
+
+        let events = adapter.adapt(message(
+            BrokerDirection::AppServerToCli,
+            r#"{"jsonrpc":"2.0","id":99,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-a","turnId":"turn-a","item":{"id":"item-a"}}}"#,
+        ));
+        assert!(matches!(
+            events.as_slice(),
+            [AiClientEvent::RequestStarted {
+                key,
+                kind: RequestKind::Approval,
+                thread_id,
+                turn_id,
+            }] if key == "n:99"
+                && thread_id == THREAD_A
+                && turn_id.as_deref() == Some(TURN_A)
+        ));
+
+        let events = adapter.adapt(message(
+            BrokerDirection::CliToAppServer,
+            r#"{"jsonrpc":"2.0","id":99,"result":{}}"#,
+        ));
+        assert!(matches!(
+            events.as_slice(),
+            [AiClientEvent::RequestResolved { key }] if key == "n:99"
+        ));
+    }
+
+    #[test]
+    fn adapter_ends_the_session_when_thread_started_identity_does_not_match() {
+        let mut adapter = CodexEventAdapter::default();
+        adapter.adapt(CodexBrokerEvent::ClientConnected {
+            connection_id: "connection-1".to_string(),
+        });
+        adapter.adapt(message(
+            BrokerDirection::CliToAppServer,
+            r#"{"jsonrpc":"2.0","id":"start","method":"thread/start","params":{}}"#,
+        ));
+        adapter.adapt(message(
+            BrokerDirection::AppServerToCli,
+            r#"{"jsonrpc":"2.0","id":"start","result":{"thread":{"id":"thread-a"}}}"#,
+        ));
+
+        let events = adapter.adapt(message(
+            BrokerDirection::AppServerToCli,
+            r#"{"jsonrpc":"2.0","method":"thread/started","params":{"thread":{"id":"thread-b"}}}"#,
+        ));
+        assert!(matches!(events.as_slice(), [AiClientEvent::SessionEnded]));
+    }
 }

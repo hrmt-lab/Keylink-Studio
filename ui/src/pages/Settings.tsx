@@ -356,7 +356,7 @@ function CodexIntegration({
     try {
       setBroker(action === "start" ? await startCodexIntegration() : await stopCodexIntegration());
     } catch (error) {
-      setActionError(friendlyError(error, t));
+      setActionError(String(error));
     } finally {
       setBusy(false);
     }
@@ -399,7 +399,7 @@ function CodexIntegration({
           </p>
         )}
       </div>
-      {(actionError || broker?.last_error) && <div className="border-t border-background px-5 py-3"><ErrorNotice message={t("settings.codex.error")} details={actionError ?? broker?.last_error} /></div>}
+      {(actionError || broker?.last_error) && <div className="border-t border-background px-5 py-3"><ErrorNotice message={t("settings.codex.error")} details={broker?.last_error ?? actionError} /></div>}
       <SettingRow label={t("settings.codex.executable")} description={t("settings.codex.executable.desc")} align="start">
         <input className="input w-64 max-w-full font-mono text-xs" value={codex.executable_path ?? ""} disabled={!editable} onChange={(event) => updateCodex({ executable_path: event.target.value.trim() || null })} placeholder={t("settings.codex.path_placeholder")} />
       </SettingRow>

@@ -21,15 +21,17 @@ pub use config::{
 };
 pub use hid::{DeviceConnectionType, DeviceInfo, HidDeviceManager, HidTransport, ProbeResult};
 pub use packet::{
-    AiUsageErrorCode, AiUsageFlags, AiUsagePacket, AiUsageProvider, AppLayerAction, BatteryEntry,
+    AiActivityState, AiClientStatePacket, AiClientType, AiClientVariant, AiUsageErrorCode,
+    AiUsageFlags, AiUsagePacket, AiUsageProvider, AppLayerAction, BatteryEntry,
     BatteryStatusPacket, ComboBinding, ComboConfigOp, ComboFlags, ComboInfo, ComboInfoFlags,
     ComboItem, ComboName, ConfigFeature, ConfigOp, ConfigRequest, ConfigResponse, ConfigStatus,
     DeviceHello, EncoderBinding, EncoderBindingFlags, EncoderBindingSource, EncoderGetBindings,
     EncoderGetInfo, HostActionPacket, KeyStatsEntry, KeyStatsPacket, LayerStatePacket, Packet,
-    PacketType, TimeSyncPacket, UplinkPacket, CAPABILITY_AI_USAGE, CAPABILITY_APP_LAYER,
-    CAPABILITY_BATTERY, CAPABILITY_CONFIG_RPC, CAPABILITY_HOST_ACTION, CAPABILITY_KEY_STATS,
-    CAPABILITY_LAYER_STATE, CAPABILITY_THEME, CAPABILITY_TIME_SYNC, COMBO_ITEM_LEN, COMBO_MAX_KEYS,
-    COMBO_MAX_SLOTS, COMBO_NAME_LEN, PACKET_SIZE, REPORT_SIZE,
+    PacketType, TimeSyncPacket, UplinkPacket, CAPABILITY_AI_CLIENT_STATE, CAPABILITY_AI_USAGE,
+    CAPABILITY_APP_LAYER, CAPABILITY_BATTERY, CAPABILITY_CONFIG_RPC, CAPABILITY_HOST_ACTION,
+    CAPABILITY_KEY_STATS, CAPABILITY_LAYER_STATE, CAPABILITY_THEME, CAPABILITY_TIME_SYNC,
+    COMBO_ITEM_LEN, COMBO_MAX_KEYS, COMBO_MAX_SLOTS, COMBO_NAME_LEN, FEATURE_AI_CLIENT,
+    FEATURE_SYSTEM, PACKET_SIZE, REPORT_SIZE,
 };
 pub use runner::{
     uplink_device_key, DeviceBatterySource, DeviceBatteryStatus, DeviceLayerState, RunEvent,

@@ -120,7 +120,7 @@ Comboの`combo-set` / `combo-delete` / `combo-save` / `combo-discard` / `combo-r
 5. `Devices` 画面右上の`監視開始`を押します。
 
 HELLO verification に失敗する場合は、ZMK 側の Raw HID、Usage Page / Usage、reserved bytes zero、`seq` の扱いを確認してください。
-BLE 接続で不安定な場合は、`hid.hello_timeout_ms` を確認してください。既定は 750ms です。設定画面で変更した場合、監視中なら設定保存後に runner が再構築され、手動のアプリ再起動は不要です。
+BLE 接続で不安定な場合は、`hid.hello_timeout_ms` を確認してください。既定は 500ms です。設定画面で変更した場合、監視中なら設定保存後に runner が再構築され、手動のアプリ再起動は不要です。
 
 ## 設定ファイル
 
@@ -146,7 +146,7 @@ interval_ms = 500
 [hid]
 usage_page = 65376
 usage = 97
-hello_timeout_ms = 750
+hello_timeout_ms = 500
 
 [layer_switch]
 enabled = true

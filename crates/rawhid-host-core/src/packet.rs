@@ -19,6 +19,9 @@ pub const CAPABILITY_KEY_STATS: u32 = 1 << 6;
 pub const CAPABILITY_LAYER_STATE: u32 = 1 << 7;
 pub const CAPABILITY_KEY_PRESS: u32 = 1 << 8;
 pub const CAPABILITY_CONFIG_RPC: u32 = 1 << 9;
+pub const CAPABILITY_AI_CLIENT_STATE: u32 = 1 << 10;
+pub const FEATURE_SYSTEM: u8 = 0x00;
+pub const FEATURE_AI_CLIENT: u8 = 0x0A;
 
 pub const BATTERY_LEVEL_UNKNOWN: u8 = 0xFF;
 pub const KEY_STATS_MAX_ENTRIES: usize = 8;
@@ -48,6 +51,7 @@ pub enum PacketType {
     KeyPress = 0x80,
     ConfigRequest = 0x90,
     ConfigResponse = 0x91,
+    StateUpdate = 0xA0,
 }
 
 impl TryFrom<u8> for PacketType {
@@ -70,6 +74,7 @@ impl TryFrom<u8> for PacketType {
             0x80 => Ok(Self::KeyPress),
             0x90 => Ok(Self::ConfigRequest),
             0x91 => Ok(Self::ConfigResponse),
+            0xA0 => Ok(Self::StateUpdate),
             other => Err(PacketError::UnknownType(other)),
         }
     }
@@ -192,6 +197,32 @@ pub enum AiUsageErrorCode {
     ParseFailed = 7,
     NoUsageData = 8,
     MissingLimit = 9,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AiClientType {
+    Codex = 0x01,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AiClientVariant {
+    Cli = 0x01,
+    VsCodeExtension = 0x02,
+    DesktopApp = 0x03,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum AiActivityState {
+    None = 0x00,
+    Available = 0x01,
+    Working = 0x02,
+    WaitingApproval = 0x03,
+    WaitingInput = 0x04,
+    Completed = 0x05,
+    Error = 0x06,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1261,6 +1292,72 @@ pub struct AiUsagePacket {
     pub error_code: AiUsageErrorCode,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AiClientStatePacket {
+    pub client_type: AiClientType,
+    pub client_variant: u8,
+    pub session_active: bool,
+    pub activity_state: AiActivityState,
+    pub revision: u16,
+}
+
+impl AiClientStatePacket {
+    pub fn new(
+        client_type: AiClientType,
+        client_variant: u8,
+        session_active: bool,
+        activity_state: AiActivityState,
+        revision: u16,
+    ) -> Result<Self, PacketError> {
+        let valid_combination = if session_active {
+            activity_state != AiActivityState::None
+        } else {
+            activity_state == AiActivityState::None
+        };
+        if !valid_combination {
+            return Err(PacketError::InvalidAiClientSessionState {
+                session_active,
+                activity_state: activity_state as u8,
+            });
+        }
+        Ok(Self {
+            client_type,
+            client_variant,
+            session_active,
+            activity_state,
+            revision,
+        })
+    }
+
+    pub fn encode_payload(self, seq: u8) -> [u8; PACKET_SIZE] {
+        let mut bytes = [0u8; PACKET_SIZE];
+        encode_header(
+            &mut bytes,
+            CommonHeader {
+                packet_type: PacketType::StateUpdate,
+                seq,
+                feature: FEATURE_AI_CLIENT,
+                op: 0,
+                status_or_flags: 0,
+                payload_len: 6,
+            },
+        );
+        let payload = &mut bytes[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 6];
+        payload[0] = self.client_type as u8;
+        payload[1] = self.client_variant;
+        payload[2] = u8::from(self.session_active);
+        payload[3] = self.activity_state as u8;
+        payload[4..6].copy_from_slice(&self.revision.to_le_bytes());
+        bytes
+    }
+
+    pub fn encode_report(self, seq: u8) -> [u8; REPORT_SIZE] {
+        let mut report = [0u8; REPORT_SIZE];
+        report[1..].copy_from_slice(&self.encode_payload(seq));
+        report
+    }
+}
+
 impl AiUsagePacket {
     pub fn new(
         provider: AiUsageProvider,
@@ -1830,7 +1927,8 @@ impl Packet {
             | PacketType::LayerState
             | PacketType::KeyPress
             | PacketType::ConfigRequest
-            | PacketType::ConfigResponse => {
+            | PacketType::ConfigResponse
+            | PacketType::StateUpdate => {
                 Err(PacketError::DecodeUnsupportedType(header.packet_type as u8))
             }
         }
@@ -1874,6 +1972,13 @@ pub enum PacketError {
     InvalidTimezoneOffset(i16),
     #[error("invalid AI usage basis points {0}; expected 0..=10000")]
     InvalidAiUsageBasisPoints(u16),
+    #[error(
+        "invalid AI client session/activity combination: session_active={session_active}, activity_state={activity_state:#04x}"
+    )]
+    InvalidAiClientSessionState {
+        session_active: bool,
+        activity_state: u8,
+    },
     #[error("packet type {0:#04x} is not decoded as a generic packet")]
     DecodeUnsupportedType(u8),
     #[error("invalid battery entry count {0}; expected 1-4")]
@@ -2128,6 +2233,55 @@ mod tests {
         assert_eq!(report[14], flags.bits());
         assert_eq!(&report[15..17], &1234u16.to_le_bytes());
         assert!(report[32..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn ai_client_state_encodes_fixed_contract() {
+        let packet = AiClientStatePacket::new(
+            AiClientType::Codex,
+            AiClientVariant::Cli as u8,
+            true,
+            AiActivityState::Working,
+            0x1234,
+        )
+        .unwrap();
+
+        let payload = packet.encode_payload(9);
+
+        assert_eq!(payload[3], PacketType::StateUpdate as u8);
+        assert_eq!(payload[4], 9);
+        assert_eq!(payload[5], FEATURE_AI_CLIENT);
+        assert_eq!(payload[6], 0);
+        assert_eq!(payload[7], 0);
+        assert_eq!(payload[8], 6);
+        assert_eq!(
+            &payload[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 6],
+            &[0x01, 0x01, 0x01, 0x02, 0x34, 0x12]
+        );
+    }
+
+    #[test]
+    fn ai_client_state_rejects_invalid_session_activity_combination() {
+        assert!(matches!(
+            AiClientStatePacket::new(
+                AiClientType::Codex,
+                AiClientVariant::Cli as u8,
+                false,
+                AiActivityState::Working,
+                1,
+            ),
+            Err(PacketError::InvalidAiClientSessionState { .. })
+        ));
+        assert!(matches!(
+            AiClientStatePacket::new(
+                AiClientType::Codex,
+                AiClientVariant::Cli as u8,
+                true,
+                AiActivityState::None,
+                1,
+            ),
+            Err(PacketError::InvalidAiClientSessionState { .. })
+        ));
     }
 
     #[test]

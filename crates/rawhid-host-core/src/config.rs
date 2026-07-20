@@ -172,7 +172,7 @@ impl Default for HidConfig {
         Self {
             usage_page: 0xFF60,
             usage: 0x61,
-            hello_timeout_ms: 750,
+            hello_timeout_ms: 500,
             rescan_interval_sec: 5,
         }
     }
@@ -502,7 +502,7 @@ uplink_interval_ms = 20
 [hid]
 usage_page = 65376 # 0xFF60
 usage = 97         # 0x61
-hello_timeout_ms = 750
+hello_timeout_ms = 500
 rescan_interval_sec = 5
 
 [studio]
@@ -632,6 +632,7 @@ mod tests {
         assert_eq!(config.polling.uplink_interval_ms, 20);
         assert_eq!(config.hid.usage_page, 0xFF60);
         assert_eq!(config.hid.usage, 0x61);
+        assert_eq!(config.hid.hello_timeout_ms, 500);
         assert_eq!(config.hid.rescan_interval_sec, 5);
         assert_eq!(config.studio.probe_timeout_ms, 1000);
         assert_eq!(config.studio.keymap_read_timeout_ms, 8000);

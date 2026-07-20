@@ -66,7 +66,7 @@ path = "keylink-studio-debug.log"
 | `polling.interval_ms` | `500` |
 | `hid.usage_page` | `0xFF60` |
 | `hid.usage` | `0x61` |
-| `hid.hello_timeout_ms` | `750` |
+| `hid.hello_timeout_ms` | `500` |
 | `debug_log.enabled` | `false` |
 | `debug_log.path` | `"keylink-studio-debug.log"` |
 | `layer_switch.enabled` | `true` |

@@ -61,7 +61,10 @@ pub struct MonitorExtras {
 #[derive(Default)]
 struct AiClientStateSendTracker {
     last_device_generation: Option<u64>,
+    last_sent_at: Option<Instant>,
 }
+
+const AI_CLIENT_STATE_RESEND_INTERVAL: Duration = Duration::from_secs(5);
 
 trait AiClientStateTransport {
     fn device_generation(&self) -> u64;
@@ -3889,6 +3892,7 @@ fn sync_ai_client_state<T>(
     snapshot: AiClientStateSnapshot,
     changes: impl IntoIterator<Item = AiClientStateChange>,
     tracker: &mut AiClientStateSendTracker,
+    now: Instant,
 ) -> Result<(), String>
 where
     T: AiClientStateTransport,
@@ -3899,21 +3903,32 @@ where
     for change in changes {
         if !transport.has_ai_client_state_device() {
             tracker.last_device_generation = None;
+            tracker.last_sent_at = None;
             continue;
         }
         transport.send_ai_client_state(ai_client_state_packet(change.state)?)?;
         sent_change = true;
     }
 
+    let periodic_due = tracker.last_sent_at.is_none_or(|last_sent| {
+        now.saturating_duration_since(last_sent) >= AI_CLIENT_STATE_RESEND_INTERVAL
+    });
     if !sent_change
-        && tracker.last_device_generation != Some(device_generation)
+        && (tracker.last_device_generation != Some(device_generation) || periodic_due)
         && transport.has_ai_client_state_device()
     {
         transport.send_ai_client_state(ai_client_state_packet(snapshot)?)?;
+        sent_change = true;
     }
 
     if transport.has_ai_client_state_device() {
         tracker.last_device_generation = Some(device_generation);
+        if sent_change {
+            tracker.last_sent_at = Some(now);
+        }
+    } else {
+        tracker.last_device_generation = None;
+        tracker.last_sent_at = None;
     }
     Ok(())
 }
@@ -4432,6 +4447,7 @@ fn run_monitor_loop(
             extras.codex_activity.snapshot(),
             drain_ai_client_state_changes(&extras.codex_activity),
             &mut ai_client_state_send,
+            Instant::now(),
         ) {
             let msg = format!("AI client state send error: {error}");
             let entry = add_log(&log_entries, &log_counter, "error", &msg);
@@ -4699,12 +4715,14 @@ mod tests {
         let mut tracker = AiClientStateSendTracker::default();
         let available = ai_state(AiActivityState::Available, 50);
         let working = ai_state(AiActivityState::Working, 51);
+        let now = Instant::now();
 
         sync_ai_client_state(
             &mut transport,
             working,
             vec![ai_change(available), ai_change(working)],
             &mut tracker,
+            now,
         )
         .unwrap();
 
@@ -4725,11 +4743,12 @@ mod tests {
         };
         let mut tracker = AiClientStateSendTracker::default();
         let snapshot = ai_state(AiActivityState::WaitingApproval, 90);
+        let now = Instant::now();
 
-        sync_ai_client_state(&mut transport, snapshot, [], &mut tracker).unwrap();
-        sync_ai_client_state(&mut transport, snapshot, [], &mut tracker).unwrap();
+        sync_ai_client_state(&mut transport, snapshot, [], &mut tracker, now).unwrap();
+        sync_ai_client_state(&mut transport, snapshot, [], &mut tracker, now).unwrap();
         transport.device_generation = 8;
-        sync_ai_client_state(&mut transport, snapshot, [], &mut tracker).unwrap();
+        sync_ai_client_state(&mut transport, snapshot, [], &mut tracker, now).unwrap();
 
         assert_eq!(transport.sent.len(), 2);
         assert!(transport
@@ -4748,22 +4767,57 @@ mod tests {
         };
         let mut tracker = AiClientStateSendTracker::default();
         let snapshot = ai_state(AiActivityState::Completed, 12);
+        let now = Instant::now();
 
         sync_ai_client_state(
             &mut transport,
             snapshot,
             vec![ai_change(snapshot)],
             &mut tracker,
+            now,
         )
         .unwrap();
         assert!(transport.sent.is_empty());
         assert_eq!(tracker.last_device_generation, None);
 
         transport.capable = true;
-        sync_ai_client_state(&mut transport, snapshot, [], &mut tracker).unwrap();
+        sync_ai_client_state(&mut transport, snapshot, [], &mut tracker, now).unwrap();
         assert_eq!(transport.sent.len(), 1);
         assert_eq!(transport.sent[0].activity_state, AiActivityState::Completed);
         assert_eq!(transport.sent[0].revision, 12);
+    }
+
+    #[test]
+    fn ai_client_state_heartbeat_reuses_revision_every_five_seconds() {
+        let mut transport = FakeAiClientTransport {
+            device_generation: 9,
+            capable: true,
+            ..Default::default()
+        };
+        let mut tracker = AiClientStateSendTracker::default();
+        let snapshot = ai_state(AiActivityState::Completed, 1234);
+        let now = Instant::now();
+
+        sync_ai_client_state(&mut transport, snapshot, [], &mut tracker, now).unwrap();
+        sync_ai_client_state(
+            &mut transport,
+            snapshot,
+            [],
+            &mut tracker,
+            now + Duration::from_secs(4),
+        )
+        .unwrap();
+        sync_ai_client_state(
+            &mut transport,
+            snapshot,
+            [],
+            &mut tracker,
+            now + Duration::from_secs(5),
+        )
+        .unwrap();
+
+        assert_eq!(transport.sent.len(), 2);
+        assert!(transport.sent.iter().all(|packet| packet.revision == 1234));
     }
 
     #[test]

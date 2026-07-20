@@ -91,6 +91,34 @@ export interface AppBehaviorConfig {
   start_monitoring_on_launch: boolean;
 }
 
+export interface CodexClientConfig {
+  executable_path: string | null;
+  app_server_port: number;
+  broker_port: number;
+}
+
+export interface AiClientConfig {
+  codex: CodexClientConfig;
+}
+
+export type CodexBrokerPhase =
+  | "stopped"
+  | "starting"
+  | "waiting_for_client"
+  | "connected"
+  | "stopping"
+  | "error";
+
+export interface CodexBrokerStatus {
+  phase: CodexBrokerPhase;
+  app_server_port: number | null;
+  broker_port: number | null;
+  codex_version: string | null;
+  client_connected: boolean;
+  cli_connection_command: string | null;
+  last_error: string | null;
+}
+
 export type HostActionKind =
   | "show_window"
   | "start_monitoring"
@@ -123,6 +151,7 @@ export interface ActionsConfig {
 
 export interface AppConfig {
   app: AppBehaviorConfig;
+  ai_client: AiClientConfig;
   polling: PollingConfig;
   hid: HidConfig;
   layer_switch: LayerSwitchConfig;

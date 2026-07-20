@@ -38,6 +38,9 @@ pub fn run() {
             commands::show_config_file_location,
             commands::get_status,
             commands::get_log_entries,
+            commands::get_codex_integration_status,
+            commands::start_codex_integration,
+            commands::stop_codex_integration,
             commands::probe_devices,
             commands::probe_studio_devices,
             commands::read_studio_keymap,
@@ -146,6 +149,7 @@ fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
             }
             "quit" => {
                 let state = app.state::<AppState>();
+                commands::shutdown_codex_integration(state.inner());
                 commands::shutdown_host_link_worker(state.inner());
                 app.exit(0);
             }

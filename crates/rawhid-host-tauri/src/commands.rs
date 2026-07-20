@@ -14,6 +14,7 @@ use rawhid_host_core::hid::DeviceInfo;
 use rawhid_host_core::{
     active_app::SystemActiveAppProvider,
     ai_usage::{AiUsageRefreshError, AiUsageRuntime, AiUsageShared},
+    codex_broker::{CodexBrokerConfig, CodexBrokerStatus},
     config::{load_config, ActionsConfig, AppConfig, ConfigPaths},
     hid::{HidDeviceManager, HidError, ProbeResult},
     packet::{
@@ -258,6 +259,7 @@ pub fn get_config_path(state: State<AppState>) -> Option<String> {
 
 #[tauri::command]
 pub fn save_config(config: AppConfig, state: State<AppState>) -> Result<(), String> {
+    ensure_codex_config_editable(&state, &config)?;
     let toml_str = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
 
     let path = {
@@ -291,6 +293,7 @@ pub fn save_config(config: AppConfig, state: State<AppState>) -> Result<(), Stri
 pub fn reload_config(state: State<AppState>) -> Result<AppConfig, String> {
     let (config, path) =
         load_config(preferred_existing_config_path()).map_err(|e| e.to_string())?;
+    ensure_codex_config_editable(&state, &config)?;
     *state.config.lock().unwrap() = config.clone();
     *state.config_path.lock().unwrap() = path;
     restart_ai_usage_runtime(&state, &config);
@@ -342,6 +345,57 @@ pub fn get_status(state: State<AppState>) -> MonitorStatus {
 #[tauri::command]
 pub fn get_log_entries(state: State<AppState>) -> Vec<LogEntry> {
     state.log_entries.lock().unwrap().iter().cloned().collect()
+}
+
+#[tauri::command]
+pub fn get_codex_integration_status(state: State<AppState>) -> CodexBrokerStatus {
+    state.codex_broker.status()
+}
+
+#[tauri::command]
+pub async fn start_codex_integration(
+    state: State<'_, AppState>,
+) -> Result<CodexBrokerStatus, String> {
+    let configured = state.config.lock().unwrap().ai_client.codex.clone();
+    let manager = state.codex_broker.clone();
+    let config = CodexBrokerConfig {
+        codex_executable: configured.executable_path.map(PathBuf::from),
+        app_server_port: configured.app_server_port,
+        broker_port: configured.broker_port,
+        ..CodexBrokerConfig::default()
+    };
+    tauri::async_runtime::spawn_blocking(move || manager.start(config).map_err(|e| e.to_string()))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn stop_codex_integration(
+    state: State<'_, AppState>,
+) -> Result<CodexBrokerStatus, String> {
+    let manager = state.codex_broker.clone();
+    tauri::async_runtime::spawn_blocking(move || manager.stop().map_err(|e| e.to_string()))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+pub fn shutdown_codex_integration(state: &AppState) {
+    let _ = state.codex_broker.stop();
+}
+
+fn ensure_codex_config_editable(state: &AppState, next: &AppConfig) -> Result<(), String> {
+    use rawhid_host_core::codex_broker::CodexBrokerPhase;
+
+    let current = state.config.lock().unwrap().ai_client.codex.clone();
+    let phase = state.codex_broker.status().phase;
+    if current != next.ai_client.codex
+        && !matches!(phase, CodexBrokerPhase::Stopped | CodexBrokerPhase::Error)
+    {
+        return Err(
+            "Codex integration settings cannot be changed while integration is running".to_string(),
+        );
+    }
+    Ok(())
 }
 
 #[tauri::command]

@@ -1,6 +1,7 @@
 pub mod active_app;
 pub mod ai_usage;
 pub mod app_match;
+pub mod codex_broker;
 pub mod config;
 pub mod hid;
 pub mod packet;
@@ -14,10 +15,16 @@ pub use ai_usage::{
     AiUsageProviderStatus, AiUsageRuntime, AiUsageSendState, AiUsageShared, AiUsageStatusKind,
 };
 pub use app_match::{LayerAction, RuleMatch};
+pub use codex_broker::{
+    BrokerDirection, CodexBrokerConfig, CodexBrokerError, CodexBrokerEvent, CodexBrokerManager,
+    CodexBrokerPhase, CodexBrokerStatus, JsonRpcKind, JsonRpcMetadata, SUPPORTED_CODEX_VERSION,
+    SUPPORTED_SCHEMA_SHA256,
+};
 pub use config::{
-    AiUsageConfig, AppConfig, ClaudeCodeAiUsageConfig, ClockMode, CodexAiUsageConfig, ConfigPaths,
-    DeviceLayerSwitchConfig, HidConfig, LayerSwitchConfig, PollingConfig, RuleConfig, StudioConfig,
-    TimeConfig, TimeFormatHint, UnmatchedAction,
+    AiClientConfig, AiUsageConfig, AppConfig, ClaudeCodeAiUsageConfig, ClockMode,
+    CodexAiUsageConfig, CodexClientConfig, ConfigPaths, DeviceLayerSwitchConfig, HidConfig,
+    LayerSwitchConfig, PollingConfig, RuleConfig, StudioConfig, TimeConfig, TimeFormatHint,
+    UnmatchedAction,
 };
 pub use hid::{DeviceConnectionType, DeviceInfo, HidDeviceManager, HidTransport, ProbeResult};
 pub use packet::{

@@ -89,6 +89,7 @@ pub enum CodexBrokerPhase {
     Starting,
     WaitingForClient,
     Connected,
+    Reconnecting,
     Stopping,
     Error,
 }
@@ -708,12 +709,20 @@ async fn handle_connection(
         &mut args.shutdown_rx,
     )
     .await;
+    let reconnecting = origin == "cli";
     set_phase(
         &args.status,
-        CodexBrokerPhase::WaitingForClient,
+        if reconnecting {
+            CodexBrokerPhase::Reconnecting
+        } else {
+            CodexBrokerPhase::WaitingForClient
+        },
         false,
         None,
     );
+    if reconnecting {
+        schedule_waiting_for_client_after_grace(args.status.clone());
+    }
     let _ = args.event_tx.send(CodexBrokerEvent::ClientDisconnected {
         connection_id,
         origin,
@@ -1276,4 +1285,14 @@ fn set_phase(
     current.phase = phase;
     current.client_connected = connected;
     current.last_error = error;
+}
+
+fn schedule_waiting_for_client_after_grace(status: Arc<RwLock<CodexBrokerStatus>>) {
+    tokio::spawn(async move {
+        time::sleep(Duration::from_secs(3)).await;
+        let mut current = status.write().unwrap();
+        if current.phase == CodexBrokerPhase::Reconnecting {
+            current.phase = CodexBrokerPhase::WaitingForClient;
+        }
+    });
 }

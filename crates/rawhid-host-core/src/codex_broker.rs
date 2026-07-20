@@ -145,6 +145,12 @@ pub struct JsonRpcMetadata {
     pub id: Option<Value>,
     pub thread_id: Option<String>,
     pub turn_id: Option<String>,
+    pub item_id: Option<String>,
+    pub request_id: Option<Value>,
+    pub result_thread_id: Option<String>,
+    pub turn_status: Option<String>,
+    pub turn_has_error: bool,
+    pub will_retry: Option<bool>,
     pub batch_count: Option<usize>,
 }
 
@@ -168,7 +174,7 @@ pub enum CodexBrokerEvent {
     Message {
         connection_id: String,
         direction: BrokerDirection,
-        metadata: JsonRpcMetadata,
+        metadata: Box<JsonRpcMetadata>,
     },
     Error {
         component: &'static str,
@@ -276,6 +282,13 @@ impl CodexBrokerManager {
 
     pub fn try_recv_event(&self) -> Result<CodexBrokerEvent, std_mpsc::TryRecvError> {
         self.inner.event_rx.lock().unwrap().try_recv()
+    }
+
+    pub fn recv_event_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Result<CodexBrokerEvent, std_mpsc::RecvTimeoutError> {
+        self.inner.event_rx.lock().unwrap().recv_timeout(timeout)
     }
 }
 
@@ -767,6 +780,12 @@ fn emit_message_metadata(
             id: None,
             thread_id: None,
             turn_id: None,
+            item_id: None,
+            request_id: None,
+            result_thread_id: None,
+            turn_status: None,
+            turn_has_error: false,
+            will_retry: None,
             batch_count: None,
         },
         _ => return,
@@ -774,7 +793,7 @@ fn emit_message_metadata(
     let _ = event_tx.send(CodexBrokerEvent::Message {
         connection_id: connection_id.to_string(),
         direction,
-        metadata,
+        metadata: Box::new(metadata),
     });
 }
 
@@ -900,6 +919,12 @@ pub fn classify_json_rpc(text: &str) -> JsonRpcMetadata {
             id: None,
             thread_id: None,
             turn_id: None,
+            item_id: None,
+            request_id: None,
+            result_thread_id: None,
+            turn_status: None,
+            turn_has_error: false,
+            will_retry: None,
             batch_count: Some(batch.len()),
         };
     }
@@ -928,8 +953,18 @@ pub fn classify_json_rpc(text: &str) -> JsonRpcMetadata {
         kind,
         method,
         id,
-        thread_id: extract_identifier(&value, &["threadId", "thread_id"]),
-        turn_id: extract_identifier(&value, &["turnId", "turn_id"]),
+        thread_id: extract_identifier(&value, &["threadId", "thread_id"])
+            .or_else(|| string_at(&value, &["params", "thread", "id"])),
+        turn_id: extract_identifier(&value, &["turnId", "turn_id"])
+            .or_else(|| string_at(&value, &["params", "turn", "id"])),
+        item_id: extract_identifier(&value, &["itemId", "item_id"])
+            .or_else(|| string_at(&value, &["params", "item", "id"])),
+        request_id: scalar_at(&value, &["params", "requestId"]),
+        result_thread_id: string_at(&value, &["result", "thread", "id"]),
+        turn_status: string_at(&value, &["params", "turn", "status"]),
+        turn_has_error: value_at(&value, &["params", "turn", "error"])
+            .is_some_and(|error| !error.is_null()),
+        will_retry: value_at(&value, &["params", "willRetry"]).and_then(Value::as_bool),
         batch_count: None,
     }
 }
@@ -941,6 +976,12 @@ fn empty_metadata(kind: JsonRpcKind) -> JsonRpcMetadata {
         id: None,
         thread_id: None,
         turn_id: None,
+        item_id: None,
+        request_id: None,
+        result_thread_id: None,
+        turn_status: None,
+        turn_has_error: false,
+        will_retry: None,
         batch_count: None,
     }
 }
@@ -961,6 +1002,25 @@ fn extract_identifier(value: &Value, keys: &[&str]) -> Option<String> {
         }
     }
     None
+}
+
+fn value_at<'a>(value: &'a Value, path: &[&str]) -> Option<&'a Value> {
+    path.iter()
+        .try_fold(value, |current, key| current.get(*key))
+}
+
+fn string_at(value: &Value, path: &[&str]) -> Option<String> {
+    value_at(value, path)
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn scalar_at(value: &Value, path: &[&str]) -> Option<Value> {
+    value_at(value, path)
+        .filter(|item| {
+            item.is_null() || item.is_string() || item.is_i64() || item.is_u64() || item.is_f64()
+        })
+        .cloned()
 }
 
 async fn ensure_port_available(port: u16, component: &str) -> Result<(), CodexBrokerError> {

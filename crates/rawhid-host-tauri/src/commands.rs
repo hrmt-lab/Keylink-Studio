@@ -14,6 +14,7 @@ use rawhid_host_core::hid::DeviceInfo;
 use rawhid_host_core::{
     active_app::SystemActiveAppProvider,
     ai_usage::{AiUsageRefreshError, AiUsageRuntime, AiUsageShared},
+    codex_activity::AiClientStateSnapshot,
     codex_broker::{CodexBrokerConfig, CodexBrokerStatus},
     config::{load_config, ActionsConfig, AppConfig, ConfigPaths},
     hid::{HidDeviceManager, HidError, ProbeResult},
@@ -350,6 +351,11 @@ pub fn get_log_entries(state: State<AppState>) -> Vec<LogEntry> {
 #[tauri::command]
 pub fn get_codex_integration_status(state: State<AppState>) -> CodexBrokerStatus {
     state.codex_broker.status()
+}
+
+#[tauri::command]
+pub fn get_ai_client_state(state: State<AppState>) -> AiClientStateSnapshot {
+    state.codex_activity.snapshot()
 }
 
 #[tauri::command]

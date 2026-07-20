@@ -39,6 +39,7 @@ pub fn run() {
             commands::get_status,
             commands::get_log_entries,
             commands::get_codex_integration_status,
+            commands::get_ai_client_state,
             commands::start_codex_integration,
             commands::stop_codex_integration,
             commands::probe_devices,

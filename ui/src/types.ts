@@ -119,6 +119,23 @@ export interface CodexBrokerStatus {
   last_error: string | null;
 }
 
+export type AiActivityState =
+  | "none"
+  | "available"
+  | "working"
+  | "waiting_approval"
+  | "waiting_input"
+  | "completed"
+  | "error";
+
+export interface AiClientStateSnapshot {
+  client_type: "codex";
+  client_variant: "cli" | "vs_code_extension" | "desktop_app";
+  session_active: boolean;
+  activity_state: AiActivityState;
+  revision: number;
+}
+
 export type HostActionKind =
   | "show_window"
   | "start_monitoring"

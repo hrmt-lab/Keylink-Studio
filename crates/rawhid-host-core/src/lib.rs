@@ -1,6 +1,7 @@
 pub mod active_app;
 pub mod ai_usage;
 pub mod app_match;
+pub mod codex_activity;
 pub mod codex_broker;
 pub mod config;
 pub mod hid;
@@ -15,6 +16,10 @@ pub use ai_usage::{
     AiUsageProviderStatus, AiUsageRuntime, AiUsageSendState, AiUsageShared, AiUsageStatusKind,
 };
 pub use app_match::{LayerAction, RuleMatch};
+pub use codex_activity::{
+    AiClientStateChange, AiClientStateChangeReason, AiClientStateReducer, AiClientStateSnapshot,
+    CodexActivityRuntime, CodexEventAdapter,
+};
 pub use codex_broker::{
     BrokerDirection, CodexBrokerConfig, CodexBrokerError, CodexBrokerEvent, CodexBrokerManager,
     CodexBrokerPhase, CodexBrokerStatus, JsonRpcKind, JsonRpcMetadata, SUPPORTED_CODEX_VERSION,

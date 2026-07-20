@@ -543,12 +543,18 @@ fn print_probe_result(result: ProbeResult) {
         "not verified"
     };
     println!(
-        "{} vid={:04x} pid={:04x} usage_page={:04x} usage={:04x} path={}",
+        "{} vid={:04x} pid={:04x} usage_page={:04x} usage={:04x} capabilities={:#010x} uid={} path={}",
         status,
         result.device.vendor_id,
         result.device.product_id,
         result.device.usage_page,
         result.device.usage,
+        result.device.capabilities,
+        result
+            .device
+            .device_uid_hash
+            .map(|uid| format!("uid:{uid:016x}"))
+            .unwrap_or_else(|| "unavailable".to_string()),
         result.device.path
     );
     if let Some(product) = result.device.product {

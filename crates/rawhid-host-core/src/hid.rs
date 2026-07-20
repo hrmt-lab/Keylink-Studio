@@ -13,9 +13,10 @@ use tracing::{debug, warn};
 use crate::{
     config::HidConfig,
     packet::{
-        AiUsagePacket, ComboInfo, ComboItem, ConfigRequest, ConfigResponse, ConfigStatus,
-        DeviceHello, EncoderBinding, EncoderGetBindings, EncoderGetInfo, Packet, TimeSyncPacket,
-        UplinkPacket, CAPABILITY_CONFIG_RPC, PACKET_SIZE, REPORT_SIZE,
+        AiClientStatePacket, AiUsagePacket, ComboInfo, ComboItem, ConfigRequest, ConfigResponse,
+        ConfigStatus, DeviceHello, EncoderBinding, EncoderGetBindings, EncoderGetInfo, Packet,
+        TimeSyncPacket, UplinkPacket, CAPABILITY_AI_CLIENT_STATE, CAPABILITY_CONFIG_RPC,
+        PACKET_SIZE, REPORT_SIZE,
     },
 };
 
@@ -303,6 +304,8 @@ pub struct HidDeviceManager<T = RealHidTransport> {
     config: HidConfig,
     verified: Vec<DeviceInfo>,
     missed_probe_counts: HashMap<String, u8>,
+    probed_candidate_paths: HashSet<String>,
+    unresponsive_logged_paths: HashSet<String>,
     seq: u8,
     generation: u64,
     last_probe_at: Option<Instant>,
@@ -322,6 +325,8 @@ impl<T: HidTransport> HidDeviceManager<T> {
             config,
             verified: Vec::new(),
             missed_probe_counts: HashMap::new(),
+            probed_candidate_paths: HashSet::new(),
+            unresponsive_logged_paths: HashSet::new(),
             seq: 0,
             generation: 0,
             last_probe_at: None,
@@ -348,6 +353,8 @@ impl<T: HidTransport> HidDeviceManager<T> {
             }
             self.verified.clear();
             self.missed_probe_counts.clear();
+            self.probed_candidate_paths.clear();
+            self.unresponsive_logged_paths.clear();
             self.deferred_uplink.clear();
             self.generation = self.generation.wrapping_add(1);
         }
@@ -368,20 +375,33 @@ impl<T: HidTransport> HidDeviceManager<T> {
         let mut results = Vec::with_capacity(candidates.len());
         let mut verified = Vec::new();
 
+        const INITIAL_HELLO_ATTEMPTS: usize = 3;
         for device in candidates {
-            let seq = self.next_seq();
-            let hello = Packet::host_hello(seq);
-            match self
-                .transport
-                .hello(&device, hello, self.config.hello_timeout_ms)
-            {
+            let attempts = if self.probed_candidate_paths.insert(device.path.clone()) {
+                INITIAL_HELLO_ATTEMPTS
+            } else {
+                1
+            };
+            let mut hello_result = Ok(None);
+            for _ in 0..attempts {
+                let seq = self.next_seq();
+                let hello = Packet::host_hello(seq);
+                hello_result = self
+                    .transport
+                    .hello(&device, hello, self.config.hello_timeout_ms);
+                if matches!(hello_result, Ok(Some(_))) {
+                    break;
+                }
+            }
+            match hello_result {
                 Ok(Some(hello)) => {
                     debug!("Raw HID HELLO succeeded for {}", device.path);
                     let mut verified_device = device.clone();
                     verified_device.capabilities = hello.capabilities;
                     verified_device.device_uid_hash = hello.device_uid_hash;
                     self.missed_probe_counts.remove(&verified_device.path);
-                    verified.push(verified_device.clone());
+                    self.unresponsive_logged_paths.remove(&verified_device.path);
+                    upsert_verified_by_identity(&mut verified, verified_device.clone());
                     results.push(ProbeResult {
                         device: verified_device,
                         verified: true,
@@ -389,6 +409,12 @@ impl<T: HidTransport> HidDeviceManager<T> {
                     });
                 }
                 Ok(None) => {
+                    if self.unresponsive_logged_paths.insert(device.path.clone()) {
+                        warn!(
+                            "Raw HID HELLO did not receive DEVICE_HELLO after {attempts} attempt(s) for {}",
+                            device.path
+                        );
+                    }
                     results.push(ProbeResult {
                         device,
                         verified: false,
@@ -429,6 +455,11 @@ impl<T: HidTransport> HidDeviceManager<T> {
             }
         }
 
+        self.probed_candidate_paths
+            .retain(|path| candidate_paths.contains(path));
+        self.unresponsive_logged_paths
+            .retain(|path| candidate_paths.contains(path));
+
         for old_device in &self.verified {
             if !verified.iter().any(|device| device.path == old_device.path) {
                 self.transport.forget_device(old_device);
@@ -468,6 +499,12 @@ impl<T: HidTransport> HidDeviceManager<T> {
     pub fn send_clear(&mut self) -> Result<usize, HidError> {
         let packet = Packet::clear(self.next_seq());
         self.send_report_to_verified(packet.encode_report())
+    }
+
+    pub fn send_ai_client_state(&mut self, state: AiClientStatePacket) -> Result<usize, HidError> {
+        self.ensure_verified()?;
+        let report = state.encode_report(self.next_seq());
+        self.send_report_to_capable_verified(report, CAPABILITY_AI_CLIENT_STATE)
     }
 
     pub fn send_set_layer_to_device(
@@ -840,6 +877,39 @@ impl<T: HidTransport> HidDeviceManager<T> {
         Ok(sent)
     }
 
+    fn send_report_to_capable_verified(
+        &mut self,
+        report: [u8; REPORT_SIZE],
+        capability: u32,
+    ) -> Result<usize, HidError> {
+        let mut sent = 0usize;
+        let previous_len = self.verified.len();
+        let mut retained = Vec::with_capacity(self.verified.len());
+
+        for device in self.verified.drain(..) {
+            if device.capabilities & capability == 0 {
+                retained.push(device);
+                continue;
+            }
+            match self.transport.write_report(&device, &report) {
+                Ok(()) => {
+                    sent += 1;
+                    retained.push(device);
+                }
+                Err(error) => {
+                    warn!("Raw HID write failed for {}: {}", device.path, error);
+                    self.transport.forget_device(&device);
+                }
+            }
+        }
+
+        if previous_len != retained.len() {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        self.verified = retained;
+        Ok(sent)
+    }
+
     /// Drain pending device-initiated packets from all verified devices.
     /// Invalid packets are logged and skipped; read errors drop the device
     /// (same policy as write failures).
@@ -879,6 +949,22 @@ impl<T: HidTransport> HidDeviceManager<T> {
     }
 }
 
+fn upsert_verified_by_identity(verified: &mut Vec<DeviceInfo>, device: DeviceInfo) {
+    let existing = match device.device_uid_hash {
+        Some(uid) => verified
+            .iter()
+            .position(|candidate| candidate.device_uid_hash == Some(uid)),
+        None => verified
+            .iter()
+            .position(|candidate| candidate.path == device.path),
+    };
+    if let Some(index) = existing {
+        verified[index].capabilities = device.capabilities;
+    } else {
+        verified.push(device);
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum HidError {
     #[error("HID error: {0}")]
@@ -909,6 +995,9 @@ mod tests {
         candidates: RefCell<Vec<DeviceInfo>>,
         hello_paths: RefCell<HashSet<String>>,
         hello_capabilities: RefCell<HashMap<String, u32>>,
+        hello_uids: RefCell<HashMap<String, Option<u64>>>,
+        hello_failures_remaining: RefCell<HashMap<String, usize>>,
+        hello_calls: RefCell<Vec<(String, u8, i32)>>,
         failing_writes: RefCell<HashSet<String>>,
         failing_reads: RefCell<HashSet<String>>,
         writes: RefCell<Vec<(String, [u8; REPORT_SIZE])>>,
@@ -926,6 +1015,19 @@ mod tests {
             packet: Packet,
             _timeout_ms: i32,
         ) -> Result<Option<DeviceHello>, HidError> {
+            self.hello_calls
+                .borrow_mut()
+                .push((device.path.clone(), packet.seq, _timeout_ms));
+            if let Some(remaining) = self
+                .hello_failures_remaining
+                .borrow_mut()
+                .get_mut(&device.path)
+            {
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    return Ok(None);
+                }
+            }
             Ok(self
                 .hello_paths
                 .borrow()
@@ -938,7 +1040,12 @@ mod tests {
                         .get(&device.path)
                         .copied()
                         .unwrap_or(crate::packet::CAPABILITY_APP_LAYER),
-                    device_uid_hash: Some(1),
+                    device_uid_hash: self
+                        .hello_uids
+                        .borrow()
+                        .get(&device.path)
+                        .copied()
+                        .unwrap_or(device.device_uid_hash),
                 }))
         }
 
@@ -984,7 +1091,7 @@ mod tests {
             product: None,
             serial_number: None,
             capabilities: crate::packet::CAPABILITY_APP_LAYER,
-            device_uid_hash: Some(1),
+            device_uid_hash: path.as_bytes().first().copied().map(u64::from),
         }
     }
 
@@ -1007,6 +1114,130 @@ mod tests {
 
         assert_eq!(results.len(), 2);
         assert_eq!(manager.verified_devices(), &[device("b")]);
+    }
+
+    #[test]
+    fn initial_probe_retries_hello_three_times_with_fresh_sequences() {
+        let transport = MockTransport {
+            candidates: RefCell::new(vec![device("a")]),
+            ..MockTransport::default()
+        };
+        transport.hello_paths.borrow_mut().insert("a".to_string());
+        transport
+            .hello_failures_remaining
+            .borrow_mut()
+            .insert("a".to_string(), 2);
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+
+        let results = manager.probe().unwrap();
+
+        assert!(results[0].verified);
+        assert_eq!(manager.verified_devices(), &[device("a")]);
+        assert_eq!(
+            manager.transport.hello_calls.borrow().as_slice(),
+            &[
+                ("a".to_string(), 0, 500),
+                ("a".to_string(), 1, 500),
+                ("a".to_string(), 2, 500)
+            ]
+        );
+    }
+
+    #[test]
+    fn unresponsive_candidate_gets_one_hello_on_periodic_retry() {
+        let start = Instant::now();
+        let transport = MockTransport {
+            candidates: RefCell::new(vec![device("a")]),
+            ..MockTransport::default()
+        };
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+
+        manager.probe_at(start).unwrap();
+        assert_eq!(manager.transport.hello_calls.borrow().len(), 3);
+        manager.transport.hello_calls.borrow_mut().clear();
+        manager
+            .transport
+            .hello_paths
+            .borrow_mut()
+            .insert("a".to_string());
+
+        manager
+            .ensure_verified_at(start + Duration::from_secs(4))
+            .unwrap();
+        assert!(manager.transport.hello_calls.borrow().is_empty());
+
+        manager
+            .ensure_verified_at(start + Duration::from_secs(5))
+            .unwrap();
+        assert_eq!(manager.transport.hello_calls.borrow().len(), 1);
+        assert_eq!(manager.verified_devices(), &[device("a")]);
+    }
+
+    #[test]
+    fn duplicate_device_uid_is_registered_once_and_updates_capabilities() {
+        let transport = MockTransport {
+            candidates: RefCell::new(vec![device("a"), device("b")]),
+            ..MockTransport::default()
+        };
+        transport
+            .hello_paths
+            .borrow_mut()
+            .extend(["a".to_string(), "b".to_string()]);
+        transport
+            .hello_uids
+            .borrow_mut()
+            .extend([("a".to_string(), Some(7)), ("b".to_string(), Some(7))]);
+        transport
+            .hello_capabilities
+            .borrow_mut()
+            .insert("b".to_string(), crate::packet::CAPABILITY_TIME_SYNC);
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+
+        let results = manager.probe().unwrap();
+
+        assert_eq!(results.len(), 2);
+        assert!(results.iter().all(|result| result.verified));
+        assert_eq!(manager.verified_devices().len(), 1);
+        assert_eq!(manager.verified_devices()[0].device_uid_hash, Some(7));
+        assert_eq!(
+            manager.verified_devices()[0].capabilities,
+            crate::packet::CAPABILITY_TIME_SYNC
+        );
+    }
+
+    #[test]
+    fn ai_client_state_is_sent_only_to_capable_devices() {
+        let capable = device_with_capabilities("a", CAPABILITY_AI_CLIENT_STATE);
+        let unsupported = device("b");
+        let transport = MockTransport {
+            candidates: RefCell::new(vec![capable.clone(), unsupported.clone()]),
+            ..MockTransport::default()
+        };
+        transport
+            .hello_paths
+            .borrow_mut()
+            .extend(["a".to_string(), "b".to_string()]);
+        transport
+            .hello_capabilities
+            .borrow_mut()
+            .insert("a".to_string(), CAPABILITY_AI_CLIENT_STATE);
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        manager.probe().unwrap();
+        let state = AiClientStatePacket::new(
+            crate::packet::AiClientType::Codex,
+            crate::packet::AiClientVariant::Cli as u8,
+            true,
+            crate::packet::AiActivityState::Available,
+            7,
+        )
+        .unwrap();
+
+        assert_eq!(manager.send_ai_client_state(state).unwrap(), 1);
+
+        let writes = manager.transport.writes.borrow();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, "a");
+        assert_eq!(writes[0].1[4], crate::packet::PacketType::StateUpdate as u8);
     }
 
     #[test]

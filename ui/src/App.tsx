@@ -315,7 +315,6 @@ function AppInner() {
           <Devices
             studioDevices={studioDevices}
             studioScanning={studioScanning}
-            studioError={studioError}
             refreshStudioDevices={refreshStudioDevices}
             status={status}
             logs={logs}

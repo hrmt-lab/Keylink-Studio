@@ -311,6 +311,7 @@ impl Drop for ManagerInner {
 struct Session {
     child: Child,
     child_stdin: Option<ChildStdin>,
+    process_tree: ProcessTreeGuard,
     broker_shutdown: Option<oneshot::Sender<()>>,
     broker_task: Option<JoinHandle<Result<(), CodexBrokerError>>>,
     _secrets: TempDir,
@@ -432,6 +433,13 @@ async fn start_session(
         .spawn()
         .map_err(|error| CodexBrokerError::AppServer(error.to_string()))?;
     let child_stdin = child.stdin.take();
+    let process_tree = match ProcessTreeGuard::assign(&child) {
+        Ok(process_tree) => process_tree,
+        Err(error) => {
+            terminate_child(&mut child, child_stdin, config.shutdown_timeout).await;
+            return Err(error);
+        }
+    };
     if let Err(error) =
         wait_for_app_server(&mut child, config.app_server_port, config.startup_timeout).await
     {
@@ -484,6 +492,7 @@ async fn start_session(
     Ok(Session {
         child,
         child_stdin,
+        process_tree,
         broker_shutdown: Some(broker_shutdown),
         broker_task: Some(broker_task),
         _secrets: secrets,
@@ -531,6 +540,7 @@ async fn stop_session(mut session: Session) {
         session.config.shutdown_timeout,
     )
     .await;
+    session.process_tree.terminate();
 }
 
 async fn terminate_child(child: &mut Child, stdin: Option<ChildStdin>, timeout: Duration) {
@@ -539,6 +549,105 @@ async fn terminate_child(child: &mut Child, stdin: Option<ChildStdin>, timeout: 
         let _ = child.start_kill();
         let _ = child.wait().await;
     }
+}
+
+/// Owns every process spawned by the App Server launcher on Windows.
+///
+/// The npm `codex.cmd` shim launches `node.exe`, which in turn launches the
+/// native `codex.exe`. Waiting for or killing only the direct child can leave
+/// those descendants listening on the configured App Server port. A Job Object
+/// makes all descendants owned by this Keylink Studio session and terminates
+/// them together on stop, error, or process drop.
+#[cfg(windows)]
+struct ProcessTreeGuard {
+    job: windows::Win32::Foundation::HANDLE,
+}
+
+#[cfg(windows)]
+impl ProcessTreeGuard {
+    fn assign(child: &Child) -> Result<Self, CodexBrokerError> {
+        use std::mem::size_of;
+        use windows::{
+            core::PCWSTR,
+            Win32::{
+                Foundation::{CloseHandle, HANDLE},
+                System::JobObjects::{
+                    AssignProcessToJobObject, CreateJobObjectW, JobObjectExtendedLimitInformation,
+                    SetInformationJobObject, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+                    JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+                },
+            },
+        };
+
+        let job = unsafe { CreateJobObjectW(None, PCWSTR::null()) }.map_err(|error| {
+            CodexBrokerError::AppServer(format!("failed to create process job: {error}"))
+        })?;
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let configured = unsafe {
+            SetInformationJobObject(
+                job,
+                JobObjectExtendedLimitInformation,
+                (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+            )
+        };
+        if let Err(error) = configured {
+            unsafe {
+                let _ = CloseHandle(job);
+            }
+            return Err(CodexBrokerError::AppServer(format!(
+                "failed to configure process job: {error}"
+            )));
+        }
+
+        let raw_handle = child.raw_handle().ok_or_else(|| {
+            CodexBrokerError::AppServer(
+                "App Server process exited before job assignment".to_string(),
+            )
+        })?;
+        let assigned = unsafe { AssignProcessToJobObject(job, HANDLE(raw_handle)) };
+        if let Err(error) = assigned {
+            unsafe {
+                let _ = CloseHandle(job);
+            }
+            return Err(CodexBrokerError::AppServer(format!(
+                "failed to assign App Server process tree: {error}"
+            )));
+        }
+        Ok(Self { job })
+    }
+
+    fn terminate(&mut self) {
+        use windows::Win32::System::JobObjects::TerminateJobObject;
+
+        if let Err(error) = unsafe { TerminateJobObject(self.job, 1) } {
+            tracing::warn!("failed to terminate Codex App Server process tree: {error}");
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for ProcessTreeGuard {
+    fn drop(&mut self) {
+        use windows::Win32::Foundation::CloseHandle;
+
+        unsafe {
+            let _ = CloseHandle(self.job);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+struct ProcessTreeGuard;
+
+#[cfg(not(windows))]
+impl ProcessTreeGuard {
+    fn assign(_child: &Child) -> Result<Self, CodexBrokerError> {
+        Ok(Self)
+    }
+
+    fn terminate(&mut self) {}
 }
 
 async fn run_broker(

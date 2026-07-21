@@ -42,7 +42,6 @@ import type {
 interface DevicesProps {
   studioDevices: StudioDeviceStatus[];
   studioScanning: boolean;
-  studioError: string | null;
   refreshStudioDevices: () => Promise<StudioDeviceStatus[]>;
   status: MonitorStatus;
   logs: LogEntry[];
@@ -51,7 +50,6 @@ interface DevicesProps {
 export default function Devices({
   studioDevices,
   studioScanning,
-  studioError,
   refreshStudioDevices,
   status,
   logs,
@@ -60,27 +58,24 @@ export default function Devices({
   const [results, setResults] = useState<ProbeResult[] | null>(null);
   const [hostLinkLoading, setHostLinkLoading] = useState(false);
   const [actionLoading, setActionLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
 
   const scanHostLink = useCallback(async () => {
     setHostLinkLoading(true);
-    setError(null);
     try {
       setResults(await probeDevices());
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      // 接続状態と個別警告で利用者に判断材料を示すため、包括的な失敗通知は出さない。
     } finally {
       setHostLinkLoading(false);
     }
   }, []);
 
   const scanStudio = useCallback(async () => {
-    setError(null);
     try {
       await refreshStudioDevices();
-    } catch (e) {
-      setError(String(e));
+    } catch {
+      // 接続状態と個別警告で利用者に判断材料を示すため、包括的な失敗通知は出さない。
     }
   }, [refreshStudioDevices]);
 
@@ -158,9 +153,6 @@ export default function Devices({
       </div>
 
       {actionError && <ErrorNotice message={t("devices.action_error")} details={actionError} />}
-      {(error || studioError) && (
-        <ErrorNotice message={t("devices.scan_error")} details={friendlyError(error ?? studioError, t)} />
-      )}
       {status.last_error && (
         <ErrorNotice message={t("devices.status_error")} details={friendlyError(status.last_error, t)} />
       )}

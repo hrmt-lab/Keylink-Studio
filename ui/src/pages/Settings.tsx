@@ -324,6 +324,7 @@ function CodexIntegration({
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
 
   useEffect(() => {
     let active = true;
@@ -361,6 +362,27 @@ function CodexIntegration({
       setBusy(false);
     }
   };
+  const requestStop = async () => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      const latest = await getCodexIntegrationStatus();
+      setBroker(latest);
+      if (latest.client_connected) {
+        setStopConfirmOpen(true);
+        return;
+      }
+      setBroker(await stopCodexIntegration());
+    } catch (error) {
+      setActionError(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const confirmStop = () => {
+    setStopConfirmOpen(false);
+    void run("stop");
+  };
   const copyCommand = async () => {
     if (!broker?.cli_connection_command) return;
     try {
@@ -384,7 +406,7 @@ function CodexIntegration({
             </div>
           </div>
           {running ? (
-            <SecondaryButton onClick={() => void run("stop")} disabled={busy} loading={busy} icon={<Square size={14} />}>{t("settings.codex.stop")}</SecondaryButton>
+            <SecondaryButton onClick={() => void requestStop()} disabled={busy} loading={busy} icon={<Square size={14} />}>{t("settings.codex.stop")}</SecondaryButton>
           ) : (
             <PrimaryButton onClick={() => void run("start")} disabled={busy || configDirty} loading={busy} icon={<Play size={14} />}>{t("settings.codex.start")}</PrimaryButton>
           )}
@@ -421,7 +443,70 @@ function CodexIntegration({
           <button onClick={() => void copyCommand()} className="rounded-lg p-2 text-muted hover:bg-surface hover:text-ink" title={t("settings.codex.copy")}>{copied ? <Check size={15} className="text-accent-deep" /> : <Copy size={15} />}</button>
         </div>
       </div>}
+      {stopConfirmOpen && (
+        <CodexStopConfirmDialog
+          onCancel={() => setStopConfirmOpen(false)}
+          onConfirm={confirmStop}
+        />
+      )}
     </SectionCard>
+  );
+}
+
+function CodexStopConfirmDialog({
+  onCancel,
+  onConfirm,
+}: {
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const { t } = useLang();
+  const cancelForKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Enter" || event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      onCancel();
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/25 px-5"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="codex-stop-confirm-title"
+      aria-describedby="codex-stop-confirm-description"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onCancel();
+      }}
+      onKeyDown={cancelForKeyboard}
+    >
+      <div className="w-full max-w-lg rounded-2xl bg-background p-6 shadow-2xl ring-1 ring-ink/10">
+        <h2 id="codex-stop-confirm-title" className="text-base font-medium text-ink">
+          {t("settings.codex.stop_confirm.title")}
+        </h2>
+        <p id="codex-stop-confirm-description" className="mt-3 whitespace-pre-line text-sm leading-6 text-muted">
+          {t("settings.codex.stop_confirm.description")}
+        </p>
+        <div className="mt-6 flex justify-end gap-2">
+          <button
+            type="button"
+            autoFocus
+            onClick={onCancel}
+            className="btn-neu rounded-full px-4 py-2 text-sm font-medium text-ink"
+          >
+            {t("settings.codex.stop_confirm.cancel")}
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="rounded-full bg-accent px-4 py-2 text-sm font-medium text-white shadow-sm"
+          >
+            {t("settings.codex.stop_confirm.confirm")}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }
 

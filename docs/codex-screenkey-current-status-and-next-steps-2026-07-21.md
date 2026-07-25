@@ -232,7 +232,7 @@ ScreenKeyでは主に次を表現する。
 - USB再列挙後も通信が復帰し、size mismatch、partial write、
   Raw HID送信エラーは発生しなかった。仕様§19.36はScreenKey範囲で
   `PARTIAL PASS`とする。
-- Keylink Studioの既存Feature回帰はCore 195 tests、Tauri 14 testsと
+- Keylink Studioの既存Feature回帰はCore 196 tests、Tauri 14 testsと
   UI production buildで合格した。全実機Targetの回帰は仕様§19.37の
   `DEFERRED`部分として残す。
 
@@ -252,10 +252,23 @@ ScreenKeyでは主に次を表現する。
 - `npm --prefix ui run build`: PASS。
 - `git diff --check`: PASS。
 
+### 2026-07-26の最終レビュー
+
+- feature branchの全commitをCore、Tauri、UI、文書の順にレビューした。
+- CLI切断後の3秒grace timerが残った状態で再接続と再切断が起きると、
+  古いtimerが新しい`Reconnecting`状態を早期終了させる競合を検出した。
+- 接続世代を導入し、古いtimerが新しい切断状態を変更できないよう修正した。
+- 再現testを追加し、Core 196 tests、Tauri 14 tests、debug／release build、
+  UI production build、format、差分検査が合格した。
+- strict Clippyは既存コードの警告9件によりbaselineとしては未合格だが、
+  今回変更したCodex Brokerには新しい指摘がないことを確認した。
+- 修正commit: `530f339 fix(codex): isolate reconnect grace timers`
+
 ## 次にやること
 
-ScreenKey単体プロトタイプの実装と検証は完了した。次は新機能実装ではなく、
-feature branchの全commitを最終レビューする。pushや統合はユーザーの指示後に行う。
+ScreenKey単体プロトタイプの実装、検証、feature branchの最終レビューは完了した。
+次はfeature branchをpushまたは統合するかを判断する。pushや統合はユーザーの
+指示後に行う。
 
 将来、対応実機が完成した時点で、下記`DEFERRED`項目を別の拡張検証として再開する。
 
@@ -290,6 +303,10 @@ feature branchの全commitを最終レビューする。pushや統合はユー�
   `bce8bed chore(codex): support Codex CLI 0.145.0`
 - debug専用fault injection:
   `aea3930 feat(debug): add Codex fault injection controls`
+- プロトタイプ完了記録:
+  `81c252f docs: mark Codex ScreenKey prototype complete`
+- 再接続grace timer競合修正:
+  `530f339 fix(codex): isolate reconnect grace timers`
 - feature branchは未push。正確なHEADとahead数は作業再開時に
   `git status --short --branch`で確認する。
 - プロトタイプ完了記録は本書とレビュー済み仕様書に反映済み。

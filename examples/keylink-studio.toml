@@ -4,6 +4,11 @@
 # Start monitoring automatically when the app launches.
 start_monitoring_on_launch = false
 
+[ai_client.codex]
+# executable_path = "C:\\path\\to\\codex.exe"
+app_server_port = 4500
+broker_port = 4501
+
 [polling]
 interval_ms = 500
 

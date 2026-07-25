@@ -12,6 +12,7 @@ use thiserror::Error;
 #[serde(default)]
 pub struct AppConfig {
     pub app: AppBehaviorConfig,
+    pub ai_client: AiClientConfig,
     pub polling: PollingConfig,
     pub hid: HidConfig,
     pub layer_switch: LayerSwitchConfig,
@@ -26,6 +27,7 @@ impl Default for AppConfig {
     fn default() -> Self {
         Self {
             app: AppBehaviorConfig::default(),
+            ai_client: AiClientConfig::default(),
             polling: PollingConfig::default(),
             hid: HidConfig::default(),
             layer_switch: LayerSwitchConfig::default(),
@@ -34,6 +36,31 @@ impl Default for AppConfig {
             studio: StudioConfig::default(),
             stats: StatsConfig::default(),
             actions: ActionsConfig::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct AiClientConfig {
+    pub codex: CodexClientConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CodexClientConfig {
+    /// Absolute path override. When omitted, `codex` is resolved from PATH.
+    pub executable_path: Option<String>,
+    pub app_server_port: u16,
+    pub broker_port: u16,
+}
+
+impl Default for CodexClientConfig {
+    fn default() -> Self {
+        Self {
+            executable_path: None,
+            app_server_port: 4500,
+            broker_port: 4501,
         }
     }
 }
@@ -494,6 +521,11 @@ pub fn example_config() -> &'static str {
 [app]
 # Start monitoring automatically when the GUI launches.
 start_monitoring_on_launch = false
+
+[ai_client.codex]
+# executable_path = "C:\\path\\to\\codex.exe"
+app_server_port = 4500
+broker_port = 4501
 
 [polling]
 interval_ms = 500

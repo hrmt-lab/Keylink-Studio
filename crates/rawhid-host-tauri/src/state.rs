@@ -7,6 +7,8 @@ use std::{
 
 use rawhid_host_core::{
     ai_usage::{AiUsageProviderStatus, AiUsageRuntime, AiUsageShared},
+    codex_activity::CodexActivityRuntime,
+    codex_broker::CodexBrokerManager,
     config::AppConfig,
     hid::{DeviceInfo, ProbeResult},
     packet::{
@@ -67,6 +69,8 @@ pub struct AppState {
     pub monitor_tx: Arc<Mutex<Option<std::sync::mpsc::Sender<MonitorCommand>>>>,
     pub ai_usage_refreshing: Arc<AtomicBool>,
     pub ai_usage_runtime: Arc<Mutex<Option<AiUsageRuntime>>>,
+    pub codex_activity: Arc<CodexActivityRuntime>,
+    pub codex_broker: CodexBrokerManager,
     pub key_stats: SharedKeyStatsStore,
     pub studio_edit: Arc<Mutex<Option<StudioEditSession>>>,
     pub encoder_restore_rollbacks:
@@ -142,6 +146,8 @@ pub enum HostLinkResponse {
 
 impl AppState {
     pub fn new(config: AppConfig, config_path: Option<PathBuf>) -> Self {
+        let codex_broker = CodexBrokerManager::new();
+        let codex_activity = Arc::new(CodexActivityRuntime::start(codex_broker.clone()));
         let ai_usage_runtime = AiUsageRuntime::start(config.ai_usage.clone());
         let ai_usage_statuses = ai_usage_runtime
             .as_ref()
@@ -164,6 +170,8 @@ impl AppState {
             monitor_tx: Arc::new(Mutex::new(None)),
             ai_usage_refreshing: Arc::new(AtomicBool::new(false)),
             ai_usage_runtime: Arc::new(Mutex::new(ai_usage_runtime)),
+            codex_activity,
+            codex_broker,
             key_stats,
             studio_edit: Arc::new(Mutex::new(None)),
             encoder_restore_rollbacks: Arc::new(Mutex::new(HashMap::new())),

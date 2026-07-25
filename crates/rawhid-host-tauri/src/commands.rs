@@ -14,11 +14,14 @@ use rawhid_host_core::hid::DeviceInfo;
 use rawhid_host_core::{
     active_app::SystemActiveAppProvider,
     ai_usage::{AiUsageRefreshError, AiUsageRuntime, AiUsageShared},
+    codex_activity::{AiClientStateChange, AiClientStateSnapshot, CodexActivityRuntime},
+    codex_broker::{CodexBrokerConfig, CodexBrokerStatus},
     config::{load_config, ActionsConfig, AppConfig, ConfigPaths},
     hid::{HidDeviceManager, HidError, ProbeResult},
     packet::{
-        ComboBinding, ComboInfo, ComboItem, ConfigStatus, EncoderBinding, EncoderBindingFlags,
-        EncoderBindingSource, EncoderGetBindings, EncoderGetInfo, UplinkPacket,
+        AiClientStatePacket, ComboBinding, ComboInfo, ComboItem, ConfigStatus, EncoderBinding,
+        EncoderBindingFlags, EncoderBindingSource, EncoderGetBindings, EncoderGetInfo,
+        UplinkPacket,
     },
     runner::{uplink_device_key, RunEvent, Runner},
     stats::{KeyStatsSummary, SharedKeyStatsStore, StatsPeriod},
@@ -52,6 +55,36 @@ pub struct MonitorExtras {
     pub ai_usage_runtime: Arc<std::sync::Mutex<Option<AiUsageRuntime>>>,
     pub ai_usage_refreshing: Arc<AtomicBool>,
     pub key_stats: SharedKeyStatsStore,
+    pub codex_activity: Arc<CodexActivityRuntime>,
+}
+
+#[derive(Default)]
+struct AiClientStateSendTracker {
+    last_device_generation: Option<u64>,
+    last_sent_at: Option<Instant>,
+}
+
+const AI_CLIENT_STATE_RESEND_INTERVAL: Duration = Duration::from_secs(5);
+
+trait AiClientStateTransport {
+    fn device_generation(&self) -> u64;
+    fn has_ai_client_state_device(&self) -> bool;
+    fn send_ai_client_state(&mut self, packet: AiClientStatePacket) -> Result<usize, String>;
+}
+
+impl AiClientStateTransport for MonitorRunner {
+    fn device_generation(&self) -> u64 {
+        self.device_generation()
+    }
+
+    fn has_ai_client_state_device(&self) -> bool {
+        self.has_ai_client_state_device()
+    }
+
+    fn send_ai_client_state(&mut self, packet: AiClientStatePacket) -> Result<usize, String> {
+        self.send_ai_client_state(packet)
+            .map_err(|error| error.to_string())
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -258,6 +291,7 @@ pub fn get_config_path(state: State<AppState>) -> Option<String> {
 
 #[tauri::command]
 pub fn save_config(config: AppConfig, state: State<AppState>) -> Result<(), String> {
+    ensure_codex_config_editable(&state, &config)?;
     let toml_str = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
 
     let path = {
@@ -291,6 +325,7 @@ pub fn save_config(config: AppConfig, state: State<AppState>) -> Result<(), Stri
 pub fn reload_config(state: State<AppState>) -> Result<AppConfig, String> {
     let (config, path) =
         load_config(preferred_existing_config_path()).map_err(|e| e.to_string())?;
+    ensure_codex_config_editable(&state, &config)?;
     *state.config.lock().unwrap() = config.clone();
     *state.config_path.lock().unwrap() = path;
     restart_ai_usage_runtime(&state, &config);
@@ -342,6 +377,84 @@ pub fn get_status(state: State<AppState>) -> MonitorStatus {
 #[tauri::command]
 pub fn get_log_entries(state: State<AppState>) -> Vec<LogEntry> {
     state.log_entries.lock().unwrap().iter().cloned().collect()
+}
+
+#[tauri::command]
+pub fn get_codex_integration_status(state: State<AppState>) -> CodexBrokerStatus {
+    state.codex_broker.status()
+}
+
+#[tauri::command]
+pub fn get_ai_client_state(state: State<AppState>) -> AiClientStateSnapshot {
+    state.codex_activity.snapshot()
+}
+
+#[tauri::command]
+pub async fn start_codex_integration(
+    state: State<'_, AppState>,
+) -> Result<CodexBrokerStatus, String> {
+    let configured = state.config.lock().unwrap().ai_client.codex.clone();
+    let manager = state.codex_broker.clone();
+    let config = CodexBrokerConfig {
+        codex_executable: configured.executable_path.map(PathBuf::from),
+        app_server_port: configured.app_server_port,
+        broker_port: configured.broker_port,
+        ..CodexBrokerConfig::default()
+    };
+    tauri::async_runtime::spawn_blocking(move || manager.start(config).map_err(|e| e.to_string()))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn stop_codex_integration(
+    state: State<'_, AppState>,
+) -> Result<CodexBrokerStatus, String> {
+    let manager = state.codex_broker.clone();
+    tauri::async_runtime::spawn_blocking(move || manager.stop().map_err(|e| e.to_string()))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+/// Debug-only lifecycle fault injection. The core rejects this in release
+/// builds, so production sessions cannot be disrupted through this command.
+#[tauri::command]
+pub async fn debug_abort_codex_broker(state: State<'_, AppState>) -> Result<(), String> {
+    let manager = state.codex_broker.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        manager.debug_abort_broker().map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
+/// Debug-only renderer validation. The activity runtime rejects this in release
+/// builds, so production sessions cannot be put into a synthetic ERROR state.
+#[tauri::command]
+pub fn debug_inject_codex_turn_failure(state: State<AppState>) -> Result<(), String> {
+    state
+        .codex_activity
+        .debug_inject_turn_failure()
+        .map_err(str::to_string)
+}
+
+pub fn shutdown_codex_integration(state: &AppState) {
+    let _ = state.codex_broker.stop();
+}
+
+fn ensure_codex_config_editable(state: &AppState, next: &AppConfig) -> Result<(), String> {
+    use rawhid_host_core::codex_broker::CodexBrokerPhase;
+
+    let current = state.config.lock().unwrap().ai_client.codex.clone();
+    let phase = state.codex_broker.status().phase;
+    if current != next.ai_client.codex
+        && !matches!(phase, CodexBrokerPhase::Stopped | CodexBrokerPhase::Error)
+    {
+        return Err(
+            "Codex integration settings cannot be changed while integration is running".to_string(),
+        );
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -3544,6 +3657,7 @@ pub fn start_host_link_worker(
         ai_usage_runtime: Arc::clone(&state.ai_usage_runtime),
         ai_usage_refreshing: Arc::clone(&state.ai_usage_refreshing),
         key_stats: Arc::clone(&state.key_stats),
+        codex_activity: Arc::clone(&state.codex_activity),
     };
 
     let (tx, rx) = mpsc::channel();
@@ -3785,6 +3899,71 @@ fn apply_runner_view(s: &mut MonitorStatus, runner: &MonitorRunner) {
     s.ai_usage = runner.ai_usage_statuses();
     s.device_battery = runner.battery_statuses();
     s.device_layers = runner.layer_states();
+}
+
+fn drain_ai_client_state_changes(activity: &CodexActivityRuntime) -> Vec<AiClientStateChange> {
+    let mut changes = Vec::new();
+    while let Some(change) = activity.try_recv_change() {
+        changes.push(change);
+    }
+    changes
+}
+
+fn sync_ai_client_state<T>(
+    transport: &mut T,
+    snapshot: AiClientStateSnapshot,
+    changes: impl IntoIterator<Item = AiClientStateChange>,
+    tracker: &mut AiClientStateSendTracker,
+    now: Instant,
+) -> Result<(), String>
+where
+    T: AiClientStateTransport,
+{
+    let device_generation = transport.device_generation();
+    let mut sent_change = false;
+
+    for change in changes {
+        if !transport.has_ai_client_state_device() {
+            tracker.last_device_generation = None;
+            tracker.last_sent_at = None;
+            continue;
+        }
+        transport.send_ai_client_state(ai_client_state_packet(change.state)?)?;
+        sent_change = true;
+    }
+
+    let periodic_due = tracker.last_sent_at.is_none_or(|last_sent| {
+        now.saturating_duration_since(last_sent) >= AI_CLIENT_STATE_RESEND_INTERVAL
+    });
+    if !sent_change
+        && (tracker.last_device_generation != Some(device_generation) || periodic_due)
+        && transport.has_ai_client_state_device()
+    {
+        transport.send_ai_client_state(ai_client_state_packet(snapshot)?)?;
+        sent_change = true;
+    }
+
+    if transport.has_ai_client_state_device() {
+        tracker.last_device_generation = Some(device_generation);
+        if sent_change {
+            tracker.last_sent_at = Some(now);
+        }
+    } else {
+        tracker.last_device_generation = None;
+        tracker.last_sent_at = None;
+    }
+    Ok(())
+}
+
+fn ai_client_state_packet(state: AiClientStateSnapshot) -> Result<AiClientStatePacket, String> {
+    AiClientStatePacket::new(
+        state.client_type,
+        state.client_variant as u8,
+        state.session_active,
+        state.activity_state,
+        state.revision,
+    )
+    .map_err(|error| error.to_string())
 }
 
 fn apply_monitor_config(
@@ -4164,6 +4343,7 @@ fn run_monitor_loop(
 
     let mut interval = Duration::from_millis(config.polling.interval_ms.max(1));
     let mut uplink_interval = Duration::from_millis(config.polling.uplink_interval_ms.max(5));
+    let mut ai_client_state_send = AiClientStateSendTracker::default();
 
     loop {
         let mut should_stop = false;
@@ -4282,6 +4462,23 @@ fn run_monitor_loop(
                     emit_status(&app, &s);
                 }
             }
+        }
+
+        if let Err(error) = sync_ai_client_state(
+            &mut runner,
+            extras.codex_activity.snapshot(),
+            drain_ai_client_state_changes(&extras.codex_activity),
+            &mut ai_client_state_send,
+            Instant::now(),
+        ) {
+            let msg = format!("AI client state send error: {error}");
+            let entry = add_log(&log_entries, &log_counter, "error", &msg);
+            {
+                let mut s = status.lock().unwrap();
+                s.last_error = Some(msg);
+                emit_status(&app, &s);
+            }
+            let _ = app.emit("log-added", entry);
         }
 
         // Wait for the next control-loop tick, draining uplink every uplink_interval_ms.
@@ -4487,8 +4684,163 @@ fn refresh_error_code(error: AiUsageRefreshError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rawhid_host_core::packet::{AiActivityState, AiClientType, AiClientVariant};
     use rawhid_host_core::runner::{DeviceBatterySource, DeviceBatteryStatus};
     use rawhid_host_core::studio::{StudioLayer, StudioLayoutSource};
+
+    #[derive(Default)]
+    struct FakeAiClientTransport {
+        device_generation: u64,
+        capable: bool,
+        sent: Vec<AiClientStatePacket>,
+    }
+
+    impl AiClientStateTransport for FakeAiClientTransport {
+        fn device_generation(&self) -> u64 {
+            self.device_generation
+        }
+
+        fn has_ai_client_state_device(&self) -> bool {
+            self.capable
+        }
+
+        fn send_ai_client_state(&mut self, packet: AiClientStatePacket) -> Result<usize, String> {
+            self.sent.push(packet);
+            Ok(1)
+        }
+    }
+
+    fn ai_state(activity_state: AiActivityState, revision: u16) -> AiClientStateSnapshot {
+        AiClientStateSnapshot {
+            client_type: AiClientType::Codex,
+            client_variant: AiClientVariant::Cli,
+            session_active: activity_state != AiActivityState::None,
+            activity_state,
+            revision,
+        }
+    }
+
+    fn ai_change(state: AiClientStateSnapshot) -> AiClientStateChange {
+        AiClientStateChange {
+            state,
+            reason: rawhid_host_core::AiClientStateChangeReason::TurnStarted,
+        }
+    }
+
+    #[test]
+    fn ai_client_state_sends_each_pending_change_to_capable_devices() {
+        let mut transport = FakeAiClientTransport {
+            device_generation: 4,
+            capable: true,
+            ..Default::default()
+        };
+        let mut tracker = AiClientStateSendTracker::default();
+        let available = ai_state(AiActivityState::Available, 50);
+        let working = ai_state(AiActivityState::Working, 51);
+        let now = Instant::now();
+
+        sync_ai_client_state(
+            &mut transport,
+            working,
+            vec![ai_change(available), ai_change(working)],
+            &mut tracker,
+            now,
+        )
+        .unwrap();
+
+        assert_eq!(transport.sent.len(), 2);
+        assert_eq!(transport.sent[0].activity_state, AiActivityState::Available);
+        assert_eq!(transport.sent[0].revision, 50);
+        assert_eq!(transport.sent[1].activity_state, AiActivityState::Working);
+        assert_eq!(transport.sent[1].revision, 51);
+        assert_eq!(tracker.last_device_generation, Some(4));
+    }
+
+    #[test]
+    fn ai_client_state_resends_current_snapshot_after_device_generation_changes() {
+        let mut transport = FakeAiClientTransport {
+            device_generation: 7,
+            capable: true,
+            ..Default::default()
+        };
+        let mut tracker = AiClientStateSendTracker::default();
+        let snapshot = ai_state(AiActivityState::WaitingApproval, 90);
+        let now = Instant::now();
+
+        sync_ai_client_state(&mut transport, snapshot, [], &mut tracker, now).unwrap();
+        sync_ai_client_state(&mut transport, snapshot, [], &mut tracker, now).unwrap();
+        transport.device_generation = 8;
+        sync_ai_client_state(&mut transport, snapshot, [], &mut tracker, now).unwrap();
+
+        assert_eq!(transport.sent.len(), 2);
+        assert!(transport
+            .sent
+            .iter()
+            .all(|packet| packet.activity_state == AiActivityState::WaitingApproval));
+        assert_eq!(tracker.last_device_generation, Some(8));
+    }
+
+    #[test]
+    fn ai_client_state_waits_for_a_capable_device_then_sends_latest_snapshot() {
+        let mut transport = FakeAiClientTransport {
+            device_generation: 3,
+            capable: false,
+            ..Default::default()
+        };
+        let mut tracker = AiClientStateSendTracker::default();
+        let snapshot = ai_state(AiActivityState::Completed, 12);
+        let now = Instant::now();
+
+        sync_ai_client_state(
+            &mut transport,
+            snapshot,
+            vec![ai_change(snapshot)],
+            &mut tracker,
+            now,
+        )
+        .unwrap();
+        assert!(transport.sent.is_empty());
+        assert_eq!(tracker.last_device_generation, None);
+
+        transport.capable = true;
+        sync_ai_client_state(&mut transport, snapshot, [], &mut tracker, now).unwrap();
+        assert_eq!(transport.sent.len(), 1);
+        assert_eq!(transport.sent[0].activity_state, AiActivityState::Completed);
+        assert_eq!(transport.sent[0].revision, 12);
+    }
+
+    #[test]
+    fn ai_client_state_heartbeat_reuses_revision_every_five_seconds() {
+        let mut transport = FakeAiClientTransport {
+            device_generation: 9,
+            capable: true,
+            ..Default::default()
+        };
+        let mut tracker = AiClientStateSendTracker::default();
+        let snapshot = ai_state(AiActivityState::Completed, 1234);
+        let now = Instant::now();
+
+        sync_ai_client_state(&mut transport, snapshot, [], &mut tracker, now).unwrap();
+        sync_ai_client_state(
+            &mut transport,
+            snapshot,
+            [],
+            &mut tracker,
+            now + Duration::from_secs(4),
+        )
+        .unwrap();
+        sync_ai_client_state(
+            &mut transport,
+            snapshot,
+            [],
+            &mut tracker,
+            now + Duration::from_secs(5),
+        )
+        .unwrap();
+
+        assert_eq!(transport.sent.len(), 2);
+        assert!(transport.sent.iter().all(|packet| packet.revision == 1234));
+    }
 
     #[test]
     fn studio_probe_releases_only_lost_connections() {

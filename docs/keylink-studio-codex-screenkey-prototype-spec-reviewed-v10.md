@@ -43,8 +43,8 @@ Threadイベントだけへ縮退せずPlan BのBroker構成へ移行する。
 
 > 最終状態: Gate A完了。最終試行では同一ハーネス・同一Thread IDでResume成功後、CLI resume後の同一Thread／Turnに属する応答必須approval requestがObserverへ配送された。Observer方式不成立／Broker必須と確定する。
 
-- 対象: Codex CLI `0.144.6` / Windows PowerShell / WebSocket / capability-token認証
-- 生成Schema SHA-256: `85EA836927D6CFDD3C68A9BDA17DBA48D2573BBC282AB2D5775A5005E40BC9C3`
+- 対象: Codex CLI `0.145.0` / Windows PowerShell / WebSocket / capability-token認証
+- 生成Schema SHA-256: `1F66700D1CC3DE4A5004E5614A6098878B405C7E7C5F8C9BE97FC900D0AD6C68`
 - Observerはresumeなしでは`thread/started`と`thread/status/changed`を受信したが、`turn/started`と`turn/completed`は受信しなかった
 - Observerが対象Threadへ明示的に`thread/resume`すると、以降の`turn/started`と`turn/completed`を受信できた
 - Observerが先に対象Threadをresumeし、CLIも同じThreadを再開した状態で、CLIのapproval要求`item/commandExecution/requestApproval`が応答必須JSON-RPC requestとしてObserverにも配送された
@@ -114,6 +114,10 @@ Plan B採用時は§4、§5、§7～§10および§18のシーケンス図をbro
 > 同一JSON-RPC IDのCLI responseの透過転送に成功した。CLI→Broker用tokenと
 > Broker→App Server用tokenは分離され、Broker方式は成立と判定する。
 > 詳細は`docs/codex-broker-gate-results.md`を参照する。
+>
+> 2026-07-20 Broker前提改訂: §4、§5、§7～§10、§18を、上記E2EとCodex CLI
+> `0.144.6`生成Schemaに基づくBroker構成へ更新した。Keylink Studio側は汎用AI Client Stateを
+> 管理し、ScreenKey固有表現を持たない。未知method／fieldは推測せず状態変更から除外する。
 
 ### 0.4 Gate B: Host再起動後の再握手スパイク
 
@@ -239,9 +243,9 @@ Codex CLI
     │ WebSocket / Broker専用token
     ⇅
 Keylink Studio Broker ⇄ Codex App Server
-    │ 状態メタデータ   WebSocket / App Server専用token
+    │ JSON-RPC envelopeから抽出した状態メタデータ
     ▼
-Keylink Studio State Tracker
+Keylink Studio AI Client State Tracker / Reducer
     │ Host Link v2 / Raw HID
     ▼
 ZMK Firmware
@@ -259,16 +263,25 @@ Spotpear 0.85インチ LCD ScreenKey
 - Codex CLIはユーザーが手動で起動する。
 - Keylink StudioはプロトタイプではCodex CLIプロセスを直接起動・終了しない。
 
+BrokerはKeylink Studio内部の独立コンポーネントとし、次の境界を固定する。
+
+- **転送面:** WebSocket認証を区間ごとに終端し、JSON-RPC text messageを変更せず双方向転送する
+- **観測面:** `kind`、`method`、JSON-RPC `id`、`threadId`、`turnId`、必要なstatusだけを抽出する
+- **状態面:** Adapter／Tracker／Reducerが観測面のメタデータだけから汎用AI Client Stateを算出する
+- **送信面:** Host Link Senderが`CAP_AI_CLIENT_STATE`対応デバイスへ状態を送信する
+
+BrokerはJSON-RPC本文へ代理応答せず、prompt、response本文、tool引数、認証tokenを状態管理へ渡さない。
+
 ### 4.2 コンポーネントごとの役割分担
 
 本機能は、次の4層に分離して実装する。
 
 ```text
-Codex App Server / AIクライアント
-        │
-        ▼
-Keylink Studio
-  AI状態の解釈・管理・Host Link送信
+Codex CLI ⇄ Keylink Studio Broker ⇄ Codex App Server
+                    │ 状態メタデータ
+                    ▼
+Keylink Studio AI Client State
+  Adapter・Tracker・Reducer・Host Link Sender
         │
         ▼
 zmk-raw-hid
@@ -460,7 +473,7 @@ GPIO LEDなどの具体的な表示・通知方法を知らない。
 
 | コンポーネント | プロトタイプで必要な主な修正 | 本機能で変更しない領域 |
 |---|---|---|
-| Keylink Studio | App Server管理、イベントAdapter、状態機械、revision、Host Link送信、UI、ログ | LCD描画、USB/BLE descriptor |
+| Keylink Studio | App Server／Broker管理、区間別認証、透過転送、イベントAdapter、汎用AI Client State Reducer、revision、Host Link送信、UI、ログ | LCD描画、USB/BLE descriptor、ScreenKey固有表現 |
 | `zmk-raw-hid` | 64 byte Report対応、Transportの送受信・接続通知 | AI状態、Host Link Feature、ScreenKey |
 | `zmk-rawhid-app` | Host Link v2共通Router、HOST_HELLO／DEVICE_HELLO、AI Client State Core、Payload意味検証、到着順LWW、revisionイベント識別、Host timeout、状態保持、状態イベント、Capability集約 | App Server、Turn追跡、LCD・LED等の具体的表現 |
 | キーボードFirmware | 1つ以上のRenderer、ScreenKey描画、Renderer固有タイマー、ST7735／SPI／バックライト、Target・Devicetree・Kconfig設定 | Payload意味検証、revision、Host timeout、Core状態保持、App Server管理 |
@@ -529,6 +542,10 @@ AI Client State Core in zmk-rawhid-app
 - WebSocket transportは実装時点のCodex公式仕様・生成Schemaを確認して実装する。
 - Brokerはtext message単位でJSON-RPC本文を変更せず双方向へ転送する。
 - Brokerはserver requestへ代理応答せず、元のCLIへ転送したresponseだけをApp Serverへ返す。
+- 対象はCodex CLI `0.145.0`と、SHA-256
+  `1F66700D1CC3DE4A5004E5614A6098878B405C7E7C5F8C9BE97FC900D0AD6C68`の生成Schemaに固定する。
+- App ServerとWebSocket transportはexperimentalであるため、Codex CLIバージョンまたはSchema hashが
+  変わった場合は起動前検査で停止し、methodやfieldの互換性を推測しない。
 
 起動例:
 
@@ -556,8 +573,11 @@ codex --remote ws://127.0.0.1:4501 --remote-auth-token-env KEYLINK_CODEX_BROKER_
 ### 5.3 起動待ち
 
 - App Server起動待ちとBroker起動待ちはそれぞれ10秒
-- App Serverの`/readyz`成功後にBrokerを起動する
-- BrokerがApp Server用tokenで上流接続でき、Broker側listenを開始した時点でCLI接続待ちとする
+- App Server子プロセスが生存し、指定WebSocket portがlisten可能になった後にBrokerを起動する
+- App Serverに`/readyz`が存在するとは仮定しない
+- Broker側listen開始を確認した時点でCLI接続待ちとする
+- BrokerはCLI upgrade時にBroker用tokenを検証し、その後App Server用tokenで上流WebSocketを確立してから
+  下流WebSocket handshakeを完了する。上流接続に失敗した場合はHTTP 502で拒否する
 - CLIの`initialize` request、App Serverのresponse、CLIの`initialized` notificationはBrokerが透過転送する
 - Broker自身は独立した`initialize`を送信しない
 - いずれかが10秒以内に完了しない場合は起動失敗とし、管理対象BrokerとApp Serverを停止する
@@ -575,6 +595,8 @@ codex --remote ws://127.0.0.1:4501 --remote-auth-token-env KEYLINK_CODEX_BROKER_
 - CLI接続コマンドではtoken値を直接表示せず、環境変数名を使う
 - listen addressは引き続き`127.0.0.1`固定
 - 認証なしモードはデバッグ時の明示的オプションに限定し、既定にしない
+- tokenファイルの内容、Authorization header、環境変数値はログへ記録しない
+- Broker用tokenはCLI handshakeだけ、App Server用tokenは上流handshakeだけで使用する
 
 ### 5.5 Codex実行ファイルの解決
 
@@ -589,6 +611,7 @@ codex --remote ws://127.0.0.1:4501 --remote-auth-token-env KEYLINK_CODEX_BROKER_
 - Broker listen開始後、CLI接続にはタイムアウトを設けない
 - ユーザーが停止するまで待機する
 - 同時に受け入れるCLIは1本だけとし、2本目はApp Serverへ接続せず拒否する
+- 認証なし／不正tokenはHTTP 401、追跡中CLIがある場合の2本目はHTTP 409で拒否する
 
 ---
 
@@ -665,13 +688,16 @@ Broker異常終了時も同じ形式で、Brokerであること、終了コー�
 
 1. App ServerポートとBrokerポートを確定
 2. 区間ごとに異なるtokenを生成
-3. App Serverを起動し`/readyz`を確認
-4. Brokerを起動し、Broker→App Server接続を確立
-5. Brokerのlisten開始を確認
+3. App Serverを起動し、子プロセス生存とWebSocket listenを確認
+4. Brokerを起動し、Brokerのlisten開始を確認
+5. CLI接続時にBroker用tokenを検証し、App Server用tokenで上流接続を確立
 6. UIを`クライアント接続待ち`へ変更
 7. CLIがBrokerへ接続
 8. CLIの`initialize`／`initialized`を透過転送
 9. 初期化完了後、UIを`接続済み`へ変更
+
+Broker起動成功は`broker_ready`相当、CLI接続成功は上流・下流の両方を保持した
+`connection_opened`相当の内部イベントで判定する。固定時間のsleepだけでは成功扱いにしない。
 
 ### 7.2 ユーザーによるCodex連携停止
 
@@ -693,11 +719,11 @@ Codex連携を停止すると、CLIとの接続が切断されます。
 1. `AI_CLIENT_STATE`の`NONE`を1回送信
 2. 5秒ごとの定期送信を停止
 3. BrokerのCLI受付を停止して接続中CLIを切断
-4. Brokerを停止
-5. App Serverへ正常終了を要求
+4. Brokerの下流・上流WebSocketをcloseし、Broker子プロセスを終了
+5. App Server子プロセスを終了
 6. 最大3秒待機
 7. 終了しなければ管理対象Broker／App Serverだけを強制終了
-8. tokenファイルを削除し、UIを`停止中`へ変更
+8. 両子プロセスの終了を確認してtokenファイルを削除し、UIを`停止中`へ変更
 
 ### 7.3 Keylink Studio終了
 
@@ -715,6 +741,8 @@ Keylink Studioが起動していない外部Brokerにも触れない。
 6. ユーザーが再度`Codex連携を開始`を押して復旧
 
 Brokerが異常終了した場合も同じ扱いとし、App ServerとCLI接続を停止して自動再起動しない。
+CLI側またはApp Server側のWebSocket closeはBrokerが反対側へ伝播する。転送失敗時は
+JSON-RPCへ合成responseを返さず、接続を閉じてKeylink Studioへ異常を通知する。
 ### 7.5 PCスリープ・復帰
 
 - スリープ開始を検出できる場合、状態送信を停止し、接続を休止扱いにする
@@ -741,6 +769,11 @@ Codex CLIがBrokerを介してApp Serverへ接続しただけでは開始しな�
 - `thread/start`
 - `thread/resume`
 
+requestを観測しただけでは開始しない。BrokerはCLI→App Server requestのJSON-RPC `id`を保持し、
+対応する成功responseの`result.thread.id`を`tracked_thread_id`として確定する。
+`thread/resume`ではrequestの`params.threadId`とresponseの`result.thread.id`が一致することを確認する。
+`thread/started` notificationの`params.thread.id`も同じidentityとして照合する。
+
 開始時点でTurnが動いていなければ:
 
 ```text
@@ -754,6 +787,7 @@ activity_state = AVAILABLE
 
 - Brokerが追跡中CLI WebSocketのcloseを直接観測した時点で3秒の再接続猶予へ移る
 - `/exit`文字列やCLI画面出力から終了を推測しない
+- `thread/unsubscribe` request／responseだけではセッション終了と判定しない
 - 通常はクライアント切断として3秒の再接続猶予
 - 3秒以内に同じThreadへ再接続: 継続
 - 3秒以内に再接続しない: 終了
@@ -789,6 +823,7 @@ activity_state = NONE
 プロトタイプでは追跡対象を厳密に1クライアント・1トップレベルThreadへ限定する。
 
 - Brokerの最初の下流WebSocketで接続・初期化が完了したCLIを追跡対象とする
+- 追跡単位はBrokerが発行する`connection_id`とし、JSON-RPC `id`のpending mapを接続単位で分離する
 - Broker自身はApp ServerへJSON-RPCクライアントとして`initialize`しないため、自己識別・除外は不要
 - 追跡中CLIが接続している間、2本目のCLIはApp Serverへ上流接続を作らずWebSocket handshakeで拒否し、UIとログへ「追加クライアント未対応」を記録する
 - 追跡中クライアントが同一接続のまま新しい`thread/start`または`thread/resume`を行った場合:
@@ -796,8 +831,8 @@ activity_state = NONE
   2. 旧セッションへ`NONE`を送信
   3. 新Threadを追跡対象へ切り替える
   4. 新Threadの状態を新しい`revision`で送信
-- `tracked_thread_id`と一致しないThreadイベントは表示reducerへ渡さず、debugログだけ残す
-- `tracked_turn_id`と一致しないTurn・item・server requestは無視する
+- `tracked_thread_id`と一致しないThreadイベントは表示reducerへ渡さず、本文を含まないdebug metadataだけ残す
+- `tracked_turn_id`と一致しないTurn・item・server requestは表示reducerへ渡さない
 - サブエージェントやネストした処理が別Thread/Turn IDで通知されても、トップレベルの追跡対象と一致しない限り表示状態を変更しない
 - Turn切替時は古いTurnに属する未解消要求を必ず破棄する
 
@@ -814,6 +849,8 @@ CLIクラッシュ後にユーザーが手動で`codex resume`する時間を保
 
 本節の状態は、Brokerが透過転送する追跡対象CLIのJSON-RPCメタデータだけから算出する。
 Brokerは状態算出のためにmessage本文を書き換えたり、requestへ代理応答したりしない。
+Reducerの出力は`client_type`、`client_variant`、`session_active`、`activity_state`、`revision`からなる
+汎用AI Client Stateであり、ScreenKeyの色、点滅、ロゴ、表示時間を含めない。
 
 ### 9.1 列挙値
 
@@ -893,30 +930,44 @@ App Server・WebSocket・Raw HIDなど通信系の問題はScreenKeyの`ERROR`�
 
 ## 10. App Serverイベント分類
 
-実装では、使用するCodexバージョンから生成したTypeScriptまたはJSON Schemaを正とし、イベント名の差異をアダプター層に閉じ込める。
+Codex CLI `0.145.0`から`--experimental`付きで生成したSchemaを正とし、次のmethod／fieldだけを
+Adapterへ登録する。将来バージョンとの差異はAdapter層に閉じ込め、未知methodは状態を変更しない。
+
+| 種別 | method | 状態判定に使用するfield |
+|---|---|---|
+| Thread開始request／response | `thread/start` | JSON-RPC `id`、response `result.thread.id` |
+| Thread再開request／response | `thread/resume` | request `params.threadId`、response `result.thread.id` |
+| Thread開始通知 | `thread/started` | `params.thread.id` |
+| Turn開始request | `turn/start` | JSON-RPC `id`、`params.threadId` |
+| Turn開始通知 | `turn/started` | `params.threadId`、`params.turn.id`、`params.turn.status` |
+| Turn終了通知 | `turn/completed` | `params.threadId`、`params.turn.id`、`params.turn.status`、`params.turn.error` |
+| 要求解消通知 | `serverRequest/resolved` | `params.requestId`、`params.threadId` |
+| Error通知 | `error` | `params.threadId`、`params.turnId`、`params.error`、`params.willRetry` |
 
 ### 10.1 Turn開始
 
-- 明示的なTurn開始通知で`WORKING`
+- `turn/started`で`params.turn.status == inProgress`かつ追跡中Threadである場合に`WORKING`
+- `tracked_turn_id = params.turn.id`として固定する
 - 新しい状態イベントとして新しい`revision`を発行
 
 ### 10.2 Turn完了
 
-- 明示的なTurn終了通知だけで判定
-- 最終statusが正常完了なら`COMPLETED`
+- `turn/completed`だけで終端判定する
+- `params.turn.id`が`tracked_turn_id`と一致し、`params.turn.status == completed`なら`COMPLETED`
 - メッセージ生成終了、item完了、tool完了などの途中イベントから推測しない
 
 ### 10.3 Turn失敗
 
-- 明示的なTurn終了通知の失敗statusで`ERROR`
+- `turn/completed`の`params.turn.status == failed`で`ERROR`
+- `error` notificationは`willRetry`を含めて診断状態として保持するが、単独ではTurn終端にしない
 
 ### 10.4 Turnキャンセル／中断
 
 既定規則:
 
-- 最終statusが`completed`: `COMPLETED`
-- 最終statusが`failed`または明示的errorを含む: `ERROR`
-- 最終statusが`interrupted`で、失敗理由が明示されない: `AVAILABLE`
+- `params.turn.status == completed`: `COMPLETED`
+- `params.turn.status == failed`: `ERROR`
+- `params.turn.status == interrupted`で、`params.turn.error`に失敗が明示されない: `AVAILABLE`
 - ユーザー操作による中断と確認できる: `AVAILABLE`
 - App Server異常終了やprotocol errorはScreenKeyの`ERROR`にはせず、セッションを終了してKeylink Studio UIの`エラー`へ移す
 
@@ -927,27 +978,31 @@ App Server・WebSocket・Raw HIDなど通信系の問題はScreenKeyの`ERROR`�
 
 `WAITING_APPROVAL`として扱う構造化要求:
 
-- コマンド実行承認
-- ファイル変更承認
-- 権限要求
+- `item/commandExecution/requestApproval`
+- `item/fileChange/requestApproval`
+- `item/permissions/requestApproval`
 
-実装時点のSchemaに存在する該当server request methodを対応表へ登録する。
 server requestは単なる通知ではなく応答必須のJSON-RPC requestとして扱う。
 Brokerは要求を未解消一覧へ記録した後も元のJSON-RPC requestをCLIへ転送し、同じIDのCLI responseをApp Serverへ転送する。Keylink Studioが代理応答してはならない。
+各要求はJSON-RPC `id`を主キーとし、`params.threadId`、`params.turnId`、`params.itemId`を相関に使用する。
 
 ### 10.6 入力要求
 
 `WAITING_INPUT`として扱う構造化要求:
 
-- tool user input request
-- MCP elicitation request
+- `item/tool/requestUserInput`
+- `mcpServer/elicitation/request`
+
+`item/tool/requestUserInput`は`params.threadId`、`params.turnId`、`params.itemId`を必須とする。
+`mcpServer/elicitation/request`は`params.threadId`を必須とし、`params.turnId`はnullableなので、
+Turn IDがない要求もThread単位の未解消入力として保持する。
 
 ### 10.7 要求解消
 
-- App Server上の`request_id`をKeylink Studio内部でプロトタイプから管理する
-- `request_id`をHost Linkパケットへ載せるのは将来拡張
-- 明示的な解消通知で個別削除
-- 同じ`request_id`のCLI responseをBrokerがApp Serverへ転送した場合も個別削除
+- App Serverが発行したJSON-RPC `id`をKeylink Studio内部で管理する
+- JSON-RPC `id`をHost Linkパケットへ載せるのは将来拡張
+- `serverRequest/resolved.params.requestId`が一致する明示的な解消通知で個別削除
+- 同じJSON-RPC `id`のCLI responseをBrokerがApp Serverへ転送した場合も個別削除
 - Turn完了・失敗・中断時は、そのTurnに属する要求をすべて破棄
 - テキスト出力や後続処理から暗黙に解消を推測しない
 
@@ -1700,7 +1755,8 @@ Codex連携ログはKeylink Studioの通常ログへ統合する。
 
 ## 18. 処理シーケンス・データフロー・状態遷移図
 
-本節の図は、プロトタイプ実装時の責務分担と状態変化を俯瞰するためのものである。図中のApp Serverイベント名は概念名を含み、実装時には使用するCodexバージョンの生成Schemaへ対応付ける。
+本節の図はBroker採用後の責務分担と状態変化を示す。Codex側method／fieldは
+Codex CLI `0.145.0`の生成SchemaとBroker／App Server互換性確認で確認した正式名を使用する。
 
 ### 18.1 Codex連携開始シーケンス
 
@@ -1720,14 +1776,16 @@ sequenceDiagram
     User->>KS: Codex連携を開始
     KS->>KS: 2ポート検証・区間別token生成
     KS->>AS: App Serverプロセス起動<br/>127.0.0.1:App Serverポート
-    KS->>AS: /readyz確認
+    KS->>KS: 子プロセス生存・WebSocket listen確認
     KS->>BR: Broker起動<br/>127.0.0.1:Brokerポート
-    BR->>AS: App Server用tokenでWebSocket接続
     BR-->>KS: listen開始
     KS->>KS: UI = クライアント接続待ち
 
     User->>AC: 接続用コマンドで起動
-    AC->>BR: Broker用tokenでWebSocket接続
+    AC->>BR: Broker用tokenでWebSocket upgrade要求
+    BR->>BR: token検証・単一接続ガード
+    BR->>AS: App Server用tokenでWebSocket接続
+    BR-->>AC: 下流WebSocket handshake完了
     AC->>BR: initialize
     BR->>AS: initializeを無変更転送
     AS-->>BR: initialize正常応答
@@ -1741,9 +1799,11 @@ sequenceDiagram
 
     AC->>BR: thread/start または thread/resume
     BR->>AS: requestを無変更転送
-    AS-->>BR: Thread開始・再開成功response／event
-    BR-->>AC: response／eventを無変更転送
-    BR-->>KS: Thread開始・再開成功メタデータ
+    AS-->>BR: 成功response<br/>result.thread.id
+    BR-->>AC: responseを無変更転送
+    AS-->>BR: thread/started<br/>params.thread.id
+    BR-->>AC: notificationを無変更転送
+    BR-->>KS: responseとnotificationを照合したThread ID
     KS->>KS: session_active=true<br/>activity=AVAILABLE<br/>revisionを更新
     KS->>RH: 64 byte Raw HID Report送信<br/>Host Link v2 Packetを格納
     RH->>APP: 受信Reportをそのまま引き渡す
@@ -1769,10 +1829,10 @@ sequenceDiagram
     participant LCD as ScreenKey
 
     User->>AC: プロンプト送信
-    AC->>BR: Turn開始要求
+    AC->>BR: turn/start request
     BR->>AS: requestを無変更転送
-    AS-->>BR: Turn開始event
-    BR-->>AC: eventを無変更転送
+    AS-->>BR: turn/started<br/>params.threadId・params.turn.id・status
+    BR-->>AC: notificationを無変更転送
     BR-->>KS: Turn開始メタデータ
     KS->>KS: WORKINGへ遷移<br/>revisionを更新
     KS->>RH: STATE_UPDATE(WORKING)を含むReport
@@ -1781,10 +1841,10 @@ sequenceDiagram
     FW->>LCD: 青い回転線を開始
 
     alt 承認要求
-        AS-->>BR: 構造化された承認request
+        AS-->>BR: item/*/requestApproval<br/>JSON-RPC request
         BR-->>AC: requestを同じIDで無変更転送
         BR-->>KS: 承認要求メタデータ
-        KS->>KS: request_idを未解消一覧へ追加<br/>WAITING_APPROVAL
+        KS->>KS: JSON-RPC idを未解消一覧へ追加<br/>WAITING_APPROVAL
         KS->>RH: STATE_UPDATE(WAITING_APPROVAL)
         RH->>APP: 64 byte Report
         APP->>FW: AI Client Payload
@@ -1793,15 +1853,15 @@ sequenceDiagram
         AC->>BR: 同じIDのresponse
         BR->>AS: responseを無変更転送
         BR-->>KS: 要求解消メタデータ
-        KS->>KS: request_idを削除<br/>未解消要求を再評価
+        KS->>KS: JSON-RPC idを削除<br/>未解消要求を再評価
         KS->>RH: STATE_UPDATE(WORKINGまたはWAITING_INPUT)
         RH->>APP: 64 byte Report
         APP->>FW: AI Client Payload
     else 入力要求
-        AS-->>BR: 構造化された入力request
+        AS-->>BR: item/tool/requestUserInput<br/>またはmcpServer/elicitation/request
         BR-->>AC: requestを同じIDで無変更転送
         BR-->>KS: 入力要求メタデータ
-        KS->>KS: request_idを未解消一覧へ追加<br/>WAITING_INPUT
+        KS->>KS: JSON-RPC idを未解消一覧へ追加<br/>WAITING_INPUT
         KS->>RH: STATE_UPDATE(WAITING_INPUT)
         RH->>APP: 64 byte Report
         APP->>FW: AI Client Payload
@@ -1810,14 +1870,14 @@ sequenceDiagram
         AC->>BR: 同じIDのresponse
         BR->>AS: responseを無変更転送
         BR-->>KS: 要求解消メタデータ
-        KS->>KS: request_idを削除<br/>未解消要求を再評価
+        KS->>KS: JSON-RPC idを削除<br/>未解消要求を再評価
         KS->>RH: STATE_UPDATE(WORKINGまたはWAITING_APPROVAL)
         RH->>APP: 64 byte Report
         APP->>FW: AI Client Payload
     end
 
     alt 正常完了
-        AS-->>BR: 明示的なTurn正常終了event
+        AS-->>BR: turn/completed<br/>turn.status=completed
         BR-->>AC: eventを無変更転送
         BR-->>KS: Turn正常終了メタデータ
         KS->>KS: COMPLETEDへ遷移<br/>revisionを更新
@@ -1827,7 +1887,7 @@ sequenceDiagram
         FW->>LCD: 緑枠を30秒表示
         FW->>LCD: 30秒後に緑枠だけ消去
     else Turn失敗または異常キャンセル
-        AS-->>BR: 明示的な失敗・異常終了event
+        AS-->>BR: turn/completed<br/>turn.status=failed
         BR-->>AC: eventを無変更転送
         BR-->>KS: Turn失敗メタデータ
         KS->>KS: ERRORへ遷移<br/>revisionを更新
@@ -1836,7 +1896,7 @@ sequenceDiagram
         APP->>FW: AI Client Payload
         FW->>LCD: 赤枠点滅を継続
     else ユーザーによる明示的キャンセル
-        AS-->>BR: ユーザー停止による中断event
+        AS-->>BR: turn/completed<br/>turn.status=interrupted
         BR-->>AC: eventを無変更転送
         BR-->>KS: Turn中断メタデータ
         KS->>KS: AVAILABLEへ遷移<br/>revisionを更新
@@ -1872,7 +1932,7 @@ sequenceDiagram
         BR->>AS: App Server用tokenで新規接続
         AC->>BR: 同じThreadをresume
         BR->>AS: requestを無変更転送
-        BR-->>KS: 同じThreadのresume成功
+        BR-->>KS: thread/resume responseの<br/>result.thread.id一致
         KS->>KS: UI = 接続済み<br/>状態・revisionを維持
         Note over KS,FW: 新しいSTATE_UPDATEは送らず、既存表示を継続
     else 3秒以内だが別Threadまたは判定不能
@@ -1937,7 +1997,7 @@ sequenceDiagram
         KS->>BR: CLI受付停止・Broker終了
         BR--xAC: 下流接続終了
         BR--xAS: 上流接続終了
-        KS->>AS: 正常終了要求
+        KS->>AS: 管理対象App Server子プロセスの終了開始
         alt 3秒以内に終了
             AS-->>KS: プロセス終了
         else 3秒以内に終了しない
@@ -1984,10 +2044,10 @@ flowchart LR
     subgraph DEVICE[対応デバイスごと]
         RH[zmk-raw-hid<br/>64 byte Raw HID Transport]
         APP[zmk-rawhid-app<br/>Host Link v2 Header検証・Feature配送]
-        HANDLER[キーボードFirmware<br/>AI Client Feature Handler]
-        MODEL[AI表示状態モデル<br/>revision・timeout管理]
+        MODEL[zmk-rawhid-app<br/>AI Client State Core<br/>LWW・timeout・state_generation]
+        DLOG[Deviceローカル診断ログ]
         QUEUE[Latest-wins描画要求]
-        RENDER[Display Worker<br/>display_generation管理]
+        RENDER[対象Keyboard Firmware<br/>Renderer / Display Worker<br/>display_generation管理]
         LCD[ScreenKey<br/>ST7735 / SPI]
     end
 
@@ -2003,13 +2063,12 @@ flowchart LR
     REDUCER -->|AI_CLIENT / STATE_UPDATE| TX
     TX -->|64 byte Raw HID Report| RH
     RH -->|1 Reportを無加工で引渡し| APP
-    APP -->|AI_CLIENT Payloadを配送| HANDLER
-    HANDLER --> MODEL
+    APP -->|AI_CLIENT Payloadを配送| MODEL
     MODEL --> QUEUE
     QUEUE --> RENDER
     RENDER -->|外周差分描画・ロゴ・BL制御| LCD
-    APP -->|Header・Featureエラー| UI
-    HANDLER -->|Payload・revisionエラー| UI
+    APP -.->|Header・Feature診断| DLOG
+    MODEL -.->|Payload・timeout診断| DLOG
     TX -->|送信障害開始・復旧| UI
 ```
 
@@ -2019,7 +2078,7 @@ flowchart LR
 |---|---|---|
 | App Serverプロセス状態 | Keylink Studio | 送らない |
 | クライアント接続状態 | Keylink Studio UI | 送らない |
-| `thread_id` / `turn_id` / `request_id` | Keylink Studio内部 | プロトタイプでは送らない |
+| `thread_id` / `turn_id` / JSON-RPC `id` | Keylink Studio内部 | プロトタイプでは送らない |
 | `client_type` / `client_variant` | Keylink Studio → Firmware | 送る |
 | `session_active` / `activity_state` | Keylink Studio → Firmware | 送る |
 | `revision` | Keylink Studio → Firmware | 送る |
@@ -2060,12 +2119,12 @@ stateDiagram-v2
 stateDiagram-v2
     [*] --> NONE
 
-    NONE --> AVAILABLE: thread/startまたはthread/resume成功（Turnなし）
+    NONE --> AVAILABLE: thread/startまたはthread/resume成功response（Turnなし）
     NONE --> WORKING: Thread開始時にTurn実行中
 
-    AVAILABLE --> WORKING: 新しいTurn開始
-    COMPLETED --> WORKING: 次のTurn開始
-    ERROR --> WORKING: 次のTurn開始
+    AVAILABLE --> WORKING: turn/started
+    COMPLETED --> WORKING: turn/started
+    ERROR --> WORKING: turn/started
 
     WORKING --> WAITING_APPROVAL: 未解消の承認要求あり
     WORKING --> WAITING_INPUT: 承認要求なし・入力要求あり
@@ -2074,17 +2133,17 @@ stateDiagram-v2
     WAITING_APPROVAL --> WORKING: 全要求解消
     WAITING_INPUT --> WORKING: 全要求解消
 
-    WORKING --> COMPLETED: 明示的なTurn正常終了
-    WAITING_APPROVAL --> COMPLETED: Turnが正常終了
-    WAITING_INPUT --> COMPLETED: Turnが正常終了
+    WORKING --> COMPLETED: turn/completed status=completed
+    WAITING_APPROVAL --> COMPLETED: turn/completed status=completed
+    WAITING_INPUT --> COMPLETED: turn/completed status=completed
 
-    WORKING --> ERROR: Turn失敗・異常キャンセル
-    WAITING_APPROVAL --> ERROR: Turn失敗・異常キャンセル
-    WAITING_INPUT --> ERROR: Turn失敗・異常キャンセル
+    WORKING --> ERROR: turn/completed status=failed
+    WAITING_APPROVAL --> ERROR: turn/completed status=failed
+    WAITING_INPUT --> ERROR: turn/completed status=failed
 
-    WORKING --> AVAILABLE: ユーザーによる明示的キャンセル
-    WAITING_APPROVAL --> AVAILABLE: ユーザーによる明示的キャンセル
-    WAITING_INPUT --> AVAILABLE: ユーザーによる明示的キャンセル
+    WORKING --> AVAILABLE: turn/completed status=interrupted
+    WAITING_APPROVAL --> AVAILABLE: turn/completed status=interrupted
+    WAITING_INPUT --> AVAILABLE: turn/completed status=interrupted
 
     AVAILABLE --> NONE: 明示的終了／再接続猶予超過
     WORKING --> NONE: 明示的終了／再接続猶予超過
@@ -2714,10 +2773,72 @@ WORKING
 - wrap後の`0`も有効値として扱う
 - 同一プロセス内では新イベントごとに1加算し、heartbeatでは増加させない
 
+### 19.49 Codex CLI更新時のApp Server互換性
+
+Codex CLIを現在の対応基準`0.145.0`から更新する場合は、App Server／WebSocket transportを互換と推測せず、
+次の順序で新しいCLIバージョンを検証する。
+
+1. 更新前の`codex --version`、生成Schema SHA-256、ロールバック先`0.145.0`を記録する。
+2. 更新後の`codex --version`と、`codex app-server generate-json-schema --experimental`で生成した
+   Schema SHA-256を記録する。
+3. 既存の起動前検査が未対応バージョンまたはSchema hashを拒否し、UIへエラーを表示して、
+   port `4500`／`4501`、管理対象process、一時token directoryを残さないことを確認する。
+4. 新旧Schemaを比較し、BrokerとAdapterが使用するWebSocket認証option、`initialize`／`initialized`、
+   Thread／Turn、approval／input requestのmethod名とfield形状に互換性があることを確認する。
+5. 互換性を確認できた場合だけ`SUPPORTED_CODEX_VERSION`、`SUPPORTED_SCHEMA_SHA256`、
+   関連test fixture、仕様書の対象バージョン／hashを同じ変更で更新する。
+6. Keylink Studioから連携を開始し、capability-token認証、CLI接続、Thread開始、
+   `WORKING`、`WAITING_APPROVAL`または`WAITING_INPUT`、`COMPLETED`、セッション終了を実機確認する。
+7. 停止→再開始、App Server／Broker異常終了、portと一時token directoryの解放を再確認する。
+8. 非互換がある場合は基準値を更新せず`0.145.0`へ戻し、差分をAdapter変更として扱う。
+
+token、生成Schemaの一時出力、認証情報はcommitしない。互換性確認結果には、新旧バージョン、
+新旧Schema SHA-256、差分の有無、実機結果、採用またはロールバック判断を記録する。
+
+2026-07-25に`0.144.6`から`0.145.0`への更新を確認した。
+
+- 更新前Schema SHA-256:
+  `85EA836927D6CFDD3C68A9BDA17DBA48D2573BBC282AB2D5775A5005E40BC9C3`
+- 更新後Schema SHA-256:
+  `1F66700D1CC3DE4A5004E5614A6098878B405C7E7C5F8C9BE97FC900D0AD6C68`
+- 更新前の起動前検査が`0.145.0`を安全に拒否し、App Server／Broker portと
+  `keylink-codex-*`一時directoryを残さないことを確認した
+- 新旧Schemaのmethod集合は202件から208件へ増え、削除されたmethodは0件
+- Adapterが使用する14 method、`experimentalApi`、Thread／Turn ID、Turn status／error、
+  approval／input request、`serverRequest/resolved`のfield形状は互換
+- 対応version／Schema更新後、Keylink Studio Broker経由の
+  `initialize`／`initialized`／`thread/start`と`thread/started`を確認した
+- 公式debug clientで`turn/start`、`turn/started`、agent response、
+  `turn/completed(completed)`を確認した
+- 開始→停止→再開始、App Server／Broker異常終了、portと一時directoryの解放を確認した
+- Adapter変更は不要と判定し、対応基準を`0.145.0`へ更新した
+
 
 ## 20. 完了条件
 
-次をすべて満たした時点でプロトタイプ完了とする。
+本節の完了条件は、次の対象範囲と延期条件を明示したうえで判定する。
+
+2026-07-25に完了対象を次の範囲へ確定した。
+
+- Codex CLI `0.145.0`
+- Keylink Studio、Broker、Codex App Server
+- Host Link v2、`zmk-rawhid-app`
+- 対応デバイス1台
+- ScreenKey Renderer 1件
+- USB接続
+
+この範囲の条件をすべて満たした時点で、ScreenKey単体を対象とした
+Codex状態表示プロトタイプを完了とする。
+
+次は未確認のままPASSにはせず、対応実機完成後の拡張検証へ`DEFERRED`とする。
+
+- 対応デバイス2台以上
+- 複数Renderer
+- LED-only Renderer
+- ScreenKey以外のTarget
+- BLE経路
+- 非64-byte interfaceの実機除外確認
+- 全実機Targetでの既存Feature回帰
 
 ### 20.1 アーキテクチャ成立条件
 
@@ -2744,6 +2865,7 @@ WORKING
 - 不正Packetを層別に拒否し、正常Packetはrevisionの大小に関係なくLWW受理
 - 同じrevision再送を正しく処理
 - COMPLETEDを30秒表示
+- Codex CLI更新後にApp Server生成Schemaと実機E2Eの互換性を確認
 - 30分以上の連続動作を完了
 
 ### 20.3 Core／Renderer分離条件
@@ -2766,6 +2888,31 @@ WORKING
 - BLE経路で64 byte条件を満たさないTargetはHost Link v2を利用可能として扱わない
 - PCスリープ・復帰テストを完了
 - ST7735の表示offsetと四辺の外周視認性を実機で確定
+
+### 20.5 2026-07-26完了判定
+
+ScreenKey単体の対象範囲について、20.1～20.4を完了した。
+
+| 区分 | 判定 | 主な根拠 |
+|---|---|---|
+| 20.1 アーキテクチャ成立 | `PASS` | Gate A/B、Broker透過転送、Host再握手、revision逆行LWW |
+| 20.2 基本機能 | `PASS` | 全activity、起動失敗4ケース、異常終了、切断・再接続、USB再列挙、15秒timeout、COMPLETED 30秒、Codex CLI 0.145.0互換性、30分5ケース |
+| 20.3 Core／Renderer分離 | `PASS`（対象範囲） | Core単体test、Core無効／Renderer 0件／Renderer 1件のCapability test、ScreenKey Renderer、30秒ポリシー分離 |
+| 20.4 共有基盤回帰 | `PASS`（対象範囲） | ScreenKeyの64 byte Host Link、既存自動回帰、DEVICE_HELLO、PCスリープ・復帰、ST7735四辺 |
+
+未実施・部分確認項目は次のとおり分類する。
+
+| 仕様 | 判定 | 内容 |
+|---|---|---|
+| §19.23 | `DEFERRED` | 対応デバイス2台目の完成後に実施 |
+| §19.36 | `PARTIAL PASS` | ScreenKey USB経路は合格。他Target、非64-byte interface、BLEは延期 |
+| §19.37 | `PARTIAL PASS` | Keylink Studio自動回帰は合格。全実機Target回帰は延期 |
+| §19.42 | `DEFERRED` | 複数Renderer実機完成後に実施 |
+| §19.44 | `DEFERRED` | LED Renderer実機完成後に実施 |
+
+以上により、**ScreenKey単体を対象としたCodex状態表示プロトタイプは完了**とする。
+`DEFERRED`項目は将来の実機拡張に対する検証であり、この完了宣言では
+合格済みとして扱わない。
 
 ---
 

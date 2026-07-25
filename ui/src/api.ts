@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppConfig,
+  AiClientStateSnapshot,
+  CodexBrokerStatus,
   DiscardChangesDto,
   ResetToKeymapDto,
   EditBehavior,
@@ -38,6 +40,21 @@ export const getConfig = () => invoke<AppConfig>("get_config");
 export const getConfigPath = () => invoke<string | null>("get_config_path");
 export const saveConfig = (config: AppConfig) =>
   invoke<void>("save_config", { config });
+
+// Codex App Server / Broker lifecycle. Activity reduction and Host Link sending
+// are intentionally handled by separate layers.
+export const getCodexIntegrationStatus = () =>
+  invoke<CodexBrokerStatus>("get_codex_integration_status");
+export const getAiClientState = () =>
+  invoke<AiClientStateSnapshot>("get_ai_client_state");
+export const startCodexIntegration = () =>
+  invoke<CodexBrokerStatus>("start_codex_integration");
+export const stopCodexIntegration = () =>
+  invoke<CodexBrokerStatus>("stop_codex_integration");
+export const debugAbortCodexBroker = () =>
+  invoke<void>("debug_abort_codex_broker");
+export const debugInjectCodexTurnFailure = () =>
+  invoke<void>("debug_inject_codex_turn_failure");
 export const reloadConfig = () => invoke<AppConfig>("reload_config");
 export const showConfigFileLocation = () =>
   invoke<ConfigLocationResult>("show_config_file_location");

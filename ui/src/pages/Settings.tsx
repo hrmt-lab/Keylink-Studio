@@ -1,6 +1,15 @@
 import { useEffect, useState } from "react";
-import { Save, RefreshCcw, Check, X, Plus } from "lucide-react";
-import { reloadConfig, getLaunchAtLogin, setLaunchAtLogin } from "../api";
+import { Save, RefreshCcw, Check, X, Plus, Copy, Play, Square } from "lucide-react";
+import {
+  getCodexIntegrationStatus,
+  debugAbortCodexBroker,
+  debugInjectCodexTurnFailure,
+  getLaunchAtLogin,
+  reloadConfig,
+  setLaunchAtLogin,
+  startCodexIntegration,
+  stopCodexIntegration,
+} from "../api";
 import { Toggle } from "../components/Toggle";
 import { ErrorNotice, PageHeader, PrimaryButton, SecondaryButton, SectionCard, SettingRow } from "../components/Ui";
 import { useConfigSection } from "../hooks/useConfigSection";
@@ -14,16 +23,17 @@ import {
   addCustomAccent,
   removeCustomAccent,
 } from "../lib/theme";
-import type { AppConfig } from "../types";
+import type { AppConfig, CodexBrokerStatus, MonitorStatus } from "../types";
 
 interface Props {
   config: AppConfig;
   setConfig: (c: AppConfig) => void;
+  status: MonitorStatus;
 }
 
 const MAX_USAGE = 0xffff;
 
-export default function Settings({ config, setConfig }: Props) {
+export default function Settings({ config, setConfig, status }: Props) {
   const { t } = useLang();
   const { draft, setDraft, isDirty, saving, error, setError, save } = useConfigSection({
     config,
@@ -142,6 +152,13 @@ export default function Settings({ config, setConfig }: Props) {
           />
         </SettingRow>
       </SectionCard>
+
+      <CodexIntegration
+        draft={draft}
+        setDraft={setDraft}
+        configDirty={isDirty}
+        status={status}
+      />
 
       {/* Polling */}
       <SectionCard title={t("settings.polling.section")}>
@@ -287,6 +304,251 @@ export default function Settings({ config, setConfig }: Props) {
         </div>
         <div>
           {t("settings.note2", { up: "0xFF60", u: "0x61" })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function CodexIntegration({
+  draft,
+  setDraft,
+  configDirty,
+  status,
+}: {
+  draft: AppConfig;
+  setDraft: React.Dispatch<React.SetStateAction<AppConfig>>;
+  configDirty: boolean;
+  status: MonitorStatus;
+}) {
+  const { t } = useLang();
+  const [broker, setBroker] = useState<CodexBrokerStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    const refresh = () => {
+      void getCodexIntegrationStatus()
+        .then((next) => active && setBroker(next))
+        .catch(() => active && setBroker(null));
+    };
+    refresh();
+    const timer = window.setInterval(refresh, 1000);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, []);
+
+  const phase = broker?.phase ?? "stopped";
+  const editable = phase === "stopped" || phase === "error";
+  const running = !editable;
+  const faultInjectionReady = phase === "waiting_for_client" || phase === "connected" || phase === "reconnecting";
+  const capableDevices = status.host_link_devices.filter(
+    (device) => (device.capabilities & (1 << 10)) !== 0,
+  ).length;
+  const codex = draft.ai_client.codex;
+  const updateCodex = (next: Partial<typeof codex>) => {
+    setDraft({ ...draft, ai_client: { codex: { ...codex, ...next } } });
+  };
+  const run = async (action: "start" | "stop") => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      setBroker(action === "start" ? await startCodexIntegration() : await stopCodexIntegration());
+    } catch (error) {
+      setActionError(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const requestStop = async () => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      const latest = await getCodexIntegrationStatus();
+      setBroker(latest);
+      if (latest.client_connected) {
+        setStopConfirmOpen(true);
+        return;
+      }
+      setBroker(await stopCodexIntegration());
+    } catch (error) {
+      setActionError(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const confirmStop = () => {
+    setStopConfirmOpen(false);
+    void run("stop");
+  };
+  const injectBrokerFailure = async () => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await debugAbortCodexBroker();
+    } catch (error) {
+      setActionError(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const injectTurnFailure = async () => {
+    setBusy(true);
+    setActionError(null);
+    try {
+      await debugInjectCodexTurnFailure();
+    } catch (error) {
+      setActionError(String(error));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const copyCommand = async () => {
+    if (!broker?.cli_connection_command) return;
+    try {
+      await navigator.clipboard.writeText(broker.cli_connection_command);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1600);
+    } catch {
+      setActionError(t("settings.codex.copy_failed"));
+    }
+  };
+
+  return (
+    <SectionCard title={t("settings.codex.section")}>
+      <div className="px-5 py-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5">
+            <span className={`h-2.5 w-2.5 rounded-full ${phase === "connected" ? "bg-accent" : phase === "error" ? "bg-red-500" : running ? "bg-amber-400" : "bg-disabled"}`} />
+            <div>
+              <p className="text-sm font-medium text-ink">{t(`settings.codex.phase.${phase}`)}</p>
+              <p className="mt-0.5 text-xs text-faint">{broker?.codex_version ? t("settings.codex.version", { version: broker.codex_version }) : t("settings.codex.version_unknown")}</p>
+            </div>
+          </div>
+          {running ? (
+            <SecondaryButton onClick={() => void requestStop()} disabled={busy} loading={busy} icon={<Square size={14} />}>{t("settings.codex.stop")}</SecondaryButton>
+          ) : (
+            <PrimaryButton onClick={() => void run("start")} disabled={busy || configDirty} loading={busy} icon={<Play size={14} />}>{t("settings.codex.start")}</PrimaryButton>
+          )}
+        </div>
+        {configDirty && editable && <p className="mt-3 text-xs text-amber-700">{t("settings.codex.save_first")}</p>}
+        {broker?.app_server_port != null && broker?.broker_port != null && (
+          <p className="mt-3 text-xs text-faint">
+            {t("settings.codex.active_ports", {
+              appServer: broker.app_server_port,
+              broker: broker.broker_port,
+            })}
+          </p>
+        )}
+        {broker?.debug_fault_injection_available && faultInjectionReady && (
+          <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <p>{t("settings.codex.debug_broker_failure.desc")}</p>
+            <div className="mt-2">
+              <SecondaryButton onClick={() => void injectBrokerFailure()} disabled={busy} loading={busy}>
+                {t("settings.codex.debug_broker_failure")}
+              </SecondaryButton>
+            </div>
+          </div>
+        )}
+        {broker?.debug_fault_injection_available && broker?.client_connected && (
+          <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+            <p>{t("settings.codex.debug_turn_failure.desc")}</p>
+            <div className="mt-2">
+              <SecondaryButton onClick={() => void injectTurnFailure()} disabled={busy} loading={busy}>
+                {t("settings.codex.debug_turn_failure")}
+              </SecondaryButton>
+            </div>
+          </div>
+        )}
+      </div>
+      {(actionError || broker?.last_error) && <div className="border-t border-background px-5 py-3"><ErrorNotice message={t("settings.codex.error")} details={broker?.last_error ?? actionError} /></div>}
+      <SettingRow label={t("settings.codex.executable")} description={t("settings.codex.executable.desc")} align="start">
+        <input className="input w-64 max-w-full font-mono text-xs" value={codex.executable_path ?? ""} disabled={!editable} onChange={(event) => updateCodex({ executable_path: event.target.value.trim() || null })} placeholder={t("settings.codex.path_placeholder")} />
+      </SettingRow>
+      <SettingRow label={t("settings.codex.app_server_port")} description={t("settings.codex.app_server_port.desc")}>
+        <input className="input !w-28 text-right font-mono" type="number" min={1024} max={65535} disabled={!editable} value={codex.app_server_port} onChange={(event) => updateCodex({ app_server_port: Math.max(1024, Math.min(65535, Number(event.target.value))) })} />
+      </SettingRow>
+      <SettingRow label={t("settings.codex.broker_port")} description={t("settings.codex.broker_port.desc")}>
+        <input className="input !w-28 text-right font-mono" type="number" min={1024} max={65535} disabled={!editable} value={codex.broker_port} onChange={(event) => updateCodex({ broker_port: Math.max(1024, Math.min(65535, Number(event.target.value))) })} />
+      </SettingRow>
+      <SettingRow label={t("settings.codex.devices")} description={t("settings.codex.devices.desc")}>
+        <span className={`text-sm font-medium ${capableDevices > 0 ? "text-ink" : "text-amber-700"}`}>{t("settings.codex.device_count", { count: capableDevices })}</span>
+      </SettingRow>
+      {capableDevices === 0 && <p className="border-t border-background px-5 py-3 text-xs text-amber-700">{t("settings.codex.no_devices")}</p>}
+      {broker?.cli_connection_command && <div className="border-t border-background px-5 py-4">
+        <p className="text-sm font-medium text-ink">{t("settings.codex.command")}</p>
+        <p className="mt-1 text-xs text-faint">{t("settings.codex.command.desc")}</p>
+        <div className="mt-3 flex items-start gap-2 rounded-xl bg-plate p-3 ring-1 ring-border">
+          <code className="min-w-0 flex-1 break-all font-mono text-xs leading-5 text-muted">{broker.cli_connection_command}</code>
+          <button onClick={() => void copyCommand()} className="rounded-lg p-2 text-muted hover:bg-surface hover:text-ink" title={t("settings.codex.copy")}>{copied ? <Check size={15} className="text-accent-deep" /> : <Copy size={15} />}</button>
+        </div>
+      </div>}
+      {stopConfirmOpen && (
+        <CodexStopConfirmDialog
+          onCancel={() => setStopConfirmOpen(false)}
+          onConfirm={confirmStop}
+        />
+      )}
+    </SectionCard>
+  );
+}
+
+function CodexStopConfirmDialog({
+  onCancel,
+  onConfirm,
+}: {
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const { t } = useLang();
+  const cancelForKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Enter" || event.key === "Escape") {
+      event.preventDefault();
+      event.stopPropagation();
+      onCancel();
+    }
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-ink/25 px-5"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="codex-stop-confirm-title"
+      aria-describedby="codex-stop-confirm-description"
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onCancel();
+      }}
+      onKeyDown={cancelForKeyboard}
+    >
+      <div className="w-full max-w-lg rounded-2xl bg-background p-6 shadow-2xl ring-1 ring-ink/10">
+        <h2 id="codex-stop-confirm-title" className="text-base font-medium text-ink">
+          {t("settings.codex.stop_confirm.title")}
+        </h2>
+        <p id="codex-stop-confirm-description" className="mt-3 whitespace-pre-line text-sm leading-6 text-muted">
+          {t("settings.codex.stop_confirm.description")}
+        </p>
+        <div className="mt-6 flex justify-end gap-2">
+          <button
+            type="button"
+            autoFocus
+            onClick={onCancel}
+            className="btn-neu rounded-full px-4 py-2 text-sm font-medium text-ink"
+          >
+            {t("settings.codex.stop_confirm.cancel")}
+          </button>
+          <button
+            type="button"
+            onClick={onConfirm}
+            className="rounded-full bg-accent px-4 py-2 text-sm font-medium text-white shadow-sm"
+          >
+            {t("settings.codex.stop_confirm.confirm")}
+          </button>
         </div>
       </div>
     </div>

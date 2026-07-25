@@ -315,14 +315,13 @@ function AppInner() {
           <Devices
             studioDevices={studioDevices}
             studioScanning={studioScanning}
-            studioError={studioError}
             refreshStudioDevices={refreshStudioDevices}
             status={status}
             logs={logs}
           />
         )}
         {page === "settings" && (
-          <Settings config={config} setConfig={updateConfig} />
+          <Settings config={config} setConfig={updateConfig} status={status} />
         )}
       </main>
       {pendingNavigation && (

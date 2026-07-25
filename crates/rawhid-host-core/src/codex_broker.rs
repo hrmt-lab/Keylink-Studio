@@ -103,6 +103,7 @@ pub struct CodexBrokerStatus {
     pub client_connected: bool,
     pub cli_connection_command: Option<String>,
     pub last_error: Option<String>,
+    pub debug_fault_injection_available: bool,
 }
 
 impl Default for CodexBrokerStatus {
@@ -115,6 +116,7 @@ impl Default for CodexBrokerStatus {
             client_connected: false,
             cli_connection_command: None,
             last_error: None,
+            debug_fault_injection_available: cfg!(debug_assertions),
         }
     }
 }
@@ -206,6 +208,7 @@ enum ManagerCommand {
         std_mpsc::Sender<Result<CodexBrokerStatus, CodexBrokerError>>,
     ),
     Stop(std_mpsc::Sender<Result<CodexBrokerStatus, CodexBrokerError>>),
+    DebugAbortBroker(std_mpsc::Sender<Result<(), CodexBrokerError>>),
     Shutdown,
 }
 
@@ -271,6 +274,20 @@ impl CodexBrokerManager {
         self.inner
             .command_tx
             .send(ManagerCommand::Stop(reply_tx))
+            .map_err(|_| CodexBrokerError::ManagerUnavailable)?;
+        reply_rx
+            .recv()
+            .map_err(|_| CodexBrokerError::ManagerUnavailable)?
+    }
+
+    /// Abort only the in-process Broker task to exercise lifecycle recovery.
+    /// This is intentionally available in debug builds only; release builds
+    /// reject the request without touching the active session.
+    pub fn debug_abort_broker(&self) -> Result<(), CodexBrokerError> {
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        self.inner
+            .command_tx
+            .send(ManagerCommand::DebugAbortBroker(reply_tx))
             .map_err(|_| CodexBrokerError::ManagerUnavailable)?;
         reply_rx
             .recv()
@@ -359,6 +376,23 @@ async fn manager_loop(
                             set_stopped_status(&status);
                             Ok(status.read().unwrap().clone())
                         };
+                        let _ = reply.send(result);
+                    }
+                    ManagerCommand::DebugAbortBroker(reply) => {
+                        #[cfg(debug_assertions)]
+                        let result = match session.as_ref().and_then(|current| current.broker_task.as_ref()) {
+                            Some(task) => {
+                                task.abort();
+                                Ok(())
+                            }
+                            None => Err(CodexBrokerError::InvalidConfig(
+                                "Codex Broker is not running".to_string(),
+                            )),
+                        };
+                        #[cfg(not(debug_assertions))]
+                        let result = Err(CodexBrokerError::InvalidConfig(
+                            "Broker fault injection is available only in debug builds".to_string(),
+                        ));
                         let _ = reply.send(result);
                     }
                     ManagerCommand::Shutdown => break,

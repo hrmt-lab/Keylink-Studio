@@ -118,6 +118,7 @@ export interface CodexBrokerStatus {
   client_connected: boolean;
   cli_connection_command: string | null;
   last_error: string | null;
+  debug_fault_injection_available: boolean;
 }
 
 export type AiActivityState =

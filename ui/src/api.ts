@@ -51,6 +51,10 @@ export const startCodexIntegration = () =>
   invoke<CodexBrokerStatus>("start_codex_integration");
 export const stopCodexIntegration = () =>
   invoke<CodexBrokerStatus>("stop_codex_integration");
+export const debugAbortCodexBroker = () =>
+  invoke<void>("debug_abort_codex_broker");
+export const debugInjectCodexTurnFailure = () =>
+  invoke<void>("debug_inject_codex_turn_failure");
 export const reloadConfig = () => invoke<AppConfig>("reload_config");
 export const showConfigFileLocation = () =>
   invoke<ConfigLocationResult>("show_config_file_location");

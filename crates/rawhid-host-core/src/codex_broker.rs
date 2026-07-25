@@ -690,6 +690,7 @@ async fn run_broker(
     args: BrokerRuntimeArgs,
 ) -> Result<(), CodexBrokerError> {
     let active = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reconnect_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let (connection_shutdown, _) = broadcast::channel::<()>(1);
     let mut connections = JoinSet::new();
     loop {
@@ -707,6 +708,7 @@ async fn run_broker(
                     app_server_token: args.app_server_token.clone(),
                     upstream_timeout: args.upstream_timeout,
                     active: active.clone(),
+                    reconnect_generation: reconnect_generation.clone(),
                     event_tx: args.event_tx.clone(),
                     status: args.status.clone(),
                     shutdown_rx: connection_shutdown.subscribe(),
@@ -753,6 +755,7 @@ struct ConnectionArgs {
     app_server_token: String,
     upstream_timeout: Duration,
     active: Arc<std::sync::atomic::AtomicBool>,
+    reconnect_generation: Arc<std::sync::atomic::AtomicU64>,
     event_tx: std_mpsc::Sender<CodexBrokerEvent>,
     status: Arc<RwLock<CodexBrokerStatus>>,
     shutdown_rx: broadcast::Receiver<()>,
@@ -840,6 +843,8 @@ async fn handle_connection(
     accept_upgrade(&mut downstream, &request.websocket_key).await?;
     let downstream = WebSocketStream::from_raw_socket(downstream, Role::Server, None).await;
     let connection_id = random_identifier()?;
+    args.reconnect_generation
+        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     set_phase(&args.status, CodexBrokerPhase::Connected, true, None);
     let _ = args.event_tx.send(CodexBrokerEvent::ClientConnected {
         connection_id: connection_id.clone(),
@@ -864,7 +869,15 @@ async fn handle_connection(
         None,
     );
     if reconnecting {
-        schedule_waiting_for_client_after_grace(args.status.clone());
+        let generation = args
+            .reconnect_generation
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            .wrapping_add(1);
+        schedule_waiting_for_client_after_grace(
+            args.status.clone(),
+            args.reconnect_generation.clone(),
+            generation,
+        );
     }
     let _ = args.event_tx.send(CodexBrokerEvent::ClientDisconnected {
         connection_id,
@@ -1450,20 +1463,66 @@ fn set_phase(
     current.last_error = error;
 }
 
-fn schedule_waiting_for_client_after_grace(status: Arc<RwLock<CodexBrokerStatus>>) {
+fn schedule_waiting_for_client_after_grace(
+    status: Arc<RwLock<CodexBrokerStatus>>,
+    reconnect_generation: Arc<std::sync::atomic::AtomicU64>,
+    generation: u64,
+) {
     tokio::spawn(async move {
         time::sleep(Duration::from_secs(3)).await;
-        let mut current = status.write().unwrap();
-        if current.phase == CodexBrokerPhase::Reconnecting {
-            current.phase = CodexBrokerPhase::WaitingForClient;
-        }
+        complete_reconnect_grace(&status, &reconnect_generation, generation);
     });
+}
+
+fn complete_reconnect_grace(
+    status: &Arc<RwLock<CodexBrokerStatus>>,
+    reconnect_generation: &std::sync::atomic::AtomicU64,
+    generation: u64,
+) {
+    let mut current = status.write().unwrap();
+    if reconnect_generation.load(std::sync::atomic::Ordering::Acquire) == generation
+        && current.phase == CodexBrokerPhase::Reconnecting
+    {
+        current.phase = CodexBrokerPhase::WaitingForClient;
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{make_cli_connection_command, select_codex_executable};
-    use std::path::{Path, PathBuf};
+    use super::{
+        complete_reconnect_grace, make_cli_connection_command, select_codex_executable,
+        CodexBrokerPhase, CodexBrokerStatus,
+    };
+    use std::{
+        path::{Path, PathBuf},
+        sync::{
+            atomic::{AtomicU64, Ordering},
+            Arc, RwLock,
+        },
+    };
+
+    #[test]
+    fn stale_reconnect_grace_cannot_finish_a_newer_disconnect() {
+        let status = Arc::new(RwLock::new(CodexBrokerStatus {
+            phase: CodexBrokerPhase::Reconnecting,
+            ..CodexBrokerStatus::default()
+        }));
+        let generation = AtomicU64::new(2);
+
+        complete_reconnect_grace(&status, &generation, 1);
+        assert_eq!(status.read().unwrap().phase, CodexBrokerPhase::Reconnecting);
+
+        complete_reconnect_grace(&status, &generation, 2);
+        assert_eq!(
+            status.read().unwrap().phase,
+            CodexBrokerPhase::WaitingForClient
+        );
+
+        status.write().unwrap().phase = CodexBrokerPhase::Reconnecting;
+        generation.store(3, Ordering::Release);
+        complete_reconnect_grace(&status, &generation, 2);
+        assert_eq!(status.read().unwrap().phase, CodexBrokerPhase::Reconnecting);
+    }
 
     #[cfg(windows)]
     #[test]

@@ -2,8 +2,6 @@ import { useEffect, useState } from "react";
 import { Save, RefreshCcw, Check, X, Plus, Copy, Play, Square } from "lucide-react";
 import {
   getCodexIntegrationStatus,
-  debugAbortCodexBroker,
-  debugInjectCodexTurnFailure,
   getLaunchAtLogin,
   reloadConfig,
   setLaunchAtLogin,
@@ -346,7 +344,6 @@ function CodexIntegration({
   const phase = broker?.phase ?? "stopped";
   const editable = phase === "stopped" || phase === "error";
   const running = !editable;
-  const faultInjectionReady = phase === "waiting_for_client" || phase === "connected" || phase === "reconnecting";
   const capableDevices = status.host_link_devices.filter(
     (device) => (device.capabilities & (1 << 10)) !== 0,
   ).length;
@@ -386,28 +383,6 @@ function CodexIntegration({
     setStopConfirmOpen(false);
     void run("stop");
   };
-  const injectBrokerFailure = async () => {
-    setBusy(true);
-    setActionError(null);
-    try {
-      await debugAbortCodexBroker();
-    } catch (error) {
-      setActionError(String(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-  const injectTurnFailure = async () => {
-    setBusy(true);
-    setActionError(null);
-    try {
-      await debugInjectCodexTurnFailure();
-    } catch (error) {
-      setActionError(String(error));
-    } finally {
-      setBusy(false);
-    }
-  };
   const copyCommand = async () => {
     if (!broker?.cli_connection_command) return;
     try {
@@ -444,26 +419,6 @@ function CodexIntegration({
               broker: broker.broker_port,
             })}
           </p>
-        )}
-        {broker?.debug_fault_injection_available && faultInjectionReady && (
-          <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-            <p>{t("settings.codex.debug_broker_failure.desc")}</p>
-            <div className="mt-2">
-              <SecondaryButton onClick={() => void injectBrokerFailure()} disabled={busy} loading={busy}>
-                {t("settings.codex.debug_broker_failure")}
-              </SecondaryButton>
-            </div>
-          </div>
-        )}
-        {broker?.debug_fault_injection_available && broker?.client_connected && (
-          <div className="mt-3 rounded-xl border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
-            <p>{t("settings.codex.debug_turn_failure.desc")}</p>
-            <div className="mt-2">
-              <SecondaryButton onClick={() => void injectTurnFailure()} disabled={busy} loading={busy}>
-                {t("settings.codex.debug_turn_failure")}
-              </SecondaryButton>
-            </div>
-          </div>
         )}
       </div>
       {(actionError || broker?.last_error) && <div className="border-t border-background px-5 py-3"><ErrorNotice message={t("settings.codex.error")} details={broker?.last_error ?? actionError} /></div>}

@@ -634,38 +634,6 @@ impl CodexActivityRuntime {
         *self.snapshot.read().unwrap()
     }
 
-    /// Inject a synthetic ERROR state for renderer validation.
-    ///
-    /// This exists only in debug builds. It deliberately bypasses the App Server
-    /// event stream, so it must never be used as evidence of App Server
-    /// compatibility; it is only for checking the Host Link and renderer ERROR
-    /// presentation path on real hardware.
-    pub fn debug_inject_turn_failure(&self) -> Result<(), &'static str> {
-        #[cfg(debug_assertions)]
-        {
-            let change = {
-                let mut snapshot = self.snapshot.write().unwrap();
-                snapshot.revision = snapshot.revision.wrapping_add(1);
-                snapshot.session_active = true;
-                snapshot.activity_state = AiActivityState::Error;
-                AiClientStateChange {
-                    state: *snapshot,
-                    reason: AiClientStateChangeReason::TurnFailed,
-                }
-            };
-            let mut pending = self.changes.lock().unwrap();
-            if pending.len() >= MAX_PENDING_CHANGES {
-                pending.pop_front();
-            }
-            pending.push_back(change);
-            Ok(())
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            Err("Turn failure injection is available only in debug builds")
-        }
-    }
-
     pub fn try_recv_change(&self) -> Option<AiClientStateChange> {
         self.changes.lock().unwrap().pop_front()
     }

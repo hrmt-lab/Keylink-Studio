@@ -42,8 +42,6 @@ pub fn run() {
             commands::get_ai_client_state,
             commands::start_codex_integration,
             commands::stop_codex_integration,
-            commands::debug_abort_codex_broker,
-            commands::debug_inject_codex_turn_failure,
             commands::probe_devices,
             commands::probe_studio_devices,
             commands::read_studio_keymap,

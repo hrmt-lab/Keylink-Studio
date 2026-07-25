@@ -416,28 +416,6 @@ pub async fn stop_codex_integration(
         .map_err(|error| error.to_string())?
 }
 
-/// Debug-only lifecycle fault injection. The core rejects this in release
-/// builds, so production sessions cannot be disrupted through this command.
-#[tauri::command]
-pub async fn debug_abort_codex_broker(state: State<'_, AppState>) -> Result<(), String> {
-    let manager = state.codex_broker.clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        manager.debug_abort_broker().map_err(|e| e.to_string())
-    })
-    .await
-    .map_err(|error| error.to_string())?
-}
-
-/// Debug-only renderer validation. The activity runtime rejects this in release
-/// builds, so production sessions cannot be put into a synthetic ERROR state.
-#[tauri::command]
-pub fn debug_inject_codex_turn_failure(state: State<AppState>) -> Result<(), String> {
-    state
-        .codex_activity
-        .debug_inject_turn_failure()
-        .map_err(str::to_string)
-}
-
 pub fn shutdown_codex_integration(state: &AppState) {
     let _ = state.codex_broker.stop();
 }

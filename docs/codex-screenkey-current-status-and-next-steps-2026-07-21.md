@@ -183,7 +183,7 @@ ScreenKeyでは主に次を表現する。
 #### App Server／Broker異常終了
 
 - App Serverはport `4500`の所有processを特定し、対象のnative `codex` processだけを終了して異常終了を注入した。
-- BrokerはKeylink Studio内のTokio taskであり外部processとして安全に終了できないため、debug build専用の「Broker異常終了を注入」を実装してtaskだけをabortした。
+- BrokerはKeylink Studio内のTokio taskであり外部processとして安全に終了できないため、検証時は一時的なdebug専用経路からtaskだけをabortした。この注入経路は検証完了後に製品コードから削除した。
 - いずれもUIがエラーへ遷移し、相手側とCLI接続が停止し、自動再起動しないことを確認した。
 - port `4500`／`4501`と、その試験で作成された一時token directoryが解放され、条件を戻した後に再開始できることを確認した。
 - 仕様§19.14のApp Server／Broker両ケースをPASSとした。
@@ -236,12 +236,11 @@ ScreenKeyでは主に次を表現する。
   UI production buildで合格した。全実機Targetの回帰は仕様§19.37の
   `DEFERRED`部分として残す。
 
-#### debug版fault injection
+#### 検証用fault injectionの撤去
 
-- release buildではUIを表示せず、backendも呼び出しを拒否する。
-- debug版は`target\debug\rawhid-host-tauri.exe`を直接起動せず、Vite dev serverも起動する`.\dev.ps1`から起動する。
-- Broker異常終了とTurn失敗（ERROR）の再検証に使える恒久的なdebug検証機能として残すことを、2026-07-26に決定した。
-- 実装commit: `aea3930 feat(debug): add Codex fault injection controls`
+- Broker異常終了とTurn失敗（ERROR）の実機検証に使用したdebug専用の注入経路は、検証完了後に製品コードへ残さない方針へ変更した。
+- Coreの注入API、Tauri command、状態フラグ、Settings UI、翻訳を削除した。
+- 通常のBroker異常終了検知、実際のTurn失敗から`ERROR`へ遷移する処理、ScreenKeyの`ERROR`表示は維持する。
 
 #### 2026-07-25の検証
 
@@ -298,17 +297,15 @@ ScreenKey単体プロトタイプの実装、検証、feature branchの最終レ
 ## 現在のリポジトリ状態
 
 - path: `C:\01.keyboards\OriginalKeyboards\02.SW\Keylink-Studio`
-- branch: `feat/codex-screenkey-broker-integration`
+- branch: `develop`
 - Codex CLI `0.145.0`対応基準更新:
   `bce8bed chore(codex): support Codex CLI 0.145.0`
-- debug専用fault injection:
-  `aea3930 feat(debug): add Codex fault injection controls`
 - プロトタイプ完了記録:
   `81c252f docs: mark Codex ScreenKey prototype complete`
 - 再接続grace timer競合修正:
   `530f339 fix(codex): isolate reconnect grace timers`
-- feature branchは未push。正確なHEADとahead数は作業再開時に
-  `git status --short --branch`で確認する。
+- Codex ScreenKey featureは`269fbd8 merge: complete Codex ScreenKey prototype`で
+  `develop`へ統合・push済み。
 - プロトタイプ完了記録は本書とレビュー済み仕様書に反映済み。
 
 未追跡の`.claude/`と`docs/keylink-studio-codex-screenkey-prototype-spec.md`は

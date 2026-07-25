@@ -1,6 +1,6 @@
 # Codex Broker／ScreenKeyプロトタイプの現在地と次の作業
 
-- 最終更新日: 2026-07-24
+- 最終更新日: 2026-07-26
 - 用途: Codex Broker／ScreenKeyプロトタイプの実施結果、完了条件、次の開始地点を管理する進捗文書
 - 主な確認元:
   - `docs/keylink-studio-codex-screenkey-prototype-spec-reviewed-v10.md`
@@ -15,7 +15,15 @@
 
 このプロトタイプは「Codexの状態をScreenKeyへ表示する」主要経路の実装・実機確認に加え、Keylink Studio、Broker、Codex App Server、Codex CLIの開始・停止・再開始ライフサイクルと停止確認UIまで完了している。
 
-仕様書の完了条件は4区分ある。2026-07-24時点では、アーキテクチャ成立条件が完了、基本機能、Core／Renderer分離、共有基盤回帰の3区分は一部未確認である。このため、主要機能は成立しているが、仕様上の「プロトタイプ完了」はまだ宣言しない。
+2026-07-25、完了対象を「Codex CLI `0.145.0`、Keylink Studio、Broker、
+Codex App Server、Host Link v2、`zmk-rawhid-app`、ScreenKeyを接続した経路。
+対応デバイス1台、ScreenKey Renderer 1件、USB接続」に確定した。
+この対象範囲の実装、実機確認、構成別自動テスト、最終回帰は完了したため、
+**ScreenKey単体を対象としたCodex状態表示プロトタイプは完了**とする。
+
+複数デバイス、複数Renderer、LED-only、ScreenKey以外のTarget、BLE経路、
+非64-byte interfaceの実機除外確認、全実機Targetでの既存Feature回帰は
+未確認のままPASSにはせず、対応実機完成後の拡張検証へ`DEFERRED`とする。
 
 ## 何を実現したいのか
 
@@ -141,27 +149,115 @@ ScreenKeyでは主に次を表現する。
 - `npm --prefix ui run build`: PASS。
 - `git diff --check`: PASS。
 
+### 2026-07-25に完了した追加項目
+
+#### Codex CLI `0.145.0` App Server互換性
+
+- 更新前の既知正常値は`codex-cli 0.144.6`、生成Schema SHA-256は
+  `85EA836927D6CFDD3C68A9BDA17DBA48D2573BBC282AB2D5775A5005E40BC9C3`。
+- 更新後は`codex-cli 0.145.0`、生成Schema SHA-256は
+  `1F66700D1CC3DE4A5004E5614A6098878B405C7E7C5F8C9BE97FC900D0AD6C68`。
+- 既存の起動前検査が`0.145.0`を安全に拒否し、App Server／Broker portと
+  `keylink-codex-*`一時directoryを残さないことを確認した。
+- 新旧Schemaのmethod集合は202件から208件へ増加し、削除は0件。
+- Adapterが使用する14 methodと主要fieldはすべて存在し、互換な形状を維持していた。
+- 対応基準を更新した後、Keylink Studio Broker経由の
+  `initialize`／`initialized`／`thread/start`／`thread/started`を確認した。
+- 公式debug clientで実モデルTurnを実行し、`turn/started`、agent response
+  `COMPAT_0145_OK`、`turn/completed(completed)`を確認した。
+- 開始→停止→再開始、App Server／Broker異常終了、portと一時directoryの解放を確認した。
+- Adapter変更は不要と判定し、`SUPPORTED_CODEX_VERSION`と
+  `SUPPORTED_SCHEMA_SHA256`を`0.145.0`へ更新した。
+
+#### App Server起動失敗
+
+- 「Codex 実行ファイル」に存在しないパス`C:\__keylink_start_failure_test__\codex.exe`を設定し、実行ファイル不在による起動失敗を注入した。
+- UIの起動失敗表示、port `4500`／`4501`、一時token directoryの後始末を確認した。
+- 設定を元へ戻した後に連携を再開始できることを確認した。
+- 追加ハーネスでApp Server port競合、Broker port競合、初期化エラー、
+  10秒listen timeoutも確認した。
+- いずれもUI相当の状態が`Error`となり、接続情報を生成せず、port、
+  管理対象process、`keylink-codex-*`一時directoryを残さなかった。
+- 仕様§19.13の4ケースをPASSとした。
+
+#### App Server／Broker異常終了
+
+- App Serverはport `4500`の所有processを特定し、対象のnative `codex` processだけを終了して異常終了を注入した。
+- BrokerはKeylink Studio内のTokio taskであり外部processとして安全に終了できないため、debug build専用の「Broker異常終了を注入」を実装してtaskだけをabortした。
+- いずれもUIがエラーへ遷移し、相手側とCLI接続が停止し、自動再起動しないことを確認した。
+- port `4500`／`4501`と、その試験で作成された一時token directoryが解放され、条件を戻した後に再開始できることを確認した。
+- 仕様§19.14のApp Server／Broker両ケースをPASSとした。
+
+#### 実機ライフサイクル
+
+- USB再列挙: ScreenKeyを抜き差しし、対応device数の減少・復帰と、次のTurnを待たずに現在の`AVAILABLE`が再送されることを確認した。仕様§19.15 PASS。
+- PCスリープ・復帰: App Server、WebSocket、Raw HIDが復帰し、状態と表示が再同期することを確認した。仕様§19.35 PASS。
+- `COMPLETED`表示: 緑枠が約30秒後に消え、Codexロゴは残り、heartbeatでは30秒timerが再開始せず、次のTurnも正常に表示されることを確認した。現在のScreenKey構成について仕様§19.43 PASS。
+- 対応デバイス0台からの後挿し: ScreenKey未接続でもCodex連携を開始でき、
+  後から接続すると次のTurnを待たず現在の`AVAILABLE`が送信され、
+  対応device数が0台から1台へ変わることを確認した。仕様§19.24 PASS。
+- 複数デバイス: 対応deviceが1台しかないため、仕様§19.23は
+  対応実機完成後の拡張検証へ`DEFERRED`とした。
+
+#### 全activity／30分連続動作
+
+- `AVAILABLE`、`WORKING`、`WAITING_APPROVAL`、`WAITING_INPUT`、
+  `COMPLETED`、`ERROR`、`NONE`のScreenKey表示を実機で確認した。
+- 仕様§19.26の5ケースを各30分確認した。
+  - `WORKING`
+  - `WAITING_APPROVAL`または`WAITING_INPUT`
+  - `ERROR`
+  - `COMPLETED`
+  - 状態遷移の反復
+- 描画停止、周期異常、ロゴ破損、Raw HIDエラー、明確なメモリ／CPU異常は
+  発生しなかった。仕様§19.26 PASS。
+
+#### Core／Capability構成別確認
+
+- `zmk-rawhid-app`の状態モデルtestとCore単体testをホスト実行し、PASSした。
+- heartbeatで`state_generation`を維持し、状態変化、同revision異Payload、
+  revision逆行、session終了、Host timeout、timeout後の同一Payload再受理を確認した。
+- 実際の`rawhid_app_identity_get_capabilities()`を次の3構成でcompile・実行した。
+  - Core無効、Renderer 0件: `CAP_AI_CLIENT_STATE`なし。
+  - Core有効、Renderer 0件: `CAP_AI_CLIENT_STATE`なし。
+  - Core有効、Renderer 1件: `CAP_AI_CLIENT_STATE`あり。
+- 仕様§19.38の静的Capability初期化条件と、仕様§19.41のCore単体／
+  Renderer 0件条件をPASSとした。
+
+#### Host Link v2共有基盤
+
+- ScreenKeyについて、64 byte Host Link Payload
+  （HID API bufferはReport IDを含む65 bytes）で`HOST_HELLO`、
+  `DEVICE_HELLO`、`STATE_UPDATE`、`NONE`が動作することを実機確認した。
+- USB再列挙後も通信が復帰し、size mismatch、partial write、
+  Raw HID送信エラーは発生しなかった。仕様§19.36はScreenKey範囲で
+  `PARTIAL PASS`とする。
+- Keylink Studioの既存Feature回帰はCore 195 tests、Tauri 14 testsと
+  UI production buildで合格した。全実機Targetの回帰は仕様§19.37の
+  `DEFERRED`部分として残す。
+
+#### debug版fault injection
+
+- release buildではUIを表示せず、backendも呼び出しを拒否する。
+- debug版は`target\debug\rawhid-host-tauri.exe`を直接起動せず、Vite dev serverも起動する`.\dev.ps1`から起動する。
+- Broker異常終了とTurn失敗（ERROR）の再検証に使える恒久的なdebug検証機能として残すことを、2026-07-26に決定した。
+- 実装commit: `aea3930 feat(debug): add Codex fault injection controls`
+
+#### 2026-07-25の検証
+
+- `cargo fmt --all -- --check`: PASS。
+- `cargo test -p rawhid-host-core`: PASS（195 tests）。
+- `cargo test -p rawhid-host-tauri`: PASS（14 tests）。
+- `cargo build -p rawhid-host-tauri`: PASS。
+- `npm --prefix ui run build`: PASS。
+- `git diff --check`: PASS。
+
 ## 次にやること
 
-次回は実装追加ではなく、仕様書§19／§20の未確認試験を上から確定する。
+ScreenKey単体プロトタイプの実装と検証は完了した。次は新機能実装ではなく、
+feature branchの全commitを最終レビューする。pushや統合はユーザーの指示後に行う。
 
-### 最初に行う試験
-
-App Server／Brokerの起動失敗・異常終了試験から始める。
-
-1. App Serverの起動失敗を発生させ、UIのエラー表示、Broker／子孫process、port、一時token directoryを確認する。
-2. App Server稼働中に異常終了させ、BrokerとCLI接続が停止し、自動再起動しないことを確認する。
-3. Broker稼働中に異常終了させ、App ServerとCLI接続が停止し、自動再起動しないことを確認する。
-4. 各ケース後に再開始できることを確認する。
-
-### その後の順序
-
-1. USB再列挙後の再同期。
-2. PCスリープ・復帰。
-3. 複数デバイス。
-4. Core単体、Renderer 0件、Renderer 1件以上、複数Renderer、LED-onlyの構成別試験。
-5. Host Link v2既存FeatureとBLE除外条件の回帰。
-6. `COMPLETED`の30秒表示と、仕様§19.26の5ケースを各30分実行する連続動作試験。
+将来、対応実機が完成した時点で、下記`DEFERRED`項目を別の拡張検証として再開する。
 
 ## プロトタイプ完了条件の棚卸し
 
@@ -170,20 +266,36 @@ App Server／Brokerの起動失敗・異常終了試験から始める。
 | 区分 | 状態 | 完了済み | 残り |
 |---|---|---|---|
 | 20.1 アーキテクチャ成立 | 完了 | Gate A/B、Broker採用、透過転送、Host再握手、revision逆行LWW | なし |
-| 20.2 基本機能 | 一部未確認 | 開始／停止／再開始、token認証、主要activity、停止確認、15秒timeout、heartbeat、LWW | 起動失敗、異常終了、USB再列挙、全activityの最終実機回帰、COMPLETED 30秒、30分連続動作 |
-| 20.3 Core／Renderer分離 | 一部未確認 | Core／eventとScreenKey Renderer実装、実機表示 | Renderer無効、Renderer 0件、複数Renderer、callback非blocking、LED-only、30秒ポリシー分離の構成別確認 |
-| 20.4 共有基盤回帰 | 一部未確認 | Gate B、DEVICE_HELLO再握手、ST7735 offset／四辺外周 | 全対象の64 byte、既存Feature、BLE除外、PCスリープ・復帰 |
+| 20.2 基本機能 | 対象範囲で完了 | 開始／停止／再開始、token認証、全activity、起動失敗4ケース、異常終了、切断、USB再列挙、15秒timeout、LWW、COMPLETED 30秒、Codex CLI 0.145.0互換性、30分5ケース | なし |
+| 20.3 Core／Renderer分離 | 対象範囲で完了 | Core単体、Renderer 0／1件Capability、ScreenKey Renderer、callbackのwork委譲、COMPLETEDポリシー分離 | 複数Renderer、LED-onlyを`DEFERRED` |
+| 20.4 共有基盤回帰 | 対象範囲で完了 | ScreenKeyの64 byte、既存自動回帰、DEVICE_HELLO、PCスリープ・復帰、ST7735四辺 | 他Target、非64-byte interface、BLE、全実機Target回帰を`DEFERRED` |
 
-完了区分は4区分中1区分。残る3区分は主要実装が不足しているという意味ではなく、仕様が要求する異常系、構成別、長時間、共有基盤回帰の完了記録が不足している。
+合意したScreenKey単体の対象範囲では4区分すべて完了した。
+
+### DEFERRED項目
+
+| 仕様 | 項目 | 再開条件 |
+|---|---|---|
+| §19.23 | 対応デバイス2台以上 | 2台目の対応実機完成 |
+| §19.36 | 他Target、非64-byte interface、BLE | 対象実機／経路の準備完了 |
+| §19.37 | 全実機Targetの既存Feature回帰 | 対象Targetの準備完了 |
+| §19.42 | 複数Renderer、callback失敗分離 | 複数Renderer実機完成 |
+| §19.44 | LED-only | LED Renderer実機完成 |
 
 ## 現在のリポジトリ状態
 
 - path: `C:\01.keyboards\OriginalKeyboards\02.SW\Keylink-Studio`
 - branch: `feat/codex-screenkey-broker-integration`
-- 停止確認UIの実装commit: `b5e8bb7 feat: confirm before stopping connected Codex CLI`
-- 変更は未push。正確なHEADとahead数は作業再開時に`git status --short --branch`で確認する。
+- Codex CLI `0.145.0`対応基準更新:
+  `bce8bed chore(codex): support Codex CLI 0.145.0`
+- debug専用fault injection:
+  `aea3930 feat(debug): add Codex fault injection controls`
+- feature branchは未push。正確なHEADとahead数は作業再開時に
+  `git status --short --branch`で確認する。
+- プロトタイプ完了記録は本書とレビュー済み仕様書に反映済み。
 
-未追跡の`.claude/`と`docs/keylink-studio-codex-screenkey-prototype-spec.md`はユーザー所有物として扱い、stageまたは削除しない。
+未追跡の`.claude/`と`docs/keylink-studio-codex-screenkey-prototype-spec.md`は
+ユーザー所有物として扱い、stageまたは削除しない。
 
 ## 変更しない境界
 

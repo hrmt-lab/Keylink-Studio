@@ -43,8 +43,8 @@ Threadイベントだけへ縮退せずPlan BのBroker構成へ移行する。
 
 > 最終状態: Gate A完了。最終試行では同一ハーネス・同一Thread IDでResume成功後、CLI resume後の同一Thread／Turnに属する応答必須approval requestがObserverへ配送された。Observer方式不成立／Broker必須と確定する。
 
-- 対象: Codex CLI `0.144.6` / Windows PowerShell / WebSocket / capability-token認証
-- 生成Schema SHA-256: `85EA836927D6CFDD3C68A9BDA17DBA48D2573BBC282AB2D5775A5005E40BC9C3`
+- 対象: Codex CLI `0.145.0` / Windows PowerShell / WebSocket / capability-token認証
+- 生成Schema SHA-256: `1F66700D1CC3DE4A5004E5614A6098878B405C7E7C5F8C9BE97FC900D0AD6C68`
 - Observerはresumeなしでは`thread/started`と`thread/status/changed`を受信したが、`turn/started`と`turn/completed`は受信しなかった
 - Observerが対象Threadへ明示的に`thread/resume`すると、以降の`turn/started`と`turn/completed`を受信できた
 - Observerが先に対象Threadをresumeし、CLIも同じThreadを再開した状態で、CLIのapproval要求`item/commandExecution/requestApproval`が応答必須JSON-RPC requestとしてObserverにも配送された
@@ -542,8 +542,8 @@ AI Client State Core in zmk-rawhid-app
 - WebSocket transportは実装時点のCodex公式仕様・生成Schemaを確認して実装する。
 - Brokerはtext message単位でJSON-RPC本文を変更せず双方向へ転送する。
 - Brokerはserver requestへ代理応答せず、元のCLIへ転送したresponseだけをApp Serverへ返す。
-- 対象はCodex CLI `0.144.6`と、SHA-256
-  `85EA836927D6CFDD3C68A9BDA17DBA48D2573BBC282AB2D5775A5005E40BC9C3`の生成Schemaに固定する。
+- 対象はCodex CLI `0.145.0`と、SHA-256
+  `1F66700D1CC3DE4A5004E5614A6098878B405C7E7C5F8C9BE97FC900D0AD6C68`の生成Schemaに固定する。
 - App ServerとWebSocket transportはexperimentalであるため、Codex CLIバージョンまたはSchema hashが
   変わった場合は起動前検査で停止し、methodやfieldの互換性を推測しない。
 
@@ -930,7 +930,7 @@ App Server・WebSocket・Raw HIDなど通信系の問題はScreenKeyの`ERROR`�
 
 ## 10. App Serverイベント分類
 
-Codex CLI `0.144.6`から`--experimental`付きで生成したSchemaを正とし、次のmethod／fieldだけを
+Codex CLI `0.145.0`から`--experimental`付きで生成したSchemaを正とし、次のmethod／fieldだけを
 Adapterへ登録する。将来バージョンとの差異はAdapter層に閉じ込め、未知methodは状態を変更しない。
 
 | 種別 | method | 状態判定に使用するfield |
@@ -1756,7 +1756,7 @@ Codex連携ログはKeylink Studioの通常ログへ統合する。
 ## 18. 処理シーケンス・データフロー・状態遷移図
 
 本節の図はBroker採用後の責務分担と状態変化を示す。Codex側method／fieldは
-Codex CLI `0.144.6`の生成SchemaとBroker実E2Eで確認した正式名を使用する。
+Codex CLI `0.145.0`の生成SchemaとBroker／App Server互換性確認で確認した正式名を使用する。
 
 ### 18.1 Codex連携開始シーケンス
 
@@ -2773,10 +2773,72 @@ WORKING
 - wrap後の`0`も有効値として扱う
 - 同一プロセス内では新イベントごとに1加算し、heartbeatでは増加させない
 
+### 19.49 Codex CLI更新時のApp Server互換性
+
+Codex CLIを現在の対応基準`0.145.0`から更新する場合は、App Server／WebSocket transportを互換と推測せず、
+次の順序で新しいCLIバージョンを検証する。
+
+1. 更新前の`codex --version`、生成Schema SHA-256、ロールバック先`0.145.0`を記録する。
+2. 更新後の`codex --version`と、`codex app-server generate-json-schema --experimental`で生成した
+   Schema SHA-256を記録する。
+3. 既存の起動前検査が未対応バージョンまたはSchema hashを拒否し、UIへエラーを表示して、
+   port `4500`／`4501`、管理対象process、一時token directoryを残さないことを確認する。
+4. 新旧Schemaを比較し、BrokerとAdapterが使用するWebSocket認証option、`initialize`／`initialized`、
+   Thread／Turn、approval／input requestのmethod名とfield形状に互換性があることを確認する。
+5. 互換性を確認できた場合だけ`SUPPORTED_CODEX_VERSION`、`SUPPORTED_SCHEMA_SHA256`、
+   関連test fixture、仕様書の対象バージョン／hashを同じ変更で更新する。
+6. Keylink Studioから連携を開始し、capability-token認証、CLI接続、Thread開始、
+   `WORKING`、`WAITING_APPROVAL`または`WAITING_INPUT`、`COMPLETED`、セッション終了を実機確認する。
+7. 停止→再開始、App Server／Broker異常終了、portと一時token directoryの解放を再確認する。
+8. 非互換がある場合は基準値を更新せず`0.145.0`へ戻し、差分をAdapter変更として扱う。
+
+token、生成Schemaの一時出力、認証情報はcommitしない。互換性確認結果には、新旧バージョン、
+新旧Schema SHA-256、差分の有無、実機結果、採用またはロールバック判断を記録する。
+
+2026-07-25に`0.144.6`から`0.145.0`への更新を確認した。
+
+- 更新前Schema SHA-256:
+  `85EA836927D6CFDD3C68A9BDA17DBA48D2573BBC282AB2D5775A5005E40BC9C3`
+- 更新後Schema SHA-256:
+  `1F66700D1CC3DE4A5004E5614A6098878B405C7E7C5F8C9BE97FC900D0AD6C68`
+- 更新前の起動前検査が`0.145.0`を安全に拒否し、App Server／Broker portと
+  `keylink-codex-*`一時directoryを残さないことを確認した
+- 新旧Schemaのmethod集合は202件から208件へ増え、削除されたmethodは0件
+- Adapterが使用する14 method、`experimentalApi`、Thread／Turn ID、Turn status／error、
+  approval／input request、`serverRequest/resolved`のfield形状は互換
+- 対応version／Schema更新後、Keylink Studio Broker経由の
+  `initialize`／`initialized`／`thread/start`と`thread/started`を確認した
+- 公式debug clientで`turn/start`、`turn/started`、agent response、
+  `turn/completed(completed)`を確認した
+- 開始→停止→再開始、App Server／Broker異常終了、portと一時directoryの解放を確認した
+- Adapter変更は不要と判定し、対応基準を`0.145.0`へ更新した
+
 
 ## 20. 完了条件
 
-次をすべて満たした時点でプロトタイプ完了とする。
+本節の完了条件は、次の対象範囲と延期条件を明示したうえで判定する。
+
+2026-07-25に完了対象を次の範囲へ確定した。
+
+- Codex CLI `0.145.0`
+- Keylink Studio、Broker、Codex App Server
+- Host Link v2、`zmk-rawhid-app`
+- 対応デバイス1台
+- ScreenKey Renderer 1件
+- USB接続
+
+この範囲の条件をすべて満たした時点で、ScreenKey単体を対象とした
+Codex状態表示プロトタイプを完了とする。
+
+次は未確認のままPASSにはせず、対応実機完成後の拡張検証へ`DEFERRED`とする。
+
+- 対応デバイス2台以上
+- 複数Renderer
+- LED-only Renderer
+- ScreenKey以外のTarget
+- BLE経路
+- 非64-byte interfaceの実機除外確認
+- 全実機Targetでの既存Feature回帰
 
 ### 20.1 アーキテクチャ成立条件
 
@@ -2803,6 +2865,7 @@ WORKING
 - 不正Packetを層別に拒否し、正常Packetはrevisionの大小に関係なくLWW受理
 - 同じrevision再送を正しく処理
 - COMPLETEDを30秒表示
+- Codex CLI更新後にApp Server生成Schemaと実機E2Eの互換性を確認
 - 30分以上の連続動作を完了
 
 ### 20.3 Core／Renderer分離条件
@@ -2825,6 +2888,31 @@ WORKING
 - BLE経路で64 byte条件を満たさないTargetはHost Link v2を利用可能として扱わない
 - PCスリープ・復帰テストを完了
 - ST7735の表示offsetと四辺の外周視認性を実機で確定
+
+### 20.5 2026-07-26完了判定
+
+ScreenKey単体の対象範囲について、20.1～20.4を完了した。
+
+| 区分 | 判定 | 主な根拠 |
+|---|---|---|
+| 20.1 アーキテクチャ成立 | `PASS` | Gate A/B、Broker透過転送、Host再握手、revision逆行LWW |
+| 20.2 基本機能 | `PASS` | 全activity、起動失敗4ケース、異常終了、切断・再接続、USB再列挙、15秒timeout、COMPLETED 30秒、Codex CLI 0.145.0互換性、30分5ケース |
+| 20.3 Core／Renderer分離 | `PASS`（対象範囲） | Core単体test、Core無効／Renderer 0件／Renderer 1件のCapability test、ScreenKey Renderer、30秒ポリシー分離 |
+| 20.4 共有基盤回帰 | `PASS`（対象範囲） | ScreenKeyの64 byte Host Link、既存自動回帰、DEVICE_HELLO、PCスリープ・復帰、ST7735四辺 |
+
+未実施・部分確認項目は次のとおり分類する。
+
+| 仕様 | 判定 | 内容 |
+|---|---|---|
+| §19.23 | `DEFERRED` | 対応デバイス2台目の完成後に実施 |
+| §19.36 | `PARTIAL PASS` | ScreenKey USB経路は合格。他Target、非64-byte interface、BLEは延期 |
+| §19.37 | `PARTIAL PASS` | Keylink Studio自動回帰は合格。全実機Target回帰は延期 |
+| §19.42 | `DEFERRED` | 複数Renderer実機完成後に実施 |
+| §19.44 | `DEFERRED` | LED Renderer実機完成後に実施 |
+
+以上により、**ScreenKey単体を対象としたCodex状態表示プロトタイプは完了**とする。
+`DEFERRED`項目は将来の実機拡張に対する検証であり、この完了宣言では
+合格済みとして扱わない。
 
 ---
 

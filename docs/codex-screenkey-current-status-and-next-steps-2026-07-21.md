@@ -111,6 +111,7 @@ ScreenKeyでは主に次を表現する。
 #### ScreenKey実機表示
 
 - CodexアイコンのRGB565変換修正
+- Codexロゴを64×64 pixelから96×96 pixelへ拡大し、128×128画面中央へ配置
 - 黄色枠の色修正
 - 反時計回り90度を正方向に確定
 - 外周開始位置を左下から左辺上方向に修正
@@ -245,7 +246,7 @@ ScreenKeyでは主に次を表現する。
 #### 2026-07-25の検証
 
 - `cargo fmt --all -- --check`: PASS。
-- `cargo test -p rawhid-host-core`: PASS（195 tests）。
+- `cargo test -p rawhid-host-core`: PASS（196 tests）。
 - `cargo test -p rawhid-host-tauri`: PASS（14 tests）。
 - `cargo build -p rawhid-host-tauri`: PASS。
 - `npm --prefix ui run build`: PASS。
@@ -263,11 +264,36 @@ ScreenKeyでは主に次を表現する。
   今回変更したCodex Brokerには新しい指摘がないことを確認した。
 - 修正commit: `530f339 fix(codex): isolate reconnect grace timers`
 
+#### feature統合と検証用fault injection撤去
+
+- Codex ScreenKey featureを
+  `269fbd8 merge: complete Codex ScreenKey prototype`で`develop`へ統合し、
+  `origin/develop`へpushした。
+- 実機検証に使用したBroker異常終了とTurn失敗（ERROR）のdebug専用注入経路を、
+  `3ad29e1 refactor(codex): remove debug fault injection`で製品コードから撤去した。
+- 通常のBroker異常終了検知、実際のTurn失敗から`ERROR`へ遷移する処理、
+  ScreenKeyの`ERROR`表示は維持した。
+- 撤去後にCore 196 tests、Tauri 14 tests、debug build、release check、
+  UI production build、format、差分検査が合格した。
+
+#### ScreenKeyロゴ96×96 pixel正式採用
+
+- 元画像
+  `/home/onigiri/zmk-workspace/config/zmk-config-screenkeytest/assets/codex_icon_transparent.png`
+  から96×96 pixelのRGB565 Assetを生成し、128×128画面中央へ配置した。
+- 実機表示を確認し、96×96 pixelを正式サイズとして採用した。
+- ScreenKey firmware commit:
+  `c401779 feat: enlarge Codex logo to 96px`
+- 正式UF2:
+  `/home/onigiri/zmk-workspace/firmware/screenkeytest.uf2`
+- UF2 SHA-256:
+  `aea3340c650d2d8632db0ac40f3a330430fa76a796a00c1a4be1ca2fd6649db4`
+
 ## 次にやること
 
-ScreenKey単体プロトタイプの実装、検証、feature branchの最終レビューは完了した。
-次はfeature branchをpushまたは統合するかを判断する。pushや統合はユーザーの
-指示後に行う。
+ScreenKey単体プロトタイプの実装、検証、feature branchの最終レビュー、
+`develop`への統合・push、検証用fault injectionの撤去、96×96 pixelロゴの
+実機採用まで完了した。現時点でプロトタイプ完了に必要な作業は残っていない。
 
 将来、対応実機が完成した時点で、下記`DEFERRED`項目を別の拡張検証として再開する。
 
@@ -306,7 +332,20 @@ ScreenKey単体プロトタイプの実装、検証、feature branchの最終レ
   `530f339 fix(codex): isolate reconnect grace timers`
 - Codex ScreenKey featureは`269fbd8 merge: complete Codex ScreenKey prototype`で
   `develop`へ統合・push済み。
+- debug専用fault injectionは
+  `3ad29e1 refactor(codex): remove debug fault injection`で撤去・push済み。
 - プロトタイプ完了記録は本書とレビュー済み仕様書に反映済み。
+
+### ScreenKey target firmware
+
+- path: `/home/onigiri/zmk-workspace/config/zmk-config-screenkeytest`
+- branch: `feat/codex-screenkey-renderer`
+- HEAD: `c401779 feat: enlarge Codex logo to 96px`
+- `origin/feat/codex-screenkey-renderer`へpush済み、作業ツリーclean。
+- 正式UF2:
+  `/home/onigiri/zmk-workspace/firmware/screenkeytest.uf2`
+- SHA-256:
+  `aea3340c650d2d8632db0ac40f3a330430fa76a796a00c1a4be1ca2fd6649db4`
 
 未追跡の`.claude/`と`docs/keylink-studio-codex-screenkey-prototype-spec.md`は
 ユーザー所有物として扱い、stageまたは削除しない。

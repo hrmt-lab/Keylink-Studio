@@ -144,3 +144,19 @@ App Serverはセッションごとではなく、実行環境ごとに分離す�
 - `docs/codex-screenkey-current-status-and-next-steps-2026-07-21.md`
 - `crates/rawhid-host-tauri/src/codex_launcher.rs`
 - `crates/rawhid-host-core/src/codex_broker.rs`
+
+## 2026-08-02: 正式検証の完了
+
+実装は `521d94f feat: add WSL Codex launcher runtime` としてコミットした。対応する
+Codex CLI は `codex-cli 0.146.0`、experimental App Server schema の SHA-256 は
+`D3992FEC1398AFDBEC658DA2C720C6993FBF3C1CE4900785694D2196679EDDFC` である。
+
+実機で、直接の App Server (`initialize`、`thread/start`、`turn/start`) に加え、Keylink
+Studio の Broker 経由で Turn、入力要求、承認要求、停止、再開始後の Turn を確認した。
+停止時には App Server/Broker の listener (4500/4501) と一時 token directory が残らず、
+再開始時には選択した WSL distribution 内に App Server が 1 個だけ起動することを確認した。
+
+この版でサポートするのは **Settings で選択した 1 つの runtime** である。Windows または
+選択した WSL distribution のどちらか一方を起動できる。Windows と WSL、または複数の WSL
+distribution を同時に起動・管理する複数 runtime 構成は対象外であり、必要になった時点で
+runtime manager と session 分離を設計してから扱う。

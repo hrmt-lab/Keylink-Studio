@@ -1,6 +1,6 @@
 # Codex Broker／ScreenKeyプロトタイプの現在地と次の作業
 
-- 最終更新日: 2026-07-27
+- 最終更新日: 2026-08-02
 - 用途: Codex Broker／ScreenKeyプロトタイプの実施結果、完了条件、次の開始地点を管理する進捗文書
 - 主な確認元:
   - `docs/keylink-studio-codex-screenkey-prototype-spec-reviewed-v10.md`
@@ -305,9 +305,10 @@ ScreenKey単体プロトタイプの実装、検証、feature branchの最終レ
 `develop`への統合・push、検証用fault injectionの撤去、96×96 pixelロゴの
 実機採用まで完了した。現時点でプロトタイプ完了に必要な作業は残っていない。
 
-次の機能追加は、Turn中の「考えている」と「何かを実行している」を
-ScreenKeyで区別する表示細分化とする。今回は方針決定と文書化のみで、
-Host、Host Link、Firmwareの実装には着手していない。
+Turn中の「考えている」と「何かを実行している」をScreenKeyで区別する表示細分化は、
+Host、Host Link、Firmware、Rendererの実装と単一ScreenKey・USB接続での実機確認まで完了した。
+`/btw`（side chat）の子Thread表示と親Thread復帰も同じ完了範囲に含む。設計と検証結果は
+[`codex-screenkey-activity-detail-design.md`](codex-screenkey-activity-detail-design.md)を参照する。
 
 | 対象 | 次の表示 | 現状との差 |
 |---|---|---|
@@ -317,18 +318,28 @@ Host、Host Link、Firmwareの実装には着手していない。
 | Web／ファイル検索中 | 現行の青い外周移動線 | 表示は変更しない |
 
 `CONNECTING`、`RECONNECTING`、`INTERRUPTED`／`CANCELLED`、`RETRYING`は
-今回新しい表示状態を追加せず、現行のReducerと表示を維持する。
-承認待ち、完了、エラー、セッションなし、利用可能の表示も変更しない。
+既存の上位`activity_state`は維持しつつ、Turn内の表示を`work_phase`として追加した。
+承認待ち、完了、エラー、セッションなし、利用可能の表示は従来どおり維持している。
 
-実装を開始するときは、次の順で進める。
+設計で、既存`activity_state`を上位状態として維持し、Turn内の
+`UNSPECIFIED`／`THINKING`／`EXECUTING`／`SEARCHING`を`work_phase`として分離した。
+Host Linkはbit 11 `CAP_AI_CLIENT_WORK_PHASE`でgateし、旧Firmwareへは従来6 byte、
+対応Firmwareへは末尾に`work_phase`を追加した7 byte Payloadを送る。
 
-1. 現在の`WORKING`を上位状態として維持しながら、推論中、実行中、検索中を
-   どのHost内部情報とHost Link表現で区別するかを設計する。
-2. App Serverの構造化イベントだけを使用し、テキスト本文から状態を推測しない
-   Reducer規則と、短時間の切り替わりで表示がちらつかない遷移規則を決める。
-3. ScreenKey Rendererへ入力待ちと推論中の呼吸表示を追加する。
-   オレンジの色値と呼吸周期は実装時に定義し、実機で確定する。
-4. Host単体test、Firmware test、fresh build、全状態遷移の実機確認を行う。
+実装は次の順で完了した。
+
+1. `codex_broker.rs`へ`item_type`抽出、`codex_activity.rs`へitem lifecycle、
+   work phase集約、debounceをtest-firstで実装する。
+2. Host packet codecとcapability別の6 byte／7 byte senderを実装する。
+3. WSL正本`/home/onigiri/zmk-workspace/config/zmk-rawhid-app`の
+   Core／packet decode／capabilityを更新する。Windows側
+   `C:\01.keyboards\OriginalKeyboards\02.SW\zmk-rawhid-app`は参照専用とし、変更しない。
+   Firmware側は今後もWSL上のrepositoryを正本とし、Windows上に同名フォルダがあっても
+   書き込まない。
+4. ScreenKey Rendererへ入力待ちと推論中の呼吸表示を追加する。
+   オレンジは`#F97316`、呼吸は20 frame、100 ms/frameの2秒周期、
+   opacity 64→255→64の三角波とする。
+5. Host単体test、Firmware test、fresh build、全状態遷移の実機確認を行う。
 
 将来、対応実機が完成した時点で、下記`DEFERRED`項目を別の拡張検証として再開する。
 
@@ -384,6 +395,32 @@ Host、Host Link、Firmwareの実装には着手していない。
 
 未追跡の`.claude/`と`docs/keylink-studio-codex-screenkey-prototype-spec.md`は
 ユーザー所有物として扱い、stageまたは削除しない。
+
+## 2026-08-02 Turn内状態細分化
+
+- Keylink Studio Host側は`AiWorkPhase`、構造化`item/started`／`item/completed`、
+  active item集約、150 ms／250 ms debounceを実装済み。
+- Host Link v2はbit 11 `CAP_AI_CLIENT_WORK_PHASE`で7 byte形式をgateし、
+  bit 10のみのdeviceには従来6 byte形式を送る。
+- phase-only変更ではbase revisionを増やさず、bit 11対応deviceだけへ送る。
+- Firmware／ScreenKey RendererはWSL正本で実装され、生成UF2の実機投入まで実施済み。
+  実装指示の記録は`docs/codex-screenkey-work-phase-firmware-implementation-prompt.md`に残す。
+- firmware正本はWSL上だけにあり、Windows上の同名folderは今後も参照専用とする。
+- 実機確認で、期限切れ`COMPLETED`を保持したままUSB再接続すると緑枠が再表示される問題を確認した。
+  Host snapshotを30秒後に`AVAILABLE`へ遷移させる修正を追加し、再接続時に期限切れ
+  `COMPLETED`を再送しないようにした。firmware変更は不要。
+- 緑枠表示中に`/btw`を実行するとScreenKeyが消灯したまま復帰しない問題を修正した。
+  `/btw`（side chat）の`thread/fork` responseで子Threadを表示対象へ切り替え、親Threadを
+  終了させず、子ThreadのTurnを青、完了を緑で表示する。切替時に`NONE`を送らないため
+  ScreenKeyは消灯しない。親へ戻った後も、親Threadの次の`turn/started`で表示対象を自動的に
+  親へ戻す。Host単体testで確認した。firmware変更は不要。
+- 上記に加え、通常Turn、入力待ち、承認待ち、Turn中断、`COMPLETED`の30秒解除、
+  期限後／実行中のUSB再接続、`/btw`の子Threadと親Thread復帰を実機確認した。
+  すべて期待表示となり、消灯固定、ロゴ固定、期限切れ緑枠の再表示は発生しなかった。
+- Host core 207件、Tauri 21件の単体test、format、`git diff --check`が成功した。
+- したがって、Turn内状態細分化と`/btw`表示対応は、現在の単一ScreenKey・USB接続の
+  対象範囲で完了とする。複数Renderer、LED-only、BLE、非64-byte interface、旧6 byte Firmwareの
+  実機後方互換確認は従来どおり`DEFERRED`である。
 
 ## 変更しない境界
 

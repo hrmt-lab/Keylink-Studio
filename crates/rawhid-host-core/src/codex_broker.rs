@@ -184,6 +184,7 @@ pub struct JsonRpcMetadata {
     pub thread_id: Option<String>,
     pub turn_id: Option<String>,
     pub item_id: Option<String>,
+    pub item_type: Option<String>,
     pub request_id: Option<Value>,
     pub result_thread_id: Option<String>,
     pub turn_status: Option<String>,
@@ -1040,6 +1041,7 @@ fn emit_message_metadata(
             thread_id: None,
             turn_id: None,
             item_id: None,
+            item_type: None,
             request_id: None,
             result_thread_id: None,
             turn_status: None,
@@ -1179,6 +1181,7 @@ pub fn classify_json_rpc(text: &str) -> JsonRpcMetadata {
             thread_id: None,
             turn_id: None,
             item_id: None,
+            item_type: None,
             request_id: None,
             result_thread_id: None,
             turn_status: None,
@@ -1218,6 +1221,7 @@ pub fn classify_json_rpc(text: &str) -> JsonRpcMetadata {
             .or_else(|| string_at(&value, &["params", "turn", "id"])),
         item_id: extract_identifier(&value, &["itemId", "item_id"])
             .or_else(|| string_at(&value, &["params", "item", "id"])),
+        item_type: string_at(&value, &["params", "item", "type"]),
         request_id: scalar_at(&value, &["params", "requestId"]),
         result_thread_id: string_at(&value, &["result", "thread", "id"]),
         turn_status: string_at(&value, &["params", "turn", "status"]),
@@ -1236,6 +1240,7 @@ fn empty_metadata(kind: JsonRpcKind) -> JsonRpcMetadata {
         thread_id: None,
         turn_id: None,
         item_id: None,
+        item_type: None,
         request_id: None,
         result_thread_id: None,
         turn_status: None,
@@ -1683,9 +1688,19 @@ fn complete_reconnect_grace(
 #[cfg(test)]
 mod tests {
     use super::{
-        complete_reconnect_grace, make_cli_connection_command, select_codex_executable,
-        CodexBrokerPhase, CodexBrokerStatus,
+        classify_json_rpc, complete_reconnect_grace, make_cli_connection_command,
+        select_codex_executable, CodexBrokerPhase, CodexBrokerStatus,
     };
+
+    #[test]
+    fn json_rpc_metadata_extracts_structured_item_type() {
+        let metadata = classify_json_rpc(
+            r#"{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"thread-a","turnId":"turn-a","item":{"id":"item-a","type":"webSearch","query":"secret"}}}"#,
+        );
+
+        assert_eq!(metadata.item_id.as_deref(), Some("item-a"));
+        assert_eq!(metadata.item_type.as_deref(), Some("webSearch"));
+    }
     use std::{
         path::{Path, PathBuf},
         sync::{

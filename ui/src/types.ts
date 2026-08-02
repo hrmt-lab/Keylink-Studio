@@ -151,11 +151,18 @@ export type AiActivityState =
   | "completed"
   | "error";
 
+export type AiWorkPhase =
+  | "unspecified"
+  | "thinking"
+  | "executing"
+  | "searching";
+
 export interface AiClientStateSnapshot {
   client_type: "codex";
   client_variant: "cli" | "vs_code_extension" | "desktop_app";
   session_active: boolean;
   activity_state: AiActivityState;
+  work_phase: AiWorkPhase;
   revision: number;
 }
 

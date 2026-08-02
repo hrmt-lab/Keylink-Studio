@@ -20,6 +20,7 @@ pub const CAPABILITY_LAYER_STATE: u32 = 1 << 7;
 pub const CAPABILITY_KEY_PRESS: u32 = 1 << 8;
 pub const CAPABILITY_CONFIG_RPC: u32 = 1 << 9;
 pub const CAPABILITY_AI_CLIENT_STATE: u32 = 1 << 10;
+pub const CAPABILITY_AI_CLIENT_WORK_PHASE: u32 = 1 << 11;
 pub const FEATURE_SYSTEM: u8 = 0x00;
 pub const FEATURE_AI_CLIENT: u8 = 0x0A;
 
@@ -226,6 +227,16 @@ pub enum AiActivityState {
     WaitingInput = 0x04,
     Completed = 0x05,
     Error = 0x06,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+#[repr(u8)]
+pub enum AiWorkPhase {
+    Unspecified = 0x00,
+    Thinking = 0x01,
+    Executing = 0x02,
+    Searching = 0x03,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1301,6 +1312,7 @@ pub struct AiClientStatePacket {
     pub client_variant: u8,
     pub session_active: bool,
     pub activity_state: AiActivityState,
+    pub work_phase: AiWorkPhase,
     pub revision: u16,
 }
 
@@ -1310,6 +1322,7 @@ impl AiClientStatePacket {
         client_variant: u8,
         session_active: bool,
         activity_state: AiActivityState,
+        work_phase: AiWorkPhase,
         revision: u16,
     ) -> Result<Self, PacketError> {
         let valid_combination = if session_active {
@@ -1323,17 +1336,29 @@ impl AiClientStatePacket {
                 activity_state: activity_state as u8,
             });
         }
+        if activity_state != AiActivityState::Working && work_phase != AiWorkPhase::Unspecified {
+            return Err(PacketError::InvalidAiClientWorkPhase {
+                activity_state: activity_state as u8,
+                work_phase: work_phase as u8,
+            });
+        }
         Ok(Self {
             client_type,
             client_variant,
             session_active,
             activity_state,
+            work_phase,
             revision,
         })
     }
 
-    pub fn encode_payload(self, seq: u8) -> [u8; PACKET_SIZE] {
+    fn encode_payload_with_work_phase(
+        self,
+        seq: u8,
+        include_work_phase: bool,
+    ) -> [u8; PACKET_SIZE] {
         let mut bytes = [0u8; PACKET_SIZE];
+        let payload_len = if include_work_phase { 7 } else { 6 };
         encode_header(
             &mut bytes,
             CommonHeader {
@@ -1342,22 +1367,41 @@ impl AiClientStatePacket {
                 feature: FEATURE_AI_CLIENT,
                 op: 0,
                 status_or_flags: 0,
-                payload_len: 6,
+                payload_len,
             },
         );
-        let payload = &mut bytes[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 6];
+        let payload = &mut bytes[PAYLOAD_OFFSET..PAYLOAD_OFFSET + usize::from(payload_len)];
         payload[0] = self.client_type as u8;
         payload[1] = self.client_variant;
         payload[2] = u8::from(self.session_active);
         payload[3] = self.activity_state as u8;
         payload[4..6].copy_from_slice(&self.revision.to_le_bytes());
+        if include_work_phase {
+            payload[6] = self.work_phase as u8;
+        }
         bytes
     }
 
-    pub fn encode_report(self, seq: u8) -> [u8; REPORT_SIZE] {
+    pub fn encode_payload(self, seq: u8) -> [u8; PACKET_SIZE] {
+        self.encode_payload_with_work_phase(seq, false)
+    }
+
+    pub fn encode_work_phase_payload(self, seq: u8) -> [u8; PACKET_SIZE] {
+        self.encode_payload_with_work_phase(seq, true)
+    }
+
+    fn encode_report_with_work_phase(self, seq: u8, include_work_phase: bool) -> [u8; REPORT_SIZE] {
         let mut report = [0u8; REPORT_SIZE];
-        report[1..].copy_from_slice(&self.encode_payload(seq));
+        report[1..].copy_from_slice(&self.encode_payload_with_work_phase(seq, include_work_phase));
         report
+    }
+
+    pub fn encode_report(self, seq: u8) -> [u8; REPORT_SIZE] {
+        self.encode_report_with_work_phase(seq, false)
+    }
+
+    pub fn encode_work_phase_report(self, seq: u8) -> [u8; REPORT_SIZE] {
+        self.encode_report_with_work_phase(seq, true)
     }
 }
 
@@ -1982,6 +2026,10 @@ pub enum PacketError {
         session_active: bool,
         activity_state: u8,
     },
+    #[error(
+        "invalid AI client activity/work phase combination: activity_state={activity_state:#04x}, work_phase={work_phase:#04x}"
+    )]
+    InvalidAiClientWorkPhase { activity_state: u8, work_phase: u8 },
     #[error("packet type {0:#04x} is not decoded as a generic packet")]
     DecodeUnsupportedType(u8),
     #[error("invalid battery entry count {0}; expected 1-4")]
@@ -2245,6 +2293,7 @@ mod tests {
             AiClientVariant::Cli as u8,
             true,
             AiActivityState::Working,
+            AiWorkPhase::Executing,
             0x1234,
         )
         .unwrap();
@@ -2261,6 +2310,13 @@ mod tests {
             &payload[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 6],
             &[0x01, 0x01, 0x01, 0x02, 0x34, 0x12]
         );
+
+        let detailed = packet.encode_work_phase_payload(10);
+        assert_eq!(detailed[8], 7);
+        assert_eq!(
+            &detailed[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 7],
+            &[0x01, 0x01, 0x01, 0x02, 0x34, 0x12, 0x02]
+        );
     }
 
     #[test]
@@ -2271,6 +2327,7 @@ mod tests {
                 AiClientVariant::Cli as u8,
                 false,
                 AiActivityState::Working,
+                AiWorkPhase::Unspecified,
                 1,
             ),
             Err(PacketError::InvalidAiClientSessionState { .. })
@@ -2280,7 +2337,19 @@ mod tests {
                 AiClientType::Codex,
                 AiClientVariant::Cli as u8,
                 true,
+                AiActivityState::Available,
+                AiWorkPhase::Thinking,
+                1,
+            ),
+            Err(PacketError::InvalidAiClientWorkPhase { .. })
+        ));
+        assert!(matches!(
+            AiClientStatePacket::new(
+                AiClientType::Codex,
+                AiClientVariant::Cli as u8,
+                true,
                 AiActivityState::None,
+                AiWorkPhase::Unspecified,
                 1,
             ),
             Err(PacketError::InvalidAiClientSessionState { .. })

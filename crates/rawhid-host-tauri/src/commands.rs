@@ -72,7 +72,11 @@ const AI_CLIENT_STATE_RESEND_INTERVAL: Duration = Duration::from_secs(5);
 trait AiClientStateTransport {
     fn device_generation(&self) -> u64;
     fn has_ai_client_state_device(&self) -> bool;
-    fn send_ai_client_state(&mut self, packet: AiClientStatePacket) -> Result<usize, String>;
+    fn send_ai_client_state(
+        &mut self,
+        packet: AiClientStatePacket,
+        work_phase_only: bool,
+    ) -> Result<usize, String>;
 }
 
 impl AiClientStateTransport for MonitorRunner {
@@ -84,8 +88,12 @@ impl AiClientStateTransport for MonitorRunner {
         self.has_ai_client_state_device()
     }
 
-    fn send_ai_client_state(&mut self, packet: AiClientStatePacket) -> Result<usize, String> {
-        self.send_ai_client_state(packet)
+    fn send_ai_client_state(
+        &mut self,
+        packet: AiClientStatePacket,
+        work_phase_only: bool,
+    ) -> Result<usize, String> {
+        self.send_ai_client_state(packet, work_phase_only)
             .map_err(|error| error.to_string())
     }
 }
@@ -4015,7 +4023,10 @@ where
             tracker.last_sent_at = None;
             continue;
         }
-        transport.send_ai_client_state(ai_client_state_packet(change.state)?)?;
+        transport.send_ai_client_state(
+            ai_client_state_packet(change.state)?,
+            change.reason == rawhid_host_core::AiClientStateChangeReason::WorkPhaseChanged,
+        )?;
         sent_change = true;
     }
 
@@ -4026,7 +4037,7 @@ where
         && (tracker.last_device_generation != Some(device_generation) || periodic_due)
         && transport.has_ai_client_state_device()
     {
-        transport.send_ai_client_state(ai_client_state_packet(snapshot)?)?;
+        transport.send_ai_client_state(ai_client_state_packet(snapshot)?, false)?;
         sent_change = true;
     }
 
@@ -4048,6 +4059,7 @@ fn ai_client_state_packet(state: AiClientStateSnapshot) -> Result<AiClientStateP
         state.client_variant as u8,
         state.session_active,
         state.activity_state,
+        state.work_phase,
         state.revision,
     )
     .map_err(|error| error.to_string())
@@ -4771,7 +4783,7 @@ fn refresh_error_code(error: AiUsageRefreshError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rawhid_host_core::packet::{AiActivityState, AiClientType, AiClientVariant};
+    use rawhid_host_core::packet::{AiActivityState, AiClientType, AiClientVariant, AiWorkPhase};
     use rawhid_host_core::runner::{DeviceBatterySource, DeviceBatteryStatus};
     use rawhid_host_core::studio::{StudioLayer, StudioLayoutSource};
 
@@ -4797,6 +4809,7 @@ mod tests {
         device_generation: u64,
         capable: bool,
         sent: Vec<AiClientStatePacket>,
+        work_phase_only: Vec<bool>,
     }
 
     impl AiClientStateTransport for FakeAiClientTransport {
@@ -4808,8 +4821,13 @@ mod tests {
             self.capable
         }
 
-        fn send_ai_client_state(&mut self, packet: AiClientStatePacket) -> Result<usize, String> {
+        fn send_ai_client_state(
+            &mut self,
+            packet: AiClientStatePacket,
+            work_phase_only: bool,
+        ) -> Result<usize, String> {
             self.sent.push(packet);
+            self.work_phase_only.push(work_phase_only);
             Ok(1)
         }
     }
@@ -4820,6 +4838,7 @@ mod tests {
             client_variant: AiClientVariant::Cli,
             session_active: activity_state != AiActivityState::None,
             activity_state,
+            work_phase: AiWorkPhase::Unspecified,
             revision,
         }
     }
@@ -4828,6 +4847,13 @@ mod tests {
         AiClientStateChange {
             state,
             reason: rawhid_host_core::AiClientStateChangeReason::TurnStarted,
+        }
+    }
+
+    fn work_phase_change(state: AiClientStateSnapshot) -> AiClientStateChange {
+        AiClientStateChange {
+            state,
+            reason: rawhid_host_core::AiClientStateChangeReason::WorkPhaseChanged,
         }
     }
 
@@ -4858,6 +4884,31 @@ mod tests {
         assert_eq!(transport.sent[1].activity_state, AiActivityState::Working);
         assert_eq!(transport.sent[1].revision, 51);
         assert_eq!(tracker.last_device_generation, Some(4));
+    }
+
+    #[test]
+    fn ai_client_work_phase_change_is_marked_detail_only() {
+        let mut transport = FakeAiClientTransport {
+            device_generation: 5,
+            capable: true,
+            ..Default::default()
+        };
+        let mut tracker = AiClientStateSendTracker::default();
+        let mut working = ai_state(AiActivityState::Working, 60);
+        working.work_phase = AiWorkPhase::Executing;
+
+        sync_ai_client_state(
+            &mut transport,
+            working,
+            [work_phase_change(working)],
+            &mut tracker,
+            Instant::now(),
+        )
+        .unwrap();
+
+        assert_eq!(transport.work_phase_only, vec![true]);
+        assert_eq!(transport.sent[0].revision, 60);
+        assert_eq!(transport.sent[0].work_phase, AiWorkPhase::Executing);
     }
 
     #[test]

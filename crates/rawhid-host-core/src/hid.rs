@@ -15,8 +15,8 @@ use crate::{
     packet::{
         AiClientStatePacket, AiUsagePacket, ComboInfo, ComboItem, ConfigRequest, ConfigResponse,
         ConfigStatus, DeviceHello, EncoderBinding, EncoderGetBindings, EncoderGetInfo, Packet,
-        TimeSyncPacket, UplinkPacket, CAPABILITY_AI_CLIENT_STATE, CAPABILITY_CONFIG_RPC,
-        PACKET_SIZE, REPORT_SIZE,
+        TimeSyncPacket, UplinkPacket, CAPABILITY_AI_CLIENT_STATE, CAPABILITY_AI_CLIENT_WORK_PHASE,
+        CAPABILITY_CONFIG_RPC, PACKET_SIZE, REPORT_SIZE,
     },
 };
 
@@ -501,10 +501,48 @@ impl<T: HidTransport> HidDeviceManager<T> {
         self.send_report_to_verified(packet.encode_report())
     }
 
-    pub fn send_ai_client_state(&mut self, state: AiClientStatePacket) -> Result<usize, HidError> {
+    pub fn send_ai_client_state(
+        &mut self,
+        state: AiClientStatePacket,
+        work_phase_only: bool,
+    ) -> Result<usize, HidError> {
         self.ensure_verified()?;
-        let report = state.encode_report(self.next_seq());
-        self.send_report_to_capable_verified(report, CAPABILITY_AI_CLIENT_STATE)
+        let seq = self.next_seq();
+        let legacy_report = state.encode_report(seq);
+        let work_phase_report = state.encode_work_phase_report(seq);
+        let mut sent = 0usize;
+        let previous_len = self.verified.len();
+        let mut retained = Vec::with_capacity(self.verified.len());
+
+        for device in self.verified.drain(..) {
+            if device.capabilities & CAPABILITY_AI_CLIENT_STATE == 0
+                || (work_phase_only && device.capabilities & CAPABILITY_AI_CLIENT_WORK_PHASE == 0)
+            {
+                retained.push(device);
+                continue;
+            }
+            let report = if device.capabilities & CAPABILITY_AI_CLIENT_WORK_PHASE != 0 {
+                &work_phase_report
+            } else {
+                &legacy_report
+            };
+            match self.transport.write_report(&device, report) {
+                Ok(()) => {
+                    sent += 1;
+                    retained.push(device);
+                }
+                Err(error) => {
+                    warn!("Raw HID write failed for {}: {}", device.path, error);
+                    self.transport.forget_device(&device);
+                }
+            }
+        }
+
+        if previous_len != retained.len() {
+            self.generation = self.generation.wrapping_add(1);
+        }
+        self.verified = retained;
+        Ok(sent)
     }
 
     pub fn send_set_layer_to_device(
@@ -877,39 +915,6 @@ impl<T: HidTransport> HidDeviceManager<T> {
         Ok(sent)
     }
 
-    fn send_report_to_capable_verified(
-        &mut self,
-        report: [u8; REPORT_SIZE],
-        capability: u32,
-    ) -> Result<usize, HidError> {
-        let mut sent = 0usize;
-        let previous_len = self.verified.len();
-        let mut retained = Vec::with_capacity(self.verified.len());
-
-        for device in self.verified.drain(..) {
-            if device.capabilities & capability == 0 {
-                retained.push(device);
-                continue;
-            }
-            match self.transport.write_report(&device, &report) {
-                Ok(()) => {
-                    sent += 1;
-                    retained.push(device);
-                }
-                Err(error) => {
-                    warn!("Raw HID write failed for {}: {}", device.path, error);
-                    self.transport.forget_device(&device);
-                }
-            }
-        }
-
-        if previous_len != retained.len() {
-            self.generation = self.generation.wrapping_add(1);
-        }
-        self.verified = retained;
-        Ok(sent)
-    }
-
     /// Drain pending device-initiated packets from all verified devices.
     /// Invalid packets are logged and skipped; read errors drop the device
     /// (same policy as write failures).
@@ -1228,16 +1233,68 @@ mod tests {
             crate::packet::AiClientVariant::Cli as u8,
             true,
             crate::packet::AiActivityState::Available,
+            crate::packet::AiWorkPhase::Unspecified,
             7,
         )
         .unwrap();
 
-        assert_eq!(manager.send_ai_client_state(state).unwrap(), 1);
+        assert_eq!(manager.send_ai_client_state(state, false).unwrap(), 1);
 
         let writes = manager.transport.writes.borrow();
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].0, "a");
         assert_eq!(writes[0].1[4], crate::packet::PacketType::StateUpdate as u8);
+    }
+
+    #[test]
+    fn ai_client_state_uses_capability_specific_payloads_and_phase_only_targeting() {
+        let legacy_caps = CAPABILITY_AI_CLIENT_STATE;
+        let detailed_caps = CAPABILITY_AI_CLIENT_STATE | CAPABILITY_AI_CLIENT_WORK_PHASE;
+        let legacy = device_with_capabilities("legacy", legacy_caps);
+        let detailed = device_with_capabilities("detailed", detailed_caps);
+        let transport = MockTransport {
+            candidates: RefCell::new(vec![legacy, detailed]),
+            ..MockTransport::default()
+        };
+        transport
+            .hello_paths
+            .borrow_mut()
+            .extend(["legacy".to_string(), "detailed".to_string()]);
+        transport.hello_capabilities.borrow_mut().extend([
+            ("legacy".to_string(), legacy_caps),
+            ("detailed".to_string(), detailed_caps),
+        ]);
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        manager.probe().unwrap();
+        let state = AiClientStatePacket::new(
+            crate::packet::AiClientType::Codex,
+            crate::packet::AiClientVariant::Cli as u8,
+            true,
+            crate::packet::AiActivityState::Working,
+            crate::packet::AiWorkPhase::Searching,
+            11,
+        )
+        .unwrap();
+
+        assert_eq!(manager.send_ai_client_state(state, false).unwrap(), 2);
+        {
+            let writes = manager.transport.writes.borrow();
+            let legacy_write = writes.iter().find(|write| write.0 == "legacy").unwrap();
+            let detailed_write = writes.iter().find(|write| write.0 == "detailed").unwrap();
+            assert_eq!(legacy_write.1[9], 6);
+            assert_eq!(detailed_write.1[9], 7);
+            assert_eq!(
+                detailed_write.1[19],
+                crate::packet::AiWorkPhase::Searching as u8
+            );
+        }
+
+        manager.transport.writes.borrow_mut().clear();
+        assert_eq!(manager.send_ai_client_state(state, true).unwrap(), 1);
+        let writes = manager.transport.writes.borrow();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, "detailed");
+        assert_eq!(writes[0].1[9], 7);
     }
 
     #[test]

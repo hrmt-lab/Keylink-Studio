@@ -510,8 +510,12 @@ where
             .any(|device| device.capabilities & CAPABILITY_AI_CLIENT_STATE != 0)
     }
 
-    pub fn send_ai_client_state(&mut self, state: AiClientStatePacket) -> Result<usize, HidError> {
-        self.hid.send_ai_client_state(state)
+    pub fn send_ai_client_state(
+        &mut self,
+        state: AiClientStatePacket,
+        work_phase_only: bool,
+    ) -> Result<usize, HidError> {
+        self.hid.send_ai_client_state(state, work_phase_only)
     }
 
     pub fn ai_usage_statuses(&self) -> Vec<AiUsageProviderStatus> {

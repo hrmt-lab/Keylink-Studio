@@ -97,8 +97,19 @@ export interface CodexClientConfig {
   broker_port: number;
 }
 
+export type CodexLaunchEnvironment = "windows" | "wsl";
+
+export interface CodexLauncherConfig {
+  environment: CodexLaunchEnvironment;
+  windows_project_directory: string | null;
+  wsl_project_directory: string | null;
+  wsl_distribution: string | null;
+  wsl_executable: string;
+}
+
 export interface AiClientConfig {
   codex: CodexClientConfig;
+  codex_launcher: CodexLauncherConfig;
 }
 
 export type CodexBrokerPhase =
@@ -118,6 +129,17 @@ export interface CodexBrokerStatus {
   client_connected: boolean;
   cli_connection_command: string | null;
   last_error: string | null;
+}
+
+export interface CodexLaunchResult {
+  environment: CodexLaunchEnvironment;
+  project_directory: string;
+  config: AppConfig;
+}
+
+export interface WslDistribution {
+  name: string;
+  version: number;
 }
 
 export type AiActivityState =

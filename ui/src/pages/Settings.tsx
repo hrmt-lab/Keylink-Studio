@@ -1,8 +1,11 @@
 import { useEffect, useState } from "react";
-import { Save, RefreshCcw, Check, X, Plus, Copy, Play, Square } from "lucide-react";
+import { open } from "@tauri-apps/plugin-dialog";
+import { Save, RefreshCcw, Check, X, Plus, Copy, Play, Square, Terminal, FolderOpen } from "lucide-react";
 import {
   getCodexIntegrationStatus,
   getLaunchAtLogin,
+  launchCodexCli,
+  listWslDistributions,
   reloadConfig,
   setLaunchAtLogin,
   startCodexIntegration,
@@ -21,7 +24,7 @@ import {
   addCustomAccent,
   removeCustomAccent,
 } from "../lib/theme";
-import type { AppConfig, CodexBrokerStatus, MonitorStatus } from "../types";
+import type { AppConfig, CodexBrokerStatus, MonitorStatus, WslDistribution } from "../types";
 
 interface Props {
   config: AppConfig;
@@ -33,7 +36,7 @@ const MAX_USAGE = 0xffff;
 
 export default function Settings({ config, setConfig, status }: Props) {
   const { t } = useLang();
-  const { draft, setDraft, isDirty, saving, error, setError, save } = useConfigSection({
+  const { draft, setDraft, isDirty, saving, error, setError, save, rebase } = useConfigSection({
     config,
     setConfig,
     select: (c) => c,
@@ -154,7 +157,8 @@ export default function Settings({ config, setConfig, status }: Props) {
       <CodexIntegration
         draft={draft}
         setDraft={setDraft}
-        configDirty={isDirty}
+        savedConfig={config}
+        rebaseConfig={rebase}
         status={status}
       />
 
@@ -311,20 +315,26 @@ export default function Settings({ config, setConfig, status }: Props) {
 function CodexIntegration({
   draft,
   setDraft,
-  configDirty,
+  savedConfig,
+  rebaseConfig,
   status,
 }: {
   draft: AppConfig;
   setDraft: React.Dispatch<React.SetStateAction<AppConfig>>;
-  configDirty: boolean;
+  savedConfig: AppConfig;
+  rebaseConfig: (config: AppConfig, preserveDraft: (draft: AppConfig) => AppConfig) => void;
   status: MonitorStatus;
 }) {
-  const { t } = useLang();
+  const { t, lang } = useLang();
   const [broker, setBroker] = useState<CodexBrokerStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
+  const [launchBusy, setLaunchBusy] = useState(false);
+  const [launched, setLaunched] = useState(false);
+  const [wslDistributions, setWslDistributions] = useState<WslDistribution[]>([]);
+  const [wslLoadError, setWslLoadError] = useState<string | null>(null);
 
   useEffect(() => {
     let active = true;
@@ -344,13 +354,46 @@ function CodexIntegration({
   const phase = broker?.phase ?? "stopped";
   const editable = phase === "stopped" || phase === "error";
   const running = !editable;
+  const launchable =
+    phase === "stopped" || phase === "error" || phase === "waiting_for_client";
   const capableDevices = status.host_link_devices.filter(
     (device) => (device.capabilities & (1 << 10)) !== 0,
   ).length;
   const codex = draft.ai_client.codex;
+  const launcher = draft.ai_client.codex_launcher;
+  const codexConfigDirty =
+    JSON.stringify(codex) !== JSON.stringify(savedConfig.ai_client.codex);
   const updateCodex = (next: Partial<typeof codex>) => {
-    setDraft({ ...draft, ai_client: { codex: { ...codex, ...next } } });
+    setDraft({
+      ...draft,
+      ai_client: { ...draft.ai_client, codex: { ...codex, ...next } },
+    });
   };
+  const updateLauncher = (next: Partial<typeof launcher>) => {
+    setDraft({
+      ...draft,
+      ai_client: {
+        ...draft.ai_client,
+        codex_launcher: { ...launcher, ...next },
+      },
+    });
+  };
+  useEffect(() => {
+    if (launcher.environment !== "wsl") return;
+    let active = true;
+    void listWslDistributions()
+      .then((items) => {
+        if (!active) return;
+        setWslDistributions(items);
+        setWslLoadError(items.length === 0 ? t("settings.codex.launcher.wsl_none") : null);
+      })
+      .catch((error) => {
+        if (active) setWslLoadError(String(error));
+      });
+    return () => {
+      active = false;
+    };
+  }, [launcher.environment, lang]);
   const run = async (action: "start" | "stop") => {
     setBusy(true);
     setActionError(null);
@@ -393,6 +436,60 @@ function CodexIntegration({
       setActionError(t("settings.codex.copy_failed"));
     }
   };
+  const browseProject = async () => {
+    setActionError(null);
+    if (launcher.environment === "windows") {
+      const selected = await open({
+        multiple: false,
+        directory: true,
+        defaultPath: launcher.windows_project_directory ?? undefined,
+      });
+      if (typeof selected === "string") {
+        updateLauncher({ windows_project_directory: selected });
+      }
+      return;
+    }
+    const distro = launcher.wsl_distribution?.trim();
+    if (!distro) {
+      setActionError(t("settings.codex.launcher.wsl_required"));
+      return;
+    }
+    const selected = await open({
+      multiple: false,
+      directory: true,
+      defaultPath: wslPathToUnc(distro, launcher.wsl_project_directory ?? "/"),
+    });
+    if (typeof selected !== "string") return;
+    const linuxPath = uncToWslPath(selected, distro);
+    if (!linuxPath) {
+      setActionError(t("settings.codex.launcher.wsl_path_invalid"));
+      return;
+    }
+    updateLauncher({ wsl_project_directory: linuxPath });
+  };
+  const launchCli = async () => {
+    setLaunchBusy(true);
+    setActionError(null);
+    setLaunched(false);
+    try {
+      const result = await launchCodexCli(launcher);
+      rebaseConfig(result.config, (current) => ({
+        ...current,
+        ai_client: {
+          ...current.ai_client,
+          codex_launcher: result.config.ai_client.codex_launcher,
+        },
+      }));
+      setBroker(await getCodexIntegrationStatus());
+      setLaunched(true);
+      window.setTimeout(() => setLaunched(false), 2400);
+    } catch (error) {
+      setActionError(String(error));
+      setBroker(await getCodexIntegrationStatus().catch(() => broker));
+    } finally {
+      setLaunchBusy(false);
+    }
+  };
 
   return (
     <SectionCard title={t("settings.codex.section")}>
@@ -406,12 +503,12 @@ function CodexIntegration({
             </div>
           </div>
           {running ? (
-            <SecondaryButton onClick={() => void requestStop()} disabled={busy} loading={busy} icon={<Square size={14} />}>{t("settings.codex.stop")}</SecondaryButton>
+            <SecondaryButton onClick={() => void requestStop()} disabled={busy || launchBusy} loading={busy} icon={<Square size={14} />}>{t("settings.codex.stop")}</SecondaryButton>
           ) : (
-            <PrimaryButton onClick={() => void run("start")} disabled={busy || configDirty} loading={busy} icon={<Play size={14} />}>{t("settings.codex.start")}</PrimaryButton>
+            <PrimaryButton onClick={() => void run("start")} disabled={busy || launchBusy || codexConfigDirty} loading={busy} icon={<Play size={14} />}>{t("settings.codex.start")}</PrimaryButton>
           )}
         </div>
-        {configDirty && editable && <p className="mt-3 text-xs text-amber-700">{t("settings.codex.save_first")}</p>}
+        {codexConfigDirty && editable && <p className="mt-3 text-xs text-amber-700">{t("settings.codex.save_first")}</p>}
         {broker?.app_server_port != null && broker?.broker_port != null && (
           <p className="mt-3 text-xs text-faint">
             {t("settings.codex.active_ports", {
@@ -431,6 +528,84 @@ function CodexIntegration({
       <SettingRow label={t("settings.codex.broker_port")} description={t("settings.codex.broker_port.desc")}>
         <input className="input !w-28 text-right font-mono" type="number" min={1024} max={65535} disabled={!editable} value={codex.broker_port} onChange={(event) => updateCodex({ broker_port: Math.max(1024, Math.min(65535, Number(event.target.value))) })} />
       </SettingRow>
+      <div className="border-t border-background px-5 py-4">
+        <p className="text-sm font-medium text-ink">{t("settings.codex.launcher.title")}</p>
+        <p className="mt-1 text-xs text-faint">{t("settings.codex.launcher.desc")}</p>
+      </div>
+      <SettingRow label={t("settings.codex.launcher.environment")} description={t("settings.codex.launcher.environment.desc")}>
+        <select
+          className="input !w-40"
+          value={launcher.environment}
+          onChange={(event) => updateLauncher({ environment: event.target.value as "windows" | "wsl" })}
+        >
+          <option value="windows">Windows</option>
+          <option value="wsl">WSL</option>
+        </select>
+      </SettingRow>
+      {launcher.environment === "wsl" && (
+        <>
+          <SettingRow label={t("settings.codex.launcher.wsl_distribution")} description={t("settings.codex.launcher.wsl_distribution.desc")} align="start">
+            <div className="w-72 max-w-full">
+              <input
+                className="input w-full font-mono text-xs"
+                list="codex-wsl-distributions"
+                value={launcher.wsl_distribution ?? ""}
+                onChange={(event) => updateLauncher({ wsl_distribution: event.target.value || null })}
+                placeholder="Ubuntu"
+              />
+              <datalist id="codex-wsl-distributions">
+                {wslDistributions.map((distribution) => (
+                  <option key={distribution.name} value={distribution.name}>
+                    WSL {distribution.version}
+                  </option>
+                ))}
+              </datalist>
+              {wslLoadError && <p className="mt-1 text-xs text-amber-700">{wslLoadError}</p>}
+            </div>
+          </SettingRow>
+          <SettingRow label={t("settings.codex.launcher.wsl_executable")} description={t("settings.codex.launcher.wsl_executable.desc")} align="start">
+            <input
+              className="input w-72 max-w-full font-mono text-xs"
+              value={launcher.wsl_executable}
+              onChange={(event) => updateLauncher({ wsl_executable: event.target.value })}
+              placeholder="codex"
+            />
+          </SettingRow>
+        </>
+      )}
+      <SettingRow label={t("settings.codex.launcher.project")} description={t("settings.codex.launcher.project.desc")} align="start">
+        <div className="flex w-96 max-w-full items-center gap-2">
+          <input
+            className="input min-w-0 flex-1 font-mono text-xs"
+            value={launcher.environment === "windows" ? launcher.windows_project_directory ?? "" : launcher.wsl_project_directory ?? ""}
+            onChange={(event) =>
+              updateLauncher(
+                launcher.environment === "windows"
+                  ? { windows_project_directory: event.target.value || null }
+                  : { wsl_project_directory: event.target.value || null },
+              )
+            }
+            placeholder={launcher.environment === "windows" ? "C:\\path\\to\\project" : "/home/user/project"}
+          />
+          <SecondaryButton onClick={() => void browseProject()} icon={<FolderOpen size={14} />}>
+            {t("settings.codex.launcher.browse")}
+          </SecondaryButton>
+        </div>
+      </SettingRow>
+      <div className="border-t border-background px-5 py-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <PrimaryButton
+            onClick={() => void launchCli()}
+            disabled={busy || launchBusy || codexConfigDirty || !launchable || broker?.client_connected === true}
+            loading={launchBusy}
+            icon={<Terminal size={15} />}
+          >
+            {t("settings.codex.launcher.open")}
+          </PrimaryButton>
+          {launched && <span className="text-xs font-medium text-accent-deep">{t("settings.codex.launcher.opened")}</span>}
+        </div>
+        {codexConfigDirty && <p className="mt-2 text-xs text-amber-700">{t("settings.codex.save_first")}</p>}
+      </div>
       <SettingRow label={t("settings.codex.devices")} description={t("settings.codex.devices.desc")}>
         <span className={`text-sm font-medium ${capableDevices > 0 ? "text-ink" : "text-amber-700"}`}>{t("settings.codex.device_count", { count: capableDevices })}</span>
       </SettingRow>
@@ -451,6 +626,24 @@ function CodexIntegration({
       )}
     </SectionCard>
   );
+}
+
+function wslPathToUnc(distro: string, path: string): string {
+  const suffix = path.replace(/^\/+/, "").replace(/\//g, "\\");
+  return `\\\\wsl.localhost\\${distro}${suffix ? `\\${suffix}` : "\\"}`;
+}
+
+function uncToWslPath(path: string, distro: string): string | null {
+  const normalized = path.replace(/\//g, "\\");
+  const lower = normalized.toLowerCase();
+  const prefixes = [
+    `\\\\wsl.localhost\\${distro.toLowerCase()}`,
+    `\\\\wsl$\\${distro.toLowerCase()}`,
+  ];
+  const prefix = prefixes.find((candidate) => lower === candidate || lower.startsWith(`${candidate}\\`));
+  if (!prefix) return null;
+  const suffix = normalized.slice(prefix.length).replace(/^\\+/, "");
+  return suffix ? `/${suffix.replace(/\\/g, "/")}` : "/";
 }
 
 function CodexStopConfirmDialog({

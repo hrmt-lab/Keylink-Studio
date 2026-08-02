@@ -1,6 +1,6 @@
 # Codex Broker／ScreenKeyプロトタイプの現在地と次の作業
 
-- 最終更新日: 2026-07-26
+- 最終更新日: 2026-07-27
 - 用途: Codex Broker／ScreenKeyプロトタイプの実施結果、完了条件、次の開始地点を管理する進捗文書
 - 主な確認元:
   - `docs/keylink-studio-codex-screenkey-prototype-spec-reviewed-v10.md`
@@ -20,6 +20,16 @@ Codex App Server、Host Link v2、`zmk-rawhid-app`、ScreenKeyを接続した経
 対応デバイス1台、ScreenKey Renderer 1件、USB接続」に確定した。
 この対象範囲の実装、実機確認、構成別自動テスト、最終回帰は完了したため、
 **ScreenKey単体を対象としたCodex状態表示プロトタイプは完了**とする。
+
+なお、後続のCodex CLI起動ボタンで追加したWSL起動経路には、
+WSL側Codex TUIのLinux形式cwdをWindows側App Serverが解釈できず、
+`thread/start`が失敗する既知不具合がある。
+ScreenKeyプロトタイプのWindows経路の完了判定は変更しないが、
+ランチャー機能はWSL App Server起動へ修正済みで、WSL側Codex CLI `0.146.0`のschema比較と
+Broker経由のThread／Turn、入力待ち、承認待ち、停止→再開始、port・token directory・WSL App Serverの後始末を確認した。
+対応基準を`0.146.0`へ更新した。
+原因、解消方針、将来の複数runtime境界は
+`docs/codex-launcher-wsl-runtime-plan.md`を参照する。
 
 複数デバイス、複数Renderer、LED-only、ScreenKey以外のTarget、BLE経路、
 非64-byte interfaceの実機除外確認、全実機Targetでの既存Feature回帰は

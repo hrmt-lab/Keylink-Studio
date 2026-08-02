@@ -4,6 +4,8 @@ import type {
   AppConfig,
   AiClientStateSnapshot,
   CodexBrokerStatus,
+  CodexLaunchResult,
+  CodexLauncherConfig,
   DiscardChangesDto,
   ResetToKeymapDto,
   EditBehavior,
@@ -25,6 +27,7 @@ import type {
   StudioBindingLabelPatch,
   StudioKeymapSnapshot,
   StudioRawBinding,
+  WslDistribution,
   RestoreReport,
   KeymapExportReport,
 } from "./types";
@@ -49,6 +52,10 @@ export const getAiClientState = () =>
   invoke<AiClientStateSnapshot>("get_ai_client_state");
 export const startCodexIntegration = () =>
   invoke<CodexBrokerStatus>("start_codex_integration");
+export const launchCodexCli = (launcher: CodexLauncherConfig) =>
+  invoke<CodexLaunchResult>("launch_codex_cli", { launcher });
+export const listWslDistributions = () =>
+  invoke<WslDistribution[]>("list_wsl_distributions");
 export const stopCodexIntegration = () =>
   invoke<CodexBrokerStatus>("stop_codex_integration");
 export const reloadConfig = () => invoke<AppConfig>("reload_config");

@@ -241,6 +241,37 @@ BLE 編集中の注意:
 - `起動時に監視を開始`: アプリ起動時に自動で監視を開始します。
 - `Windows ログイン時に起動`: Windows ログイン時に Keylink Studio を自動起動します。HKCU Run レジストリキーを使うため管理者権限は不要です。
 
+### Codex CLIランチャー
+
+Codex連携では、接続コマンドを手動で貼り付ける代わりに、`Codexを開く`から
+Windows TerminalへCodex CLIのタブを追加できます。最後に使用したTerminalがあれば
+そこへ新しいタブを追加し、なければ新しいTerminalウィンドウを作成します。
+Codexを終了してもタブとシェルは残ります。
+
+1. 実行環境として`Windows`または`WSL`を選択します。
+2. プロジェクトディレクトリを指定します。WSLではディストリビューションも指定します。
+3. `Codexを開く`を押します。実行環境、プロジェクトディレクトリ、WSL項目は
+   この操作で自動保存されるため、先に画面上部の`保存`を押す必要はありません。
+
+Brokerが停止中の場合は自動的に起動します。すでにCodex CLIが接続中の場合は、
+二重起動を避けるため新しいタブを開きません。従来の`CLI接続コマンド`は
+トラブルシュート用の手動接続方法として引き続き利用できます。
+ランチャー以外の編集中設定は、`Codexを開く`では保存されません。
+
+WSL2からWindows側のBrokerへ接続する場合は、`%UserProfile%\.wslconfig`の
+`[wsl2]`で`networkingMode=mirrored`を有効にし、WSLを再起動しておく必要があります。
+Keylink StudioはWSL、Codex CLI、Windows Terminalのインストールや`.wslconfig`の変更を
+自動では行いません。
+
+> [!WARNING]
+> WSLを選んだ場合、Keylink Studioは同じWSLディストリビューション内でApp Serverを起動し、
+> TUI、App Server、cwd、command実行環境を一致させます。
+> 起動前にWSL側CodexのversionとApp Server schemaを検証します。基準外のCodexでは安全のため
+> 起動しません。対応基準と一致しないCodexでは、安全のため起動を止めます。2026-08-02時点では
+> 対応基準は`codex-cli 0.146.0`です。
+> 詳細と確認項目は
+> `docs/codex-launcher-wsl-runtime-plan.md`を参照してください。
+
 ### 基本設定
 
 Polling、HID Usage Page / Usage、HELLO timeout などを編集できます。HELLO timeout の既定値は 750ms です。設定画面の数値入力では 50ms 単位で調整できます。通常の操作では細かい設定ファイルの場所や中身を意識する必要はありません。トラブルシュートや詳細調整が必要な場合だけ、設定ファイルを直接確認します。

@@ -15,8 +15,11 @@ use rawhid_host_core::{
     active_app::SystemActiveAppProvider,
     ai_usage::{AiUsageRefreshError, AiUsageRuntime, AiUsageShared},
     codex_activity::{AiClientStateChange, AiClientStateSnapshot, CodexActivityRuntime},
-    codex_broker::{CodexBrokerConfig, CodexBrokerStatus},
-    config::{load_config, ActionsConfig, AppConfig, ConfigPaths},
+    codex_broker::{CodexAppServerRuntime, CodexBrokerConfig, CodexBrokerPhase, CodexBrokerStatus},
+    config::{
+        load_config, ActionsConfig, AppConfig, CodexLaunchEnvironment, CodexLauncherConfig,
+        ConfigPaths,
+    },
     hid::{HidDeviceManager, HidError, ProbeResult},
     packet::{
         AiClientStatePacket, ComboBinding, ComboInfo, ComboItem, ConfigStatus, EncoderBinding,
@@ -44,7 +47,7 @@ use crate::state::{
     add_log, AppState, HostLinkCall, HostLinkRequest, HostLinkResponse, LogEntry, MonitorCommand,
     MonitorStatus,
 };
-use crate::{actions, icon, startup};
+use crate::{actions, codex_launcher, icon, startup};
 
 type MonitorRunner = Runner<SystemActiveAppProvider, rawhid_host_core::hid::RealHidTransport>;
 
@@ -292,6 +295,10 @@ pub fn get_config_path(state: State<AppState>) -> Option<String> {
 #[tauri::command]
 pub fn save_config(config: AppConfig, state: State<AppState>) -> Result<(), String> {
     ensure_codex_config_editable(&state, &config)?;
+    persist_config(config, state.inner())
+}
+
+fn persist_config(config: AppConfig, state: &AppState) -> Result<(), String> {
     let toml_str = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
 
     let path = {
@@ -393,15 +400,94 @@ pub fn get_ai_client_state(state: State<AppState>) -> AiClientStateSnapshot {
 pub async fn start_codex_integration(
     state: State<'_, AppState>,
 ) -> Result<CodexBrokerStatus, String> {
-    let configured = state.config.lock().unwrap().ai_client.codex.clone();
+    let configured = state.config.lock().unwrap().clone();
     let manager = state.codex_broker.clone();
-    let config = CodexBrokerConfig {
-        codex_executable: configured.executable_path.map(PathBuf::from),
-        app_server_port: configured.app_server_port,
-        broker_port: configured.broker_port,
-        ..CodexBrokerConfig::default()
-    };
+    let config = codex_broker_config(&configured)?;
     tauri::async_runtime::spawn_blocking(move || manager.start(config).map_err(|e| e.to_string()))
+        .await
+        .map_err(|error| error.to_string())?
+}
+
+#[tauri::command]
+pub async fn launch_codex_cli(
+    launcher: CodexLauncherConfig,
+    state: State<'_, AppState>,
+) -> Result<CodexLaunchCommandResult, String> {
+    let manager = state.codex_broker.clone();
+    match manager.status().phase {
+        CodexBrokerPhase::Stopped
+        | CodexBrokerPhase::Error
+        | CodexBrokerPhase::WaitingForClient => {}
+        CodexBrokerPhase::Connected => {
+            return Err("Codex CLIはすでに接続されています".to_string());
+        }
+        CodexBrokerPhase::Starting
+        | CodexBrokerPhase::Reconnecting
+        | CodexBrokerPhase::Stopping => {
+            return Err("Codex連携の状態遷移が完了してから、もう一度起動してください".to_string());
+        }
+    }
+
+    let launcher_to_validate = launcher.clone();
+    tauri::async_runtime::spawn_blocking(move || codex_launcher::validate(&launcher_to_validate))
+        .await
+        .map_err(|error| error.to_string())??;
+
+    let persisted_config =
+        config_with_codex_launcher(state.config.lock().unwrap().clone(), launcher.clone());
+    let response_config = persisted_config.clone();
+    persist_config(persisted_config.clone(), state.inner())?;
+
+    let launched = tauri::async_runtime::spawn_blocking(move || {
+        let status = manager.status();
+        match status.phase {
+            CodexBrokerPhase::Stopped | CodexBrokerPhase::Error => {
+                manager
+                    .start(codex_broker_config(&persisted_config)?)
+                    .map_err(|error| error.to_string())?;
+            }
+            CodexBrokerPhase::WaitingForClient => {}
+            CodexBrokerPhase::Connected => {
+                return Err("Codex CLIはすでに接続されています".to_string());
+            }
+            CodexBrokerPhase::Starting
+            | CodexBrokerPhase::Reconnecting
+            | CodexBrokerPhase::Stopping => {
+                return Err(
+                    "Codex連携の状態遷移が完了してから、もう一度起動してください".to_string(),
+                );
+            }
+        }
+        let connection = manager
+            .client_launch_info()
+            .map_err(|error| error.to_string())?;
+        codex_launcher::launch(&launcher, &connection)
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    Ok(CodexLaunchCommandResult {
+        environment: launched.environment,
+        project_directory: launched.project_directory,
+        config: response_config,
+    })
+}
+
+fn config_with_codex_launcher(mut config: AppConfig, launcher: CodexLauncherConfig) -> AppConfig {
+    config.ai_client.codex_launcher = launcher;
+    config
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct CodexLaunchCommandResult {
+    pub environment: CodexLaunchEnvironment,
+    pub project_directory: String,
+    pub config: AppConfig,
+}
+
+#[tauri::command]
+pub async fn list_wsl_distributions() -> Result<Vec<codex_launcher::WslDistribution>, String> {
+    tauri::async_runtime::spawn_blocking(codex_launcher::list_wsl_distributions)
         .await
         .map_err(|error| error.to_string())?
 }
@@ -420,9 +506,32 @@ pub fn shutdown_codex_integration(state: &AppState) {
     let _ = state.codex_broker.stop();
 }
 
-fn ensure_codex_config_editable(state: &AppState, next: &AppConfig) -> Result<(), String> {
-    use rawhid_host_core::codex_broker::CodexBrokerPhase;
+fn codex_broker_config(config: &AppConfig) -> Result<CodexBrokerConfig, String> {
+    let configured = &config.ai_client.codex;
+    let launcher = &config.ai_client.codex_launcher;
+    let runtime = match launcher.environment {
+        CodexLaunchEnvironment::Windows => CodexAppServerRuntime::Windows,
+        CodexLaunchEnvironment::Wsl => CodexAppServerRuntime::Wsl {
+            distribution: launcher
+                .wsl_distribution
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| "WSLディストリビューションを設定してください".to_string())?
+                .to_string(),
+            executable: launcher.wsl_executable.trim().to_string(),
+        },
+    };
+    Ok(CodexBrokerConfig {
+        codex_executable: configured.executable_path.as_deref().map(PathBuf::from),
+        runtime,
+        app_server_port: configured.app_server_port,
+        broker_port: configured.broker_port,
+        ..CodexBrokerConfig::default()
+    })
+}
 
+fn ensure_codex_config_editable(state: &AppState, next: &AppConfig) -> Result<(), String> {
     let current = state.config.lock().unwrap().ai_client.codex.clone();
     let phase = state.codex_broker.status().phase;
     if current != next.ai_client.codex
@@ -4665,6 +4774,23 @@ mod tests {
     use rawhid_host_core::packet::{AiActivityState, AiClientType, AiClientVariant};
     use rawhid_host_core::runner::{DeviceBatterySource, DeviceBatteryStatus};
     use rawhid_host_core::studio::{StudioLayer, StudioLayoutSource};
+
+    #[test]
+    fn launcher_update_preserves_every_other_config_value() {
+        let original = AppConfig::default();
+        let launcher = CodexLauncherConfig {
+            environment: CodexLaunchEnvironment::Windows,
+            windows_project_directory: Some(r"C:\Work\project".to_string()),
+            ..CodexLauncherConfig::default()
+        };
+
+        let updated = config_with_codex_launcher(original.clone(), launcher.clone());
+        assert_eq!(updated.ai_client.codex_launcher, launcher);
+
+        let mut without_launcher = updated;
+        without_launcher.ai_client.codex_launcher = original.ai_client.codex_launcher.clone();
+        assert_eq!(without_launcher, original);
+    }
 
     #[derive(Default)]
     struct FakeAiClientTransport {

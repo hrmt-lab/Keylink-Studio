@@ -44,6 +44,7 @@ impl Default for AppConfig {
 #[serde(default)]
 pub struct AiClientConfig {
     pub codex: CodexClientConfig,
+    pub codex_launcher: CodexLauncherConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -61,6 +62,36 @@ impl Default for CodexClientConfig {
             executable_path: None,
             app_server_port: 4500,
             broker_port: 4501,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexLaunchEnvironment {
+    #[default]
+    Windows,
+    Wsl,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct CodexLauncherConfig {
+    pub environment: CodexLaunchEnvironment,
+    pub windows_project_directory: Option<String>,
+    pub wsl_project_directory: Option<String>,
+    pub wsl_distribution: Option<String>,
+    pub wsl_executable: String,
+}
+
+impl Default for CodexLauncherConfig {
+    fn default() -> Self {
+        Self {
+            environment: CodexLaunchEnvironment::Windows,
+            windows_project_directory: None,
+            wsl_project_directory: None,
+            wsl_distribution: None,
+            wsl_executable: "codex".to_string(),
         }
     }
 }
@@ -527,6 +558,13 @@ start_monitoring_on_launch = false
 app_server_port = 4500
 broker_port = 4501
 
+[ai_client.codex_launcher]
+environment = "windows" # windows | wsl
+# windows_project_directory = "C:\\path\\to\\project"
+# wsl_project_directory = "/home/user/project"
+# wsl_distribution = "Ubuntu"
+wsl_executable = "codex"
+
 [polling]
 interval_ms = 500
 uplink_interval_ms = 20
@@ -684,6 +722,28 @@ mod tests {
         assert_eq!(config.time.periodic_sync_sec, 60);
         assert!(!config.ai_usage.enabled);
         assert!(config.ai_usage.codex.enabled);
+        assert_eq!(
+            config.ai_client.codex_launcher.environment,
+            CodexLaunchEnvironment::Windows
+        );
+        assert_eq!(config.ai_client.codex_launcher.wsl_executable, "codex");
+    }
+
+    #[test]
+    fn old_ai_client_config_gets_launcher_defaults() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[ai_client.codex]
+app_server_port = 4500
+broker_port = 4501
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.ai_client.codex_launcher,
+            CodexLauncherConfig::default()
+        );
     }
 
     #[test]

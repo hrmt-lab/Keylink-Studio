@@ -1,5 +1,6 @@
 mod actions;
 mod app_launch;
+mod codex_launcher;
 mod commands;
 mod explorer;
 mod foreground;
@@ -41,6 +42,8 @@ pub fn run() {
             commands::get_codex_integration_status,
             commands::get_ai_client_state,
             commands::start_codex_integration,
+            commands::launch_codex_cli,
+            commands::list_wsl_distributions,
             commands::stop_codex_integration,
             commands::probe_devices,
             commands::probe_studio_devices,

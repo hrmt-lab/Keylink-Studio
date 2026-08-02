@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { saveConfig } from "../api";
 import { friendlyError } from "../lib/errors";
 import type { TranslationKey } from "../i18n";
@@ -23,6 +23,7 @@ interface Result<T> {
   error: string | null;
   setError: (value: string | null) => void;
   save: () => Promise<void>;
+  rebase: (config: AppConfig, preserveDraft: (draft: T) => T) => void;
 }
 
 /**
@@ -33,9 +34,14 @@ export function useConfigSection<T>({ config, setConfig, select, apply, t }: Opt
   const [draft, setDraft] = useState<T>(() => select(config));
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const preserveDraftRef = useRef<((draft: T) => T) | null>(null);
 
   useEffect(() => {
-    setDraft(select(config));
+    setDraft((current) => {
+      const preserveDraft = preserveDraftRef.current;
+      preserveDraftRef.current = null;
+      return preserveDraft ? preserveDraft(current) : select(config);
+    });
     // select is treated as stable; reset only when config changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [config]);
@@ -56,5 +62,10 @@ export function useConfigSection<T>({ config, setConfig, select, apply, t }: Opt
     }
   };
 
-  return { draft, setDraft, isDirty, saving, error, setError, save };
+  const rebase = (updatedConfig: AppConfig, preserveDraft: (draft: T) => T) => {
+    preserveDraftRef.current = preserveDraft;
+    setConfig(updatedConfig);
+  };
+
+  return { draft, setDraft, isDirty, saving, error, setError, save, rebase };
 }

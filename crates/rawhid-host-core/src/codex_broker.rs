@@ -34,15 +34,25 @@ use tokio_tungstenite::{
     WebSocketStream,
 };
 
-pub const SUPPORTED_CODEX_VERSION: &str = "codex-cli 0.145.0";
+pub const SUPPORTED_CODEX_VERSION: &str = "codex-cli 0.146.0";
 pub const SUPPORTED_SCHEMA_SHA256: &str =
-    "1F66700D1CC3DE4A5004E5614A6098878B405C7E7C5F8C9BE97FC900D0AD6C68";
+    "D3992FEC1398AFDBEC658DA2C720C6993FBF3C1CE4900785694D2196679EDDFC";
 const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CodexAppServerRuntime {
+    Windows,
+    Wsl {
+        distribution: String,
+        executable: String,
+    },
+}
 
 #[derive(Debug, Clone)]
 pub struct CodexBrokerConfig {
     pub codex_executable: Option<PathBuf>,
+    pub runtime: CodexAppServerRuntime,
     pub app_server_port: u16,
     pub broker_port: u16,
     pub startup_timeout: Duration,
@@ -53,6 +63,7 @@ impl Default for CodexBrokerConfig {
     fn default() -> Self {
         Self {
             codex_executable: None,
+            runtime: CodexAppServerRuntime::Windows,
             app_server_port: 4500,
             broker_port: 4501,
             startup_timeout: Duration::from_secs(10),
@@ -77,6 +88,24 @@ impl CodexBrokerConfig {
             return Err(CodexBrokerError::InvalidConfig(
                 "startup and shutdown timeouts must be greater than zero".to_string(),
             ));
+        }
+        if let CodexAppServerRuntime::Wsl {
+            distribution,
+            executable,
+        } = &self.runtime
+        {
+            if distribution.trim().is_empty() || executable.trim().is_empty() {
+                return Err(CodexBrokerError::InvalidConfig(
+                    "WSL distribution and Codex executable are required".to_string(),
+                ));
+            }
+            if distribution.contains(['\r', '\n', '\0']) || executable.contains(['\r', '\n', '\0'])
+            {
+                return Err(CodexBrokerError::InvalidConfig(
+                    "WSL distribution and Codex executable cannot contain newline or NUL"
+                        .to_string(),
+                ));
+            }
         }
         Ok(())
     }
@@ -117,6 +146,14 @@ impl Default for CodexBrokerStatus {
             last_error: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexClientLaunchInfo {
+    pub runtime: CodexAppServerRuntime,
+    pub windows_executable: Option<PathBuf>,
+    pub broker_token_path: PathBuf,
+    pub broker_port: u16,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -206,6 +243,7 @@ enum ManagerCommand {
         std_mpsc::Sender<Result<CodexBrokerStatus, CodexBrokerError>>,
     ),
     Stop(std_mpsc::Sender<Result<CodexBrokerStatus, CodexBrokerError>>),
+    ClientLaunchInfo(std_mpsc::Sender<Result<CodexClientLaunchInfo, CodexBrokerError>>),
     Shutdown,
 }
 
@@ -281,6 +319,17 @@ impl CodexBrokerManager {
         self.inner.status.read().unwrap().clone()
     }
 
+    pub fn client_launch_info(&self) -> Result<CodexClientLaunchInfo, CodexBrokerError> {
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        self.inner
+            .command_tx
+            .send(ManagerCommand::ClientLaunchInfo(reply_tx))
+            .map_err(|_| CodexBrokerError::ManagerUnavailable)?;
+        reply_rx
+            .recv()
+            .map_err(|_| CodexBrokerError::ManagerUnavailable)?
+    }
+
     pub fn try_recv_event(&self) -> Result<CodexBrokerEvent, std_mpsc::TryRecvError> {
         self.inner.event_rx.lock().unwrap().try_recv()
     }
@@ -315,6 +364,8 @@ struct Session {
     broker_shutdown: Option<oneshot::Sender<()>>,
     broker_task: Option<JoinHandle<Result<(), CodexBrokerError>>>,
     _secrets: TempDir,
+    codex_executable: PathBuf,
+    broker_token_path: PathBuf,
     config: CodexBrokerConfig,
 }
 
@@ -361,6 +412,41 @@ async fn manager_loop(
                         };
                         let _ = reply.send(result);
                     }
+                    ManagerCommand::ClientLaunchInfo(reply) => {
+                        let result = session
+                            .as_ref()
+                            .ok_or_else(|| {
+                                CodexBrokerError::InvalidConfig(
+                                    "Codex integration is not running".to_string(),
+                                )
+                            })
+                            .and_then(|current| {
+                                let current_status = status.read().unwrap();
+                                if current_status.client_connected {
+                                    return Err(CodexBrokerError::InvalidConfig(
+                                        "Codex CLI is already connected".to_string(),
+                                    ));
+                                }
+                                if current_status.phase != CodexBrokerPhase::WaitingForClient {
+                                    return Err(CodexBrokerError::InvalidConfig(format!(
+                                        "Codex CLI cannot be launched while integration is {:?}",
+                                        current_status.phase
+                                    )));
+                                }
+                                Ok(CodexClientLaunchInfo {
+                                    runtime: current.config.runtime.clone(),
+                                    windows_executable: match current.config.runtime {
+                                        CodexAppServerRuntime::Windows => {
+                                            Some(current.codex_executable.clone())
+                                        }
+                                        CodexAppServerRuntime::Wsl { .. } => None,
+                                    },
+                                    broker_token_path: current.broker_token_path.clone(),
+                                    broker_port: current.config.broker_port,
+                                })
+                            });
+                        let _ = reply.send(result);
+                    }
                     ManagerCommand::Shutdown => break,
                 }
             }
@@ -393,13 +479,25 @@ async fn start_session(
     ensure_port_available(config.app_server_port, "App Server").await?;
     ensure_port_available(config.broker_port, "Broker").await?;
 
-    let executable = resolve_codex_executable(config.codex_executable.as_deref()).await?;
     let secrets = tempfile::Builder::new()
         .prefix("keylink-codex-")
         .tempdir()
         .map_err(|error| CodexBrokerError::Preflight(error.to_string()))?;
-    let version =
-        verify_codex_and_schema(&executable, secrets.path(), config.startup_timeout).await?;
+    let executable = match &config.runtime {
+        CodexAppServerRuntime::Windows => {
+            resolve_codex_executable(config.codex_executable.as_deref()).await?
+        }
+        CodexAppServerRuntime::Wsl { .. } => PathBuf::from("wsl.exe"),
+    };
+    let version = match &config.runtime {
+        CodexAppServerRuntime::Windows => {
+            verify_codex_and_schema(&executable, secrets.path(), config.startup_timeout).await?
+        }
+        CodexAppServerRuntime::Wsl {
+            distribution,
+            executable,
+        } => verify_wsl_codex_and_schema(distribution, executable, config.startup_timeout).await?,
+    };
 
     let app_server_token = generate_token()?;
     let broker_token = loop {
@@ -412,19 +510,47 @@ async fn start_session(
     let broker_token_path = secrets.path().join("broker.token");
     write_private_token(&app_server_token_path, &app_server_token)?;
     write_private_token(&broker_token_path, &broker_token)?;
-    let cli_connection_command =
-        make_cli_connection_command(&executable, &broker_token_path, config.broker_port);
+    let cli_connection_command = match &config.runtime {
+        CodexAppServerRuntime::Windows => {
+            make_cli_connection_command(&executable, &broker_token_path, config.broker_port)
+        }
+        CodexAppServerRuntime::Wsl { .. } => {
+            "設定の「Codexを開く」からWSLのCodex CLIを起動してください".to_string()
+        }
+    };
 
     let app_server_url = format!("ws://127.0.0.1:{}", config.app_server_port);
     let mut command = Command::new(&executable);
+    match &config.runtime {
+        CodexAppServerRuntime::Windows => {
+            command
+                .arg("app-server")
+                .arg("--listen")
+                .arg(&app_server_url)
+                .arg("--ws-auth")
+                .arg("capability-token")
+                .arg("--ws-token-file")
+                .arg(&app_server_token_path);
+        }
+        CodexAppServerRuntime::Wsl {
+            distribution,
+            executable,
+        } => {
+            let token_path = wsl_path(distribution, &app_server_token_path).await?;
+            command
+                .arg("--distribution")
+                .arg(distribution)
+                .arg("--exec")
+                .arg("sh")
+                .arg("-lc")
+                .arg("exec \"$1\" app-server --listen \"$2\" --ws-auth capability-token --ws-token-file \"$3\"")
+                .arg("keylink-codex")
+                .arg(executable)
+                .arg(&app_server_url)
+                .arg(token_path);
+        }
+    }
     command
-        .arg("app-server")
-        .arg("--listen")
-        .arg(&app_server_url)
-        .arg("--ws-auth")
-        .arg("capability-token")
-        .arg("--ws-token-file")
-        .arg(&app_server_token_path)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -496,6 +622,8 @@ async fn start_session(
         broker_shutdown: Some(broker_shutdown),
         broker_task: Some(broker_task),
         _secrets: secrets,
+        codex_executable: executable,
+        broker_token_path,
         config,
     })
 }
@@ -1265,6 +1393,96 @@ async fn verify_codex_and_schema(
     Ok(version)
 }
 
+async fn verify_wsl_codex_and_schema(
+    distribution: &str,
+    executable: &str,
+    timeout: Duration,
+) -> Result<String, CodexBrokerError> {
+    let version_output = time::timeout(
+        timeout,
+        Command::new("wsl.exe")
+            .arg("--distribution")
+            .arg(distribution)
+            .arg("--exec")
+            .arg("sh")
+            .arg("-lc")
+            .arg("exec \"$1\" --version")
+            .arg("keylink-codex")
+            .arg(executable)
+            .output(),
+    )
+    .await
+    .map_err(|_| CodexBrokerError::Preflight("WSL codex --version timed out".to_string()))?
+    .map_err(|error| CodexBrokerError::Preflight(error.to_string()))?;
+    let version = String::from_utf8_lossy(&version_output.stdout)
+        .trim()
+        .to_string();
+    if !version_output.status.success() || version != SUPPORTED_CODEX_VERSION {
+        return Err(CodexBrokerError::Preflight(format!(
+            "requires {SUPPORTED_CODEX_VERSION}; detected {version:?} in WSL"
+        )));
+    }
+
+    let schema_dir = format!("/tmp/keylink-codex-schema-{}", random_identifier()?);
+    let script = "set -eu; dir=$2; trap 'rm -rf \"$dir\"' EXIT; mkdir -p \"$dir\"; \"$1\" app-server generate-json-schema --experimental --out \"$dir\"; sha256sum \"$dir/codex_app_server_protocol.schemas.json\"";
+    let schema_output = time::timeout(
+        timeout,
+        Command::new("wsl.exe")
+            .arg("--distribution")
+            .arg(distribution)
+            .arg("--exec")
+            .arg("sh")
+            .arg("-lc")
+            .arg(script)
+            .arg("keylink-codex")
+            .arg(executable)
+            .arg(&schema_dir)
+            .output(),
+    )
+    .await
+    .map_err(|_| CodexBrokerError::Preflight("WSL schema generation timed out".to_string()))?
+    .map_err(|error| CodexBrokerError::Preflight(error.to_string()))?;
+    if !schema_output.status.success() {
+        return Err(CodexBrokerError::Preflight(
+            "WSL schema generation failed".to_string(),
+        ));
+    }
+    let actual_hash = String::from_utf8_lossy(&schema_output.stdout)
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_uppercase();
+    if actual_hash != SUPPORTED_SCHEMA_SHA256 {
+        return Err(CodexBrokerError::Preflight(format!(
+            "unsupported WSL Codex App Server Schema SHA-256: {actual_hash}"
+        )));
+    }
+    Ok(version)
+}
+
+async fn wsl_path(distribution: &str, path: &Path) -> Result<String, CodexBrokerError> {
+    let path = display_path(path);
+    let output = Command::new("wsl.exe")
+        .arg("--distribution")
+        .arg(distribution)
+        .arg("--exec")
+        .arg("sh")
+        .arg("-lc")
+        .arg("wslpath -u \"$1\"")
+        .arg("keylink-codex")
+        .arg(path)
+        .output()
+        .await
+        .map_err(|error| CodexBrokerError::Preflight(error.to_string()))?;
+    let converted = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if !output.status.success() || !converted.starts_with('/') {
+        return Err(CodexBrokerError::Preflight(
+            "failed to convert App Server token path for WSL".to_string(),
+        ));
+    }
+    Ok(converted)
+}
+
 async fn wait_for_app_server(
     child: &mut Child,
     port: u16,
@@ -1327,6 +1545,15 @@ fn make_cli_connection_command(executable: &Path, token_path: &Path, broker_port
         quote(executable),
         broker_port
     )
+}
+
+fn display_path(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{unc}")
+    } else {
+        value.strip_prefix(r"\\?\").unwrap_or(&value).to_string()
+    }
 }
 
 fn write_private_token(path: &Path, token: &str) -> Result<(), CodexBrokerError> {

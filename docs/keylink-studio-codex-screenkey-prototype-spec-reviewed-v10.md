@@ -6,6 +6,7 @@
 - Host Link: v2 / 64 byte packet（全Target・全Featureで固定）
 - 作成日: 2026-07-19
 - 最終更新日: 2026-07-26
+- 後続設計参照追加: 2026-08-04
 
 ---
 
@@ -198,6 +199,9 @@ Keylink StudioがWindows上でCodex App Serverを起動・管理し、Codex CLI�
 - デバイスごとの表示先設定
 - 専用のCodex診断画面
 - WSL上のCodex CLIとの接続（既知ギャップとして記録し、後続フェーズで検証）
+
+Claude Code対応と複数セッション前提の後続設計は、
+`docs/claude-code-screenkey-multisession-design.md`を参照する。
 
 ---
 

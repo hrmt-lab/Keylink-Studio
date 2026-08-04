@@ -1,9 +1,10 @@
 # Codex Broker／ScreenKeyプロトタイプの現在地と次の作業
 
-- 最終更新日: 2026-08-02
+- 最終更新日: 2026-08-05
 - 用途: Codex Broker／ScreenKeyプロトタイプの実施結果、完了条件、次の開始地点を管理する進捗文書
 - 主な確認元:
   - `docs/keylink-studio-codex-screenkey-prototype-spec-reviewed-v10.md`
+  - `docs/claude-code-screenkey-multisession-design.md`
   - Obsidian `Keylink Studio/handoff.md`
   - Obsidian `Keylink Studio/decisions.md`
   - Obsidian `Keylink Studio/gotchas.md`
@@ -20,6 +21,20 @@ Codex App Server、Host Link v2、`zmk-rawhid-app`、ScreenKeyを接続した経
 対応デバイス1台、ScreenKey Renderer 1件、USB接続」に確定した。
 この対象範囲の実装、実機確認、構成別自動テスト、最終回帰は完了したため、
 **ScreenKey単体を対象としたCodex状態表示プロトタイプは完了**とする。
+
+次フェーズは、将来の複数セッション対応を前提にしたClaude Code状態表示とする。
+初期対象はKeylink Studioから起動したWindows上のClaude Codeに限定し、hook受信、
+Session Registry、一時的なScreenKey押下による表示セッション切り替え、Firmware境界を
+`docs/claude-code-screenkey-multisession-design.md`に定義した。
+
+2026-08-05、Keylink Studio内へ独立したGate C probeを追加し、Claude Code `2.1.214`で
+plugin読込、`SessionStart`／`SessionEnd`、connection refused、1.5秒遅延、socket drop、
+bounded queue overflow、MCP elicitation fixtureを確認した。Host core 207件、Tauri 21件、
+probe 5件もPASSした。Claude Codeは現在未ログインで、OAuth refresh tokenも無効なため、
+tool、permission、input、中断、`/clear`／`/compact`／resume／forkは未実施である。
+ユーザーがClaude Codeを再認証した後、同じprobeで残りのGate Cを実測し、イベント対応、
+終了シグナル、stale閾値、timeoutを確定してから製品実装へ進む。OS再起動直後と実AV負荷は
+今回のGate Cでは`DEFERRED`とする。
 
 なお、後続のCodex CLI起動ボタンで追加したWSL起動経路には、
 WSL側Codex TUIのLinux形式cwdをWindows側App Serverが解釈できず、

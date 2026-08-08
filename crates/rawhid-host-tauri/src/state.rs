@@ -7,7 +7,7 @@ use std::{
 
 use rawhid_host_core::{
     ai_usage::{AiUsageProviderStatus, AiUsageRuntime, AiUsageShared},
-    codex_activity::CodexActivityRuntime,
+    codex_activity::{AiClientStateSnapshot, CodexActivityRuntime},
     codex_broker::CodexBrokerManager,
     config::AppConfig,
     hid::{DeviceInfo, ProbeResult},
@@ -75,7 +75,7 @@ pub struct AppState {
     pub ai_usage_runtime: Arc<Mutex<Option<AiUsageRuntime>>>,
     pub codex_activity: Arc<CodexActivityRuntime>,
     pub claude_integration: Arc<Mutex<Option<ClaudeIntegration>>>,
-    pub ai_display_source: Arc<Mutex<AiDisplaySource>>,
+    pub ai_display_selection: Arc<Mutex<AiDisplaySelection>>,
     pub codex_broker: CodexBrokerManager,
     pub key_stats: SharedKeyStatsStore,
     pub studio_edit: Arc<Mutex<Option<StudioEditSession>>>,
@@ -83,16 +83,116 @@ pub struct AppState {
         Arc<Mutex<HashMap<(String, u64), BTreeMap<(u32, u8), EncoderGetBindings>>>>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AiDisplaySource {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AiDisplayTarget {
     Codex,
-    Claude,
+    Claude {
+        launch_id: String,
+        session_id: String,
+    },
+}
+
+impl AiDisplayTarget {
+    pub fn label(&self) -> String {
+        match self {
+            Self::Codex => "Codex".to_string(),
+            Self::Claude { session_id, .. } => format!("Claude Code {session_id}"),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AiDisplayCandidate {
+    pub target: AiDisplayTarget,
+    pub snapshot: AiClientStateSnapshot,
+}
+
+#[derive(Debug, Default)]
+pub struct AiDisplaySelection {
+    candidates: Vec<AiDisplayCandidate>,
+    selected: Option<AiDisplayTarget>,
+    epoch: u64,
+}
+
+impl AiDisplaySelection {
+    pub fn update_candidates(&mut self, candidates: Vec<AiDisplayCandidate>) {
+        let old_index = self.selected.as_ref().and_then(|selected| {
+            self.candidates
+                .iter()
+                .position(|candidate| &candidate.target == selected)
+        });
+        let next = self
+            .selected
+            .as_ref()
+            .filter(|selected| {
+                candidates
+                    .iter()
+                    .any(|candidate| &candidate.target == *selected)
+            })
+            .cloned()
+            .or_else(|| {
+                (!candidates.is_empty()).then(|| {
+                    candidates[old_index.unwrap_or(0) % candidates.len()]
+                        .target
+                        .clone()
+                })
+            });
+        self.candidates = candidates;
+        self.set_selected(next);
+    }
+
+    pub fn cycle(&mut self) -> Option<AiDisplayTarget> {
+        if self.candidates.is_empty() {
+            self.set_selected(None);
+            return None;
+        }
+        let next_index = self
+            .selected
+            .as_ref()
+            .and_then(|selected| {
+                self.candidates
+                    .iter()
+                    .position(|candidate| &candidate.target == selected)
+            })
+            .map(|index| (index + 1) % self.candidates.len())
+            .unwrap_or(0);
+        let next = self.candidates[next_index].target.clone();
+        self.set_selected(Some(next.clone()));
+        Some(next)
+    }
+
+    pub fn selected_target(&self) -> Option<&AiDisplayTarget> {
+        self.selected.as_ref()
+    }
+
+    pub fn selected_snapshot(&self) -> Option<AiClientStateSnapshot> {
+        let selected = self.selected.as_ref()?;
+        self.candidates
+            .iter()
+            .find(|candidate| &candidate.target == selected)
+            .map(|candidate| candidate.snapshot)
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    fn set_selected(&mut self, selected: Option<AiDisplayTarget>) {
+        if self.selected != selected {
+            self.selected = selected;
+            self.epoch = self.epoch.wrapping_add(1);
+        }
+    }
 }
 
 pub struct ClaudeIntegration {
+    pub launches: BTreeMap<String, ClaudeLaunchIntegration>,
+    pub registry: ClaudeSessionRegistry,
+}
+
+pub struct ClaudeLaunchIntegration {
     pub receiver: ClaudeObserverReceiver,
     pub events: ClaudeObserverEvents,
-    pub registry: ClaudeSessionRegistry,
     pub last_counters: ClaudeObserverCounters,
     pub plugin_root: PathBuf,
 }
@@ -192,7 +292,7 @@ impl AppState {
             ai_usage_runtime: Arc::new(Mutex::new(ai_usage_runtime)),
             codex_activity,
             claude_integration: Arc::new(Mutex::new(None)),
-            ai_display_source: Arc::new(Mutex::new(AiDisplaySource::Codex)),
+            ai_display_selection: Arc::new(Mutex::new(AiDisplaySelection::default())),
             codex_broker,
             key_stats,
             studio_edit: Arc::new(Mutex::new(None)),
@@ -231,4 +331,61 @@ pub fn add_log(
         entries.pop_front();
     }
     entry
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rawhid_host_core::packet::{AiActivityState, AiClientType, AiClientVariant, AiWorkPhase};
+
+    fn candidate(target: AiDisplayTarget, revision: u16) -> AiDisplayCandidate {
+        AiDisplayCandidate {
+            target,
+            snapshot: AiClientStateSnapshot {
+                client_type: AiClientType::Codex,
+                client_variant: AiClientVariant::Cli,
+                session_active: true,
+                activity_state: AiActivityState::Available,
+                work_phase: AiWorkPhase::Unspecified,
+                revision,
+            },
+        }
+    }
+
+    fn claude(session_id: &str) -> AiDisplayTarget {
+        AiDisplayTarget::Claude {
+            launch_id: "launch-1".to_string(),
+            session_id: session_id.to_string(),
+        }
+    }
+
+    #[test]
+    fn adding_a_candidate_does_not_steal_the_current_selection() {
+        let mut selection = AiDisplaySelection::default();
+        selection.update_candidates(vec![candidate(claude("one"), 1)]);
+        selection.update_candidates(vec![
+            candidate(AiDisplayTarget::Codex, 2),
+            candidate(claude("one"), 1),
+        ]);
+
+        assert_eq!(selection.selected_target(), Some(&claude("one")));
+    }
+
+    #[test]
+    fn removing_the_selected_candidate_advances_from_its_old_position() {
+        let mut selection = AiDisplaySelection::default();
+        selection.update_candidates(vec![
+            candidate(AiDisplayTarget::Codex, 1),
+            candidate(claude("one"), 2),
+            candidate(claude("two"), 3),
+        ]);
+        selection.cycle();
+        assert_eq!(selection.selected_target(), Some(&claude("one")));
+
+        selection.update_candidates(vec![
+            candidate(AiDisplayTarget::Codex, 1),
+            candidate(claude("two"), 3),
+        ]);
+        assert_eq!(selection.selected_target(), Some(&claude("two")));
+    }
 }

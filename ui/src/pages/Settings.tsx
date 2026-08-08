@@ -687,25 +687,28 @@ function ClaudeCodeIntegration({
     <SectionCard title="Claude Code連携（ScreenKey）">
       <div className="px-5 py-4">
         <p className="text-xs text-faint">
-          Claude CodeをWindows Terminalで起動し、状態をScreenKeyへ送信します。Firmware対応前は既存のCodex表示として送信します。
+          Claude CodeをWindows Terminalで起動し、状態をScreenKeyへ送信します。複数起動した場合は、HOST_ACTIONを割り当てたキーでCodexを含む表示セッションを切り替えられます。
         </p>
       </div>
       {error && <div className="border-t border-background px-5 py-3"><ErrorNotice message="Claude Code連携を開始できません" details={error} /></div>}
       <SettingRow label="Claude Code実行ファイル" description="空欄ならPATH上の claude を使用します。" align="start">
-        <input className="input w-72 max-w-full font-mono text-xs" value={launcher.executable_path ?? ""} disabled={running} onChange={(event) => update({ executable_path: event.target.value.trim() || null })} placeholder="claude" />
+        <input className="input w-72 max-w-full font-mono text-xs" value={launcher.executable_path ?? ""} disabled={busy} onChange={(event) => update({ executable_path: event.target.value.trim() || null })} placeholder="claude" />
       </SettingRow>
       <SettingRow label="プロジェクト" description="Claude Codeを起動するWindowsのプロジェクトフォルダです。" align="start">
         <div className="flex w-96 max-w-full items-center gap-2">
-          <input className="input min-w-0 flex-1 font-mono text-xs" value={launcher.project_directory ?? ""} disabled={running} onChange={(event) => update({ project_directory: event.target.value || null })} placeholder="C:\\path\\to\\project" />
-          <SecondaryButton onClick={() => void browse()} disabled={running} icon={<FolderOpen size={14} />}>参照</SecondaryButton>
+          <input className="input min-w-0 flex-1 font-mono text-xs" value={launcher.project_directory ?? ""} disabled={busy} onChange={(event) => update({ project_directory: event.target.value || null })} placeholder="C:\\path\\to\\project" />
+          <SecondaryButton onClick={() => void browse()} disabled={busy} icon={<FolderOpen size={14} />}>参照</SecondaryButton>
         </div>
       </SettingRow>
       <div className="border-t border-background px-5 py-4">
-        {running ? (
-          <SecondaryButton onClick={() => void stop()} disabled={busy} loading={busy} icon={<Square size={14} />}>Claude Code連携を停止</SecondaryButton>
-        ) : (
-          <PrimaryButton onClick={() => void launch()} disabled={busy} loading={busy} icon={<Terminal size={15} />}>Claude Codeを起動</PrimaryButton>
-        )}
+        <div className="flex flex-wrap gap-2">
+          <PrimaryButton onClick={() => void launch()} disabled={busy} loading={busy} icon={<Terminal size={15} />}>
+            {running ? "Claude Codeを追加起動" : "Claude Codeを起動"}
+          </PrimaryButton>
+          {running && (
+            <SecondaryButton onClick={() => void stop()} disabled={busy} loading={busy} icon={<Square size={14} />}>すべてのClaude Code連携を停止</SecondaryButton>
+          )}
+        </div>
       </div>
     </SectionCard>
   );

@@ -11,6 +11,18 @@
 - このPCのUbuntuでは`codex-cli 0.146.0`、schema SHA-256は`D3992FEC1398AFDBEC658DA2C720C6993FBF3C1CE4900785694D2196679EDDFC`だった。0.145.0とのschema比較では削除0件、追加は未使用の`externalAgentConfig/import/recordHistory`のみで、Brokerが扱う初期化、Thread、Turn、承認、入力要求の定義は同一だった。
 - schema比較と公式App Server実通信を根拠に、対応基準を0.146.0へ更新した。Broker経由で`thread/start`とTurn、入力待ち、承認待ちを確認し、停止後はWSL App Server、port `4500`／`4501`、一時token directoryが解放されること、再開始後にWSL App Serverが1件だけ起動することを確認した。
 
+## 2026-08-08: Codex CLI 0.147.0対応
+
+Windows側`codex-cli 0.147.0`からexperimental App Server schemaを再生成した。SHA-256は
+`BABFD5C98CD978DD858B4762CDFBC9FBA941E1A0E4053DE0050E4082AE1F075A`である。
+0.146.0との比較ではschema fileの削除は0件で、Client requestへの追加はthread sectionとplugin searchだけだった。
+Keylink Studioが使用するThread／Turn／item、approval、input、`serverRequest/resolved`のmethodと主要fieldは維持されている。
+`item/tool/requestUserInput`には必須field `isBlocking`が追加されたが、Adapterが相関に使う
+`threadId`／`turnId`／`itemId`は不変である。
+
+互換性ゲートはWindows側0.147.0を現行基準とし、検証済みのWSL側0.146.0もversionとschema hashの正しい組み合わせに限り受理する。
+versionだけ、または別versionのschema hashだけが一致する組み合わせは引き続き拒否する。
+
 ## 現象
 
 WSL2のmirrored networkingを有効にしてWSLを再起動した後、

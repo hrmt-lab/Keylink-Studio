@@ -49,8 +49,9 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::foreground::ForegroundWatcher;
 use crate::state::{
-    add_log, AiDisplaySource, AppState, ClaudeIntegration, HostLinkCall, HostLinkRequest,
-    HostLinkResponse, LogEntry, MonitorCommand, MonitorStatus,
+    add_log, AiDisplayCandidate, AiDisplaySelection, AiDisplayTarget, AppState, ClaudeIntegration,
+    ClaudeLaunchIntegration, HostLinkCall, HostLinkRequest, HostLinkResponse, LogEntry,
+    MonitorCommand, MonitorStatus,
 };
 use crate::{actions, claude_launcher, codex_launcher, icon, startup};
 
@@ -65,7 +66,7 @@ pub struct MonitorExtras {
     pub key_stats: SharedKeyStatsStore,
     pub codex_activity: Arc<CodexActivityRuntime>,
     pub claude_integration: Arc<Mutex<Option<ClaudeIntegration>>>,
-    pub ai_display_source: Arc<Mutex<AiDisplaySource>>,
+    pub ai_display_selection: Arc<Mutex<AiDisplaySelection>>,
 }
 
 #[derive(Default)]
@@ -481,7 +482,6 @@ pub async fn launch_codex_cli(
     .await
     .map_err(|error| error.to_string())??;
 
-    *state.ai_display_source.lock().unwrap() = AiDisplaySource::Codex;
     Ok(CodexLaunchCommandResult {
         environment: launched.environment,
         project_directory: launched.project_directory,
@@ -498,19 +498,14 @@ pub async fn launch_claude_code(
     tauri::async_runtime::spawn_blocking(move || claude_launcher::validate(&to_validate))
         .await
         .map_err(|error| error.to_string())??;
-    if state.claude_integration.lock().unwrap().is_some() {
-        return Err(
-            "Claude Code連携はすでに起動しています。停止してから再度起動してください".to_string(),
-        );
-    }
-
     let mut token = [0_u8; 32];
     fill_random(&mut token)
         .map_err(|error| format!("Claude Code連携用tokenを生成できません: {error}"))?;
     let launch_id = format!(
-        "claude-{}-{}",
+        "claude-{}-{}-{}",
         std::process::id(),
-        chrono::Utc::now().timestamp_millis()
+        chrono::Utc::now().timestamp_millis(),
+        hex::encode(&token[..4])
     );
     let (receiver, events) = ClaudeObserverReceiver::bind(ClaudeObserverReceiverOptions::loopback(
         launch_id,
@@ -562,14 +557,20 @@ pub async fn launch_claude_code(
 
     let updated = config_with_claude_launcher(state.config.lock().unwrap().clone(), launcher);
     persist_config(updated, state.inner())?;
-    *state.claude_integration.lock().unwrap() = Some(ClaudeIntegration {
+    let launch_id = receiver.config().launch_id.clone();
+    let launch = ClaudeLaunchIntegration {
         receiver,
         events,
-        registry: Default::default(),
         last_counters: Default::default(),
         plugin_root,
+    };
+    let mut guard = state.claude_integration.lock().unwrap();
+    let integration = guard.get_or_insert_with(|| ClaudeIntegration {
+        launches: Default::default(),
+        registry: Default::default(),
     });
-    *state.ai_display_source.lock().unwrap() = AiDisplaySource::Claude;
+    integration.launches.insert(launch_id, launch);
+    drop(guard);
     Ok(launched)
 }
 
@@ -590,19 +591,27 @@ pub async fn stop_claude_code(state: State<'_, AppState>) -> Result<(), String> 
     let Some(integration) = integration else {
         return Ok(());
     };
-    let root = integration.plugin_root.clone();
-    integration
-        .receiver
-        .shutdown()
+    let mut errors = Vec::new();
+    for launch in integration.launches.into_values() {
+        let root = launch.plugin_root.clone();
+        if let Err(error) = launch.receiver.shutdown().await {
+            errors.push(error.to_string());
+        }
+        match tauri::async_runtime::spawn_blocking(move || {
+            std::fs::remove_dir_all(root).map_err(|error| error.to_string())
+        })
         .await
-        .map_err(|error| error.to_string())?;
-    tauri::async_runtime::spawn_blocking(move || {
-        std::fs::remove_dir_all(root).map_err(|error| error.to_string())
-    })
-    .await
-    .map_err(|error| error.to_string())??;
-    *state.ai_display_source.lock().unwrap() = AiDisplaySource::Codex;
-    Ok(())
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => errors.push(error),
+            Err(error) => errors.push(error.to_string()),
+        }
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
 }
 
 fn config_with_codex_launcher(mut config: AppConfig, launcher: CodexLauncherConfig) -> AppConfig {
@@ -3904,7 +3913,7 @@ pub fn start_host_link_worker(
         key_stats: Arc::clone(&state.key_stats),
         codex_activity: Arc::clone(&state.codex_activity),
         claude_integration: Arc::clone(&state.claude_integration),
-        ai_display_source: Arc::clone(&state.ai_display_source),
+        ai_display_selection: Arc::clone(&state.ai_display_selection),
     };
 
     let (tx, rx) = mpsc::channel();
@@ -4180,36 +4189,93 @@ fn claude_as_ai_snapshot(snapshot: Option<ClaudeSessionSnapshot>) -> AiClientSta
 fn drain_claude_state_changes(
     integration: &Arc<Mutex<Option<ClaudeIntegration>>>,
     now: Instant,
-) -> (AiClientStateSnapshot, Vec<AiClientStateChange>) {
+) -> (Vec<ClaudeSessionSnapshot>, Vec<ClaudeStateChange>) {
     let mut guard = integration.lock().unwrap();
     let Some(integration) = guard.as_mut() else {
-        return (claude_as_ai_snapshot(None), Vec::new());
+        return (Vec::new(), Vec::new());
     };
     let mut claude_changes: Vec<ClaudeStateChange> = Vec::new();
-    while let Ok(event) = integration.events.try_recv() {
-        if let Ok(mut changes) = integration.registry.apply(event, now) {
-            claude_changes.append(&mut changes);
+    for launch in integration.launches.values_mut() {
+        while let Ok(event) = launch.events.try_recv() {
+            if let Ok(mut changes) = integration.registry.apply(event, now) {
+                claude_changes.append(&mut changes);
+            }
         }
+        let counters = launch.receiver.counters();
+        if counters.normal_overflow > launch.last_counters.normal_overflow
+            || counters.priority_overflow > launch.last_counters.priority_overflow
+        {
+            let launch_id = launch.receiver.config().launch_id.clone();
+            claude_changes.extend(integration.registry.mark_launch_desynchronized(&launch_id));
+        }
+        launch.last_counters = counters;
     }
-    let counters = integration.receiver.counters();
-    if counters.normal_overflow > integration.last_counters.normal_overflow
-        || counters.priority_overflow > integration.last_counters.priority_overflow
-    {
-        let launch_id = integration.receiver.config().launch_id.clone();
-        claude_changes.extend(integration.registry.mark_launch_desynchronized(&launch_id));
-    }
-    integration.last_counters = counters;
     claude_changes.extend(integration.registry.tick(now));
-    let snapshot = claude_as_ai_snapshot(integration.registry.selected_snapshot());
-    let changes = claude_changes
-        .into_iter()
-        .map(|change| AiClientStateChange {
-            state: claude_as_ai_snapshot(Some(change.state)),
-            // Claude hook changes are full state transitions. Work-phase-only
-            // targeting is reserved for Codex's detailed activity stream.
-            reason: rawhid_host_core::AiClientStateChangeReason::SessionStarted,
-        })
-        .collect();
+    (integration.registry.snapshots(), claude_changes)
+}
+
+fn selected_ai_output(
+    codex_snapshot: AiClientStateSnapshot,
+    codex_changes: Vec<AiClientStateChange>,
+    claude_snapshots: Vec<ClaudeSessionSnapshot>,
+    claude_changes: Vec<ClaudeStateChange>,
+    selection: &mut AiDisplaySelection,
+    last_selection_epoch: &mut u64,
+) -> (AiClientStateSnapshot, Vec<AiClientStateChange>) {
+    let mut candidates = Vec::new();
+    if codex_snapshot.session_active {
+        candidates.push(AiDisplayCandidate {
+            target: AiDisplayTarget::Codex,
+            snapshot: codex_snapshot,
+        });
+    }
+    candidates.extend(
+        claude_snapshots
+            .iter()
+            .filter(|snapshot| snapshot.session_active)
+            .map(|snapshot| AiDisplayCandidate {
+                target: AiDisplayTarget::Claude {
+                    launch_id: snapshot.launch_id.clone(),
+                    session_id: snapshot.session_id.clone(),
+                },
+                snapshot: claude_as_ai_snapshot(Some(snapshot.clone())),
+            }),
+    );
+    selection.update_candidates(candidates);
+
+    let selected_target = selection.selected_target().cloned();
+    let snapshot = selection.selected_snapshot().unwrap_or(codex_snapshot);
+    let selection_changed = selection.epoch() != *last_selection_epoch;
+    *last_selection_epoch = selection.epoch();
+    if selection_changed {
+        return (
+            snapshot,
+            vec![AiClientStateChange {
+                state: snapshot,
+                reason: rawhid_host_core::AiClientStateChangeReason::SessionStarted,
+            }],
+        );
+    }
+
+    let changes = match selected_target {
+        Some(AiDisplayTarget::Codex) => codex_changes,
+        Some(AiDisplayTarget::Claude {
+            launch_id,
+            session_id,
+        }) => claude_changes
+            .into_iter()
+            .filter(|change| {
+                change.state.launch_id == launch_id && change.state.session_id == session_id
+            })
+            .map(|change| AiClientStateChange {
+                state: claude_as_ai_snapshot(Some(change.state)),
+                // Claude hook changes are full state transitions. Work-phase-only
+                // targeting is reserved for Codex's detailed activity stream.
+                reason: rawhid_host_core::AiClientStateChangeReason::SessionStarted,
+            })
+            .collect(),
+        None => Vec::new(),
+    };
     (snapshot, changes)
 }
 
@@ -4522,6 +4588,13 @@ fn handle_uplink_events(
                                     action.action_id, binding.action
                                 ),
                             ),
+                            Ok(actions::ActionOutcome::AiSessionSelected { label }) => (
+                                "info",
+                                format!(
+                                    "host action {} selected AI session {}",
+                                    action.action_id, label
+                                ),
+                            ),
                             Ok(actions::ActionOutcome::StopRequested) => {
                                 should_stop = true;
                                 (
@@ -4653,6 +4726,7 @@ fn run_monitor_loop(
     let mut interval = Duration::from_millis(config.polling.interval_ms.max(1));
     let mut uplink_interval = Duration::from_millis(config.polling.uplink_interval_ms.max(5));
     let mut ai_client_state_send = AiClientStateSendTracker::default();
+    let mut last_ai_selection_epoch = 0;
 
     loop {
         let mut should_stop = false;
@@ -4774,13 +4848,18 @@ fn run_monitor_loop(
         }
 
         let now = Instant::now();
-        let (ai_snapshot, ai_changes) = match *extras.ai_display_source.lock().unwrap() {
-            AiDisplaySource::Codex => (
-                extras.codex_activity.snapshot(),
-                drain_ai_client_state_changes(&extras.codex_activity),
-            ),
-            AiDisplaySource::Claude => drain_claude_state_changes(&extras.claude_integration, now),
-        };
+        let codex_snapshot = extras.codex_activity.snapshot();
+        let codex_changes = drain_ai_client_state_changes(&extras.codex_activity);
+        let (claude_snapshots, claude_changes) =
+            drain_claude_state_changes(&extras.claude_integration, now);
+        let (ai_snapshot, ai_changes) = selected_ai_output(
+            codex_snapshot,
+            codex_changes,
+            claude_snapshots,
+            claude_changes,
+            &mut extras.ai_display_selection.lock().unwrap(),
+            &mut last_ai_selection_epoch,
+        );
         if let Err(error) = sync_ai_client_state(
             &mut runner,
             ai_snapshot,
@@ -5001,6 +5080,7 @@ fn refresh_error_code(error: AiUsageRefreshError) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rawhid_host_core::claude_activity::ClaudeStateChangeReason;
     use rawhid_host_core::packet::{AiActivityState, AiClientType, AiClientVariant, AiWorkPhase};
     use rawhid_host_core::runner::{DeviceBatterySource, DeviceBatteryStatus};
     use rawhid_host_core::studio::{StudioLayer, StudioLayoutSource};
@@ -5071,6 +5151,93 @@ mod tests {
             work_phase: AiWorkPhase::Unspecified,
             revision,
         }
+    }
+
+    fn claude_session(
+        session_id: &str,
+        activity_state: AiActivityState,
+        revision: u16,
+    ) -> ClaudeSessionSnapshot {
+        ClaudeSessionSnapshot {
+            launch_id: "launch-1".to_string(),
+            session_id: session_id.to_string(),
+            session_active: true,
+            activity_state,
+            work_phase: AiWorkPhase::Unspecified,
+            desynchronized: false,
+            revision,
+        }
+    }
+
+    #[test]
+    fn ai_selection_cycles_from_codex_to_claude_and_forces_snapshot() {
+        let codex = ai_state(AiActivityState::Working, 5);
+        let claude = claude_session("session-1", AiActivityState::WaitingApproval, 10);
+        let mut selection = AiDisplaySelection::default();
+        let mut epoch = 0;
+
+        let (snapshot, changes) = selected_ai_output(
+            codex,
+            Vec::new(),
+            vec![claude.clone()],
+            Vec::new(),
+            &mut selection,
+            &mut epoch,
+        );
+        assert_eq!(snapshot.client_type, AiClientType::Codex);
+        assert_eq!(changes.len(), 1);
+
+        selection.cycle();
+        let (snapshot, changes) = selected_ai_output(
+            codex,
+            Vec::new(),
+            vec![claude],
+            Vec::new(),
+            &mut selection,
+            &mut epoch,
+        );
+        assert_eq!(snapshot.client_type, AiClientType::ClaudeCode);
+        assert_eq!(snapshot.activity_state, AiActivityState::WaitingApproval);
+        assert_eq!(changes.len(), 1);
+    }
+
+    #[test]
+    fn ai_output_ignores_changes_from_a_non_selected_session() {
+        let codex = ai_state(AiActivityState::Working, 5);
+        let first = claude_session("session-1", AiActivityState::Available, 10);
+        let second = claude_session("session-2", AiActivityState::Working, 20);
+        let other_change = ClaudeStateChange {
+            state: claude_session("session-2", AiActivityState::Working, 20),
+            reason: ClaudeStateChangeReason::TurnStarted,
+        };
+        let mut selection = AiDisplaySelection::default();
+        let mut epoch = 0;
+        selected_ai_output(
+            codex,
+            Vec::new(),
+            vec![first.clone(), second.clone()],
+            Vec::new(),
+            &mut selection,
+            &mut epoch,
+        );
+        selection.cycle();
+        selected_ai_output(
+            codex,
+            Vec::new(),
+            vec![first.clone(), second.clone()],
+            Vec::new(),
+            &mut selection,
+            &mut epoch,
+        );
+        let (_, changes) = selected_ai_output(
+            codex,
+            Vec::new(),
+            vec![first, second],
+            vec![other_change],
+            &mut selection,
+            &mut epoch,
+        );
+        assert!(changes.is_empty());
     }
 
     fn ai_change(state: AiClientStateSnapshot) -> AiClientStateChange {

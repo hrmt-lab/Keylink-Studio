@@ -182,6 +182,7 @@ export type HostActionKind =
   | "start_monitoring"
   | "stop_monitoring"
   | "refresh_ai_usage"
+  | "cycle_ai_session"
   | "launch"
   | "open_folder";
 

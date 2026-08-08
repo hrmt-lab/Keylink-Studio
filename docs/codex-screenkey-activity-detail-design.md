@@ -6,8 +6,10 @@
 - Firmware側repositoryはWSL上を正本とし、Windows上の同名フォルダは参照専用として扱う
 - Firmware共通層の正本: `/home/onigiri/zmk-workspace/config/zmk-rawhid-app`
 - Windows側`C:\01.keyboards\OriginalKeyboards\02.SW\zmk-rawhid-app`は読み取りだけに使用し、変更しない
-- 互換性基準: `codex-cli 0.146.0`、experimental App Server schema SHA-256
-  `D3992FEC1398AFDBEC658DA2C720C6993FBF3C1CE4900785694D2196679EDDFC`
+- 現行互換性基準: `codex-cli 0.147.0`、experimental App Server schema SHA-256
+  `BABFD5C98CD978DD858B4762CDFBC9FBA941E1A0E4053DE0050E4082AE1F075A`
+- 検証済み旧組み合わせとして`codex-cli 0.146.0`と
+  `D3992FEC1398AFDBEC658DA2C720C6993FBF3C1CE4900785694D2196679EDDFC`も受理する
 
 ## 1. 目的
 

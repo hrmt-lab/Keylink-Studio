@@ -34,9 +34,16 @@ use tokio_tungstenite::{
     WebSocketStream,
 };
 
-pub const SUPPORTED_CODEX_VERSION: &str = "codex-cli 0.146.0";
+pub const SUPPORTED_CODEX_VERSION: &str = "codex-cli 0.147.0";
 pub const SUPPORTED_SCHEMA_SHA256: &str =
-    "D3992FEC1398AFDBEC658DA2C720C6993FBF3C1CE4900785694D2196679EDDFC";
+    "BABFD5C98CD978DD858B4762CDFBC9FBA941E1A0E4053DE0050E4082AE1F075A";
+const COMPATIBLE_CODEX_RELEASES: &[(&str, &str)] = &[
+    (SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256),
+    (
+        "codex-cli 0.146.0",
+        "D3992FEC1398AFDBEC658DA2C720C6993FBF3C1CE4900785694D2196679EDDFC",
+    ),
+];
 const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 
@@ -1361,11 +1368,14 @@ async fn verify_codex_and_schema(
     let version = String::from_utf8_lossy(&version_output.stdout)
         .trim()
         .to_string();
-    if !version_output.status.success() || version != SUPPORTED_CODEX_VERSION {
+    let expected_schema = compatible_schema_sha256(&version);
+    if !version_output.status.success() || expected_schema.is_none() {
         return Err(CodexBrokerError::Preflight(format!(
-            "requires {SUPPORTED_CODEX_VERSION}; detected {version:?}"
+            "requires one of {}; detected {version:?}",
+            compatible_codex_versions()
         )));
     }
+    let expected_schema = expected_schema.expect("checked above");
     let schema_dir = work_dir.join("schema");
     fs::create_dir(&schema_dir).map_err(|error| CodexBrokerError::Preflight(error.to_string()))?;
     let schema_output = time::timeout(
@@ -1390,7 +1400,7 @@ async fn verify_codex_and_schema(
     let schema =
         fs::read(&schema_path).map_err(|error| CodexBrokerError::Preflight(error.to_string()))?;
     let actual_hash = hex::encode_upper(Sha256::digest(&schema));
-    if actual_hash != SUPPORTED_SCHEMA_SHA256 {
+    if actual_hash != expected_schema {
         return Err(CodexBrokerError::Preflight(format!(
             "unsupported Codex App Server Schema SHA-256: {actual_hash}"
         )));
@@ -1422,11 +1432,14 @@ async fn verify_wsl_codex_and_schema(
     let version = String::from_utf8_lossy(&version_output.stdout)
         .trim()
         .to_string();
-    if !version_output.status.success() || version != SUPPORTED_CODEX_VERSION {
+    let expected_schema = compatible_schema_sha256(&version);
+    if !version_output.status.success() || expected_schema.is_none() {
         return Err(CodexBrokerError::Preflight(format!(
-            "requires {SUPPORTED_CODEX_VERSION}; detected {version:?} in WSL"
+            "requires one of {}; detected {version:?} in WSL",
+            compatible_codex_versions()
         )));
     }
+    let expected_schema = expected_schema.expect("checked above");
 
     let schema_dir = format!("/tmp/keylink-codex-schema-{}", random_identifier()?);
     let script = "set -eu; dir=$2; trap 'rm -rf \"$dir\"' EXIT; mkdir -p \"$dir\"; \"$1\" app-server generate-json-schema --experimental --out \"$dir\"; sha256sum \"$dir/codex_app_server_protocol.schemas.json\"";
@@ -1457,12 +1470,26 @@ async fn verify_wsl_codex_and_schema(
         .next()
         .unwrap_or_default()
         .to_ascii_uppercase();
-    if actual_hash != SUPPORTED_SCHEMA_SHA256 {
+    if actual_hash != expected_schema {
         return Err(CodexBrokerError::Preflight(format!(
             "unsupported WSL Codex App Server Schema SHA-256: {actual_hash}"
         )));
     }
     Ok(version)
+}
+
+fn compatible_schema_sha256(version: &str) -> Option<&'static str> {
+    COMPATIBLE_CODEX_RELEASES
+        .iter()
+        .find_map(|(candidate, hash)| (*candidate == version).then_some(*hash))
+}
+
+fn compatible_codex_versions() -> String {
+    COMPATIBLE_CODEX_RELEASES
+        .iter()
+        .map(|(version, _)| *version)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 async fn wsl_path(distribution: &str, path: &Path) -> Result<String, CodexBrokerError> {
@@ -1688,9 +1715,27 @@ fn complete_reconnect_grace(
 #[cfg(test)]
 mod tests {
     use super::{
-        classify_json_rpc, complete_reconnect_grace, make_cli_connection_command,
-        select_codex_executable, CodexBrokerPhase, CodexBrokerStatus,
+        classify_json_rpc, compatible_codex_versions, compatible_schema_sha256,
+        complete_reconnect_grace, make_cli_connection_command, select_codex_executable,
+        CodexBrokerPhase, CodexBrokerStatus, SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256,
     };
+
+    #[test]
+    fn compatibility_gate_accepts_the_current_and_previous_verified_releases() {
+        assert_eq!(
+            compatible_schema_sha256(SUPPORTED_CODEX_VERSION),
+            Some(SUPPORTED_SCHEMA_SHA256)
+        );
+        assert_eq!(
+            compatible_schema_sha256("codex-cli 0.146.0"),
+            Some("D3992FEC1398AFDBEC658DA2C720C6993FBF3C1CE4900785694D2196679EDDFC")
+        );
+        assert_eq!(compatible_schema_sha256("codex-cli 0.145.0"), None);
+        assert_eq!(
+            compatible_codex_versions(),
+            "codex-cli 0.147.0, codex-cli 0.146.0"
+        );
+    }
 
     #[test]
     fn json_rpc_metadata_extracts_structured_item_type() {

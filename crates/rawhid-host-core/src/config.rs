@@ -200,6 +200,7 @@ pub enum HostActionKind {
     StartMonitoring,
     StopMonitoring,
     RefreshAiUsage,
+    CycleAiSession,
     Launch,
     OpenFolder,
 }
@@ -644,7 +645,7 @@ enabled = false
 #
 #[[actions.devices."uid:7a91c3e4d102ab55".bindings]]
 #action_id = 1
-#action = "show_window"  # show_window | start_monitoring | stop_monitoring | refresh_ai_usage | launch | open_folder
+#action = "show_window"  # show_window | start_monitoring | stop_monitoring | refresh_ai_usage | cycle_ai_session | launch | open_folder
 #
 #[[actions.devices."uid:7a91c3e4d102ab55".bindings]]
 #action_id = 2
@@ -834,6 +835,10 @@ action = "open_folder"
 path = "C:\\Users\\me\\Documents"
 prefer_tab = true
 
+[[actions.devices."uid:7a91c3e4d102ab55".bindings]]
+action_id = 9
+action = "cycle_ai_session"
+
 [actions.devices."uid:91ac51d6ef0201aa"]
 enabled = false
 "#,
@@ -845,7 +850,7 @@ enabled = false
         let lotus = config.actions.devices.get("uid:7a91c3e4d102ab55").unwrap();
         assert_eq!(lotus.display_name.as_deref(), Some("LotusUni Dongle"));
         assert!(lotus.enabled);
-        assert_eq!(lotus.bindings.len(), 3);
+        assert_eq!(lotus.bindings.len(), 4);
         assert_eq!(lotus.bindings[0].action_id, 1);
         assert_eq!(lotus.bindings[0].action, HostActionKind::ShowWindow);
         assert_eq!(lotus.bindings[1].action, HostActionKind::Launch);
@@ -861,6 +866,7 @@ enabled = false
             Some("C:\\Users\\me\\Documents")
         );
         assert!(lotus.bindings[2].prefer_tab);
+        assert_eq!(lotus.bindings[3].action, HostActionKind::CycleAiSession);
         let left = config.actions.devices.get("uid:91ac51d6ef0201aa").unwrap();
         assert!(!left.enabled);
         assert!(left.bindings.is_empty());

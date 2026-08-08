@@ -58,6 +58,12 @@ Broker経由のThread／Turn、入力待ち、承認待ち、停止→再開始�
 原因、解消方針、将来の複数runtime境界は
 `docs/codex-launcher-wsl-runtime-plan.md`を参照する。
 
+2026-08-08、Windows側Codex CLI `0.147.0`のexperimental schemaを生成し、SHA-256
+`BABFD5C98CD978DD858B4762CDFBC9FBA941E1A0E4053DE0050E4082AE1F075A`を確認した。
+0.146.0から既存methodの削除はなく、Keylink Studioが使用するThread／Turn／item／approval／inputの
+相関fieldは維持されているため、0.147.0を現行基準として追加した。WSL側0.146.0も検証済みの
+version／schema hashペアとして継続対応する。
+
 複数デバイス、複数Renderer、LED-only、ScreenKey以外のTarget、BLE経路、
 非64-byte interfaceの実機除外確認、全実機Targetでの既存Feature回帰は
 未確認のままPASSにはせず、対応実機完成後の拡張検証へ`DEFERRED`とする。
@@ -361,10 +367,26 @@ toolなし応答、tool実行、manual permission、permission中Escから120秒
 
 WSL正本の`zmk-rawhid-app`へClaude Code client typeとcapability bit 12、ScreenKey側へ96×96ロゴと
 Renderer切り替えを実装し、UF2を書き込んだ。正式Claude Code identityで、ロゴ、実行中、許可待ち、入力待ち、
-完了、`/exit`、連携停止を実機確認した。Host core 230件、Tauri 23件、UI production buildもPASSした。
+完了、`/exit`、連携停止を実機確認した。Claude Codeの完了期限修正後にHost core 236件、Tauri 27件、
+UI production build、workspace全binary buildもPASSした。
 失敗したcommandの同一Turn内自動再試行で、2回目の許可画面だけ青表示になった1例は既知の境界事例として残す。
 Firmware側は`zmk-rawhid-app`を`1a2ee78`、`zmk-config-screenkeytest`を`7b24ec9`としてcommit済み。
 両commitはそれぞれの`origin/develop`へpush済み。
+
+同日、1台のScreenKeyでCodex／Claude Codeの表示sessionを共通に切り替えるHost側機能を追加した。
+共通セレクタが現在のCodex 1件とClaude Codeの全有効sessionを保持し、`HOST_ACTION`の`cycle_ai_session`で
+次候補へ進む。非選択sessionのeventは表示を奪わず、選択中session終了時だけ次へ自動移動する。
+Firmware packet変更はなく、ScreenKey keymapから既存`&host_action <ID> 0`を送る。Settingsから複数の
+Claude Codeを追加起動でき、各起動のReceiver／token／plugin／`launch_id`を分離する。現行Codex Brokerは
+現在追跡中の1 threadだけを候補にする。自動テストはPASS、実機確認は未実施。詳細は
+[`ai-session-display-switching.md`](ai-session-display-switching.md)を参照する。
+
+その後、単一ScreenKeyのキー押下でCodex／Claude Codeを循環する実機確認を完了した。
+`HOST_ACTION`が稀に届かない事象はFirmware側のRawHID送信修正後に大幅に改善し、現行実機範囲では許容する。
+また、Claude Codeの緑枠表示中にCodexへ切り替え、30秒を超えてから戻すと緑枠が再表示される問題を確認した。
+原因はClaude Code ReducerにHost側の30秒完了期限がなかったことであり、非選択中も期限を進めて
+`AVAILABLE`へ更新するよう修正した。Firmware変更は不要で、Reducerの期限境界、新Turnによる解除、
+Registry内の非選択session更新を自動テストへ追加した。修正後の実機再確認は未実施。
 
 ScreenKey単体プロトタイプの実装、検証、feature branchの最終レビュー、
 `develop`への統合・push、検証用fault injectionの撤去、96×96 pixelロゴの

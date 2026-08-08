@@ -1,12 +1,14 @@
 # Codex Broker／ScreenKeyプロトタイプの現在地と次の作業
 
-- 最終更新日: 2026-08-02
+- 最終更新日: 2026-08-08
 - 用途: Codex Broker／ScreenKeyプロトタイプの実施結果、完了条件、次の開始地点を管理する進捗文書
 - 主な確認元:
   - `docs/keylink-studio-codex-screenkey-prototype-spec-reviewed-v10.md`
+  - `docs/claude-code-screenkey-multisession-design.md`
   - Obsidian `Keylink Studio/handoff.md`
   - Obsidian `Keylink Studio/decisions.md`
   - Obsidian `Keylink Studio/gotchas.md`
+  - Obsidian `Keylink Studio/log/2026-08-08.md`
   - Obsidian `Keylink Studio/log/2026-07-20.md`
   - Obsidian `Keylink Studio/log/2026-07-21.md`
   - Gate A／Broker Gate／Gate B結果文書
@@ -20,6 +22,31 @@ Codex App Server、Host Link v2、`zmk-rawhid-app`、ScreenKeyを接続した経
 対応デバイス1台、ScreenKey Renderer 1件、USB接続」に確定した。
 この対象範囲の実装、実機確認、構成別自動テスト、最終回帰は完了したため、
 **ScreenKey単体を対象としたCodex状態表示プロトタイプは完了**とする。
+
+次フェーズは、将来の複数セッション対応を前提にしたClaude Code状態表示とする。
+初期対象はKeylink Studioから起動したWindows上のClaude Codeに限定し、hook受信、
+Session Registry、一時的なScreenKey押下による表示セッション切り替え、Firmware境界を
+`docs/claude-code-screenkey-multisession-design.md`に定義した。
+
+2026-08-05、Keylink Studio内へ独立したGate C probeを追加し、Claude Code `2.1.214`で
+plugin読込、`SessionStart`／`SessionEnd`、connection refused、1.5秒遅延、socket drop、
+bounded queue overflow、MCP elicitation fixtureを確認した。Host core 207件、Tauri 21件、
+probe 5件もPASSした。当時はClaude Codeが未ログインでOAuth refresh tokenも無効だったため、
+tool、permission、input、中断、session lifecycleを再認証後へ残した。
+2026-08-08、ユーザー再認証後のClaude Code `2.1.224`で、toolなし／成功／失敗／並列、
+permission許可／拒否／auto、`AskUserQuestion`、MCP elicitation accept／cancel、各状態のEsc中断を
+実測した。並列toolは開始順と完了順が逆転し、permission／elicitation用Notificationは約6秒遅延した。
+通常のEsc中断ではPost／Stop系hookと`idle_prompt`が届かず、MCP elicitationだけが
+`ElicitationResult(action = cancel)`で明示終了した。
+続いてClaude Code `2.1.224`で`/clear`、`2.1.226`で手動`/compact`、`/resume`、fork、
+plugin再読込を実測した。`/clear`は旧sessionを`reason = clear`で終了して新IDを
+`source = clear`で開始し、手動compactは同じIDで
+`PreCompact -> SessionStart(source = compact) -> PostCompact`となった。`/resume`は同じID、
+forkは新IDを使用した。plugin設定変更は`/reload-plugins`後に反映された。
+自動compactは最低100k token規模となるため、OS再起動直後と実AV負荷とともに今回のGate Cでは
+`DEFERRED`とする。主要event／session lifecycle実測は完了した。製品実装前レビューでは、
+詳細状態stale閾値を120秒、`SessionEnd`を個別session終了、wrapper通知をlaunch全体終了、
+HTTP hookを1～3秒、Helper／wrapper内部送信を500 ms×最大2回と確定した。
 
 なお、後続のCodex CLI起動ボタンで追加したWSL起動経路には、
 WSL側Codex TUIのLinux形式cwdをWindows側App Serverが解釈できず、
@@ -301,6 +328,44 @@ ScreenKeyでは主に次を表現する。
 
 ## 次にやること
 
+### Claude Code Gate C後の開始地点
+
+Claude Code `2.1.224`／`2.1.226`で、主要event、Esc中断、`/clear`、手動`/compact`、
+`/resume`、fork、plugin再読込を実測した。全確定runでReceiverの
+`unauthorized`／`malformed`／`oversized`／通常・priority overflowは0だった。
+
+製品実装前レビューを行い、次の初期値を確定した。
+
+1. 最後の関連eventから120秒後、詳細表示だけを`WORKING + UNSPECIFIED`へ縮退する。
+   staleはTurn終了eventにせず、`AVAILABLE`／`COMPLETED`へ遷移させない。
+2. `SessionEnd`は個別session、wrapper終了通知はlaunch全体をretireする。最初の通知だけを状態へ反映する。
+3. HTTP hookはevent別に1～3秒、SessionStart command hookは2秒とする。Helper／wrapper内部は
+   1回500 ms、再試行1回、待機100 msとする。
+4. manual permissionは`PermissionRequest`で`WAITING_APPROVAL`とし、許可を推測せず、
+   Post系eventまたは120秒stale化まで維持する。
+
+上記を基準に、Host coreへobserver plugin生成、Receiver、Helper、wrapper終了通知を実装した。
+Receiverは通常128件＋priority 16件のbounded queueへnon-blocking投入し、空bodyの204を返す。
+Helperとwrapperは配送失敗をClaude Codeの失敗へ変換しない。続けてClaude Code専用の
+Adapter／Normalizer、`tool_use_id` tombstone、session単位の冪等Reducerを実装した。最後の関連eventから
+120秒後は`WORKING + UNSPECIFIED`へ詳細だけを縮退し、`SessionEnd`／wrapper終了と同期不能通知は
+終端の推測をせず安全側に処理する。Reducer単体test 10件を含むHost core 226件がPASSした。
+Session Registry、Tauri launcher、Settings画面、Host Link送信まで接続した。初回実機確認は
+`Codex + CLI` identityを暫定利用し、その後HostとFirmwareを正式`CLAUDE_CODE = 0x02`へ切り替えた。
+Hostはcapability bit 12のない既存deviceへ未知のclient typeを送らない。
+
+2026-08-08、Settingsから起動したClaude Codeでobserver／Registry／暫定Host Link表示を実機確認した。
+toolなし応答、tool実行、manual permission、permission中Escから120秒後の`WORKING + UNSPECIFIED`への
+縮退、次promptでの回復、`/clear`、`/exit`、連携停止→再起動はすべて期待どおりだった。manual permissionは
+許可直後を示すhookがないため、短いcommandでは黄色から緑へ直接遷移しても正常である。
+
+WSL正本の`zmk-rawhid-app`へClaude Code client typeとcapability bit 12、ScreenKey側へ96×96ロゴと
+Renderer切り替えを実装し、UF2を書き込んだ。正式Claude Code identityで、ロゴ、実行中、許可待ち、入力待ち、
+完了、`/exit`、連携停止を実機確認した。Host core 230件、Tauri 23件、UI production buildもPASSした。
+失敗したcommandの同一Turn内自動再試行で、2回目の許可画面だけ青表示になった1例は既知の境界事例として残す。
+Firmware側は`zmk-rawhid-app`を`1a2ee78`、`zmk-config-screenkeytest`を`7b24ec9`としてcommit済み。
+どちらも`develop`で`origin/develop`より1コミット先行し、未pushである。
+
 ScreenKey単体プロトタイプの実装、検証、feature branchの最終レビュー、
 `develop`への統合・push、検証用fault injectionの撤去、96×96 pixelロゴの
 実機採用まで完了した。現時点でプロトタイプ完了に必要な作業は残っていない。
@@ -369,7 +434,8 @@ Host Linkはbit 11 `CAP_AI_CLIENT_WORK_PHASE`でgateし、旧Firmwareへは従�
 ## 現在のリポジトリ状態
 
 - path: `C:\01.keyboards\OriginalKeyboards\02.SW\Keylink-Studio`
-- branch: `develop`
+- branch: `feat/claude-code-hook-gate-c`
+- HEAD: `28f8e18 feat(claude): add Gate C hook probe`
 - Codex CLI `0.145.0`対応基準更新:
   `bce8bed chore(codex): support Codex CLI 0.145.0`
 - プロトタイプ完了記録:
@@ -393,8 +459,9 @@ Host Linkはbit 11 `CAP_AI_CLIENT_WORK_PHASE`でgateし、旧Firmwareへは従�
 - SHA-256:
   `aea3340c650d2d8632db0ac40f3a330430fa76a796a00c1a4be1ca2fd6649db4`
 
-未追跡の`.claude/`と`docs/keylink-studio-codex-screenkey-prototype-spec.md`は
-ユーザー所有物として扱い、stageまたは削除しない。
+未追跡の`.claude/`、`docs/keylink-studio-codex-screenkey-prototype-spec.md`、3つのzipは
+ユーザー所有物として扱い、stageまたは削除しない。Gate C結果を反映した本書と
+`docs/claude-code-screenkey-multisession-design.md`は未コミットであり、commit／pushは行っていない。
 
 ## 2026-08-02 Turn内状態細分化
 

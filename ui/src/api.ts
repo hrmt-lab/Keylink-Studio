@@ -6,6 +6,8 @@ import type {
   CodexBrokerStatus,
   CodexLaunchResult,
   CodexLauncherConfig,
+  ClaudeLaunchResult,
+  ClaudeLauncherConfig,
   DiscardChangesDto,
   ResetToKeymapDto,
   EditBehavior,
@@ -54,6 +56,9 @@ export const startCodexIntegration = () =>
   invoke<CodexBrokerStatus>("start_codex_integration");
 export const launchCodexCli = (launcher: CodexLauncherConfig) =>
   invoke<CodexLaunchResult>("launch_codex_cli", { launcher });
+export const launchClaudeCode = (launcher: ClaudeLauncherConfig) =>
+  invoke<ClaudeLaunchResult>("launch_claude_code", { launcher });
+export const stopClaudeCode = () => invoke<void>("stop_claude_code");
 export const listWslDistributions = () =>
   invoke<WslDistribution[]>("list_wsl_distributions");
 export const stopCodexIntegration = () =>

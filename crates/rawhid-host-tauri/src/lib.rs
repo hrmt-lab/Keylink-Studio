@@ -1,5 +1,6 @@
 mod actions;
 mod app_launch;
+mod claude_launcher;
 mod codex_launcher;
 mod commands;
 mod explorer;
@@ -43,6 +44,9 @@ pub fn run() {
             commands::get_ai_client_state,
             commands::start_codex_integration,
             commands::launch_codex_cli,
+            commands::launch_claude_code,
+            commands::get_claude_sessions,
+            commands::stop_claude_code,
             commands::list_wsl_distributions,
             commands::stop_codex_integration,
             commands::probe_devices,

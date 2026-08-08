@@ -15,8 +15,8 @@ use crate::{
     packet::{
         AiClientStatePacket, AiUsagePacket, ComboInfo, ComboItem, ConfigRequest, ConfigResponse,
         ConfigStatus, DeviceHello, EncoderBinding, EncoderGetBindings, EncoderGetInfo, Packet,
-        TimeSyncPacket, UplinkPacket, CAPABILITY_AI_CLIENT_STATE, CAPABILITY_AI_CLIENT_WORK_PHASE,
-        CAPABILITY_CONFIG_RPC, PACKET_SIZE, REPORT_SIZE,
+        TimeSyncPacket, UplinkPacket, CAPABILITY_AI_CLIENT_CLAUDE_CODE, CAPABILITY_AI_CLIENT_STATE,
+        CAPABILITY_AI_CLIENT_WORK_PHASE, CAPABILITY_CONFIG_RPC, PACKET_SIZE, REPORT_SIZE,
     },
 };
 
@@ -516,6 +516,8 @@ impl<T: HidTransport> HidDeviceManager<T> {
 
         for device in self.verified.drain(..) {
             if device.capabilities & CAPABILITY_AI_CLIENT_STATE == 0
+                || (state.client_type == crate::packet::AiClientType::ClaudeCode
+                    && device.capabilities & CAPABILITY_AI_CLIENT_CLAUDE_CODE == 0)
                 || (work_phase_only && device.capabilities & CAPABILITY_AI_CLIENT_WORK_PHASE == 0)
             {
                 retained.push(device);
@@ -1295,6 +1297,43 @@ mod tests {
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].0, "detailed");
         assert_eq!(writes[0].1[9], 7);
+    }
+
+    #[test]
+    fn claude_code_state_is_sent_only_to_devices_advertising_its_renderer() {
+        let legacy_caps = CAPABILITY_AI_CLIENT_STATE | CAPABILITY_AI_CLIENT_WORK_PHASE;
+        let claude_caps = legacy_caps | CAPABILITY_AI_CLIENT_CLAUDE_CODE;
+        let legacy = device_with_capabilities("legacy", legacy_caps);
+        let claude = device_with_capabilities("claude", claude_caps);
+        let transport = MockTransport {
+            candidates: RefCell::new(vec![legacy, claude]),
+            ..MockTransport::default()
+        };
+        transport
+            .hello_paths
+            .borrow_mut()
+            .extend(["legacy".to_string(), "claude".to_string()]);
+        transport.hello_capabilities.borrow_mut().extend([
+            ("legacy".to_string(), legacy_caps),
+            ("claude".to_string(), claude_caps),
+        ]);
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        manager.probe().unwrap();
+        let state = AiClientStatePacket::new(
+            crate::packet::AiClientType::ClaudeCode,
+            crate::packet::AiClientVariant::Cli as u8,
+            true,
+            crate::packet::AiActivityState::Available,
+            crate::packet::AiWorkPhase::Unspecified,
+            12,
+        )
+        .unwrap();
+
+        assert_eq!(manager.send_ai_client_state(state, false).unwrap(), 1);
+        let writes = manager.transport.writes.borrow();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, "claude");
+        assert_eq!(writes[0].1[13], 0x02);
     }
 
     #[test]

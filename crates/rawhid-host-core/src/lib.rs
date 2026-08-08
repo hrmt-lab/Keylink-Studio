@@ -1,6 +1,11 @@
 pub mod active_app;
 pub mod ai_usage;
 pub mod app_match;
+pub mod claude_activity;
+pub mod claude_hook_event;
+pub mod claude_hook_helper;
+pub mod claude_hooks;
+pub mod claude_observer;
 pub mod codex_activity;
 pub mod codex_broker;
 pub mod config;
@@ -16,6 +21,21 @@ pub use ai_usage::{
     AiUsageProviderStatus, AiUsageRuntime, AiUsageSendState, AiUsageShared, AiUsageStatusKind,
 };
 pub use app_match::{LayerAction, RuleMatch};
+pub use claude_activity::{
+    ClaudeAdapterDiagnostic, ClaudeEventAdapter, ClaudeSessionReducer, ClaudeSessionRegistry,
+    ClaudeSessionSnapshot, ClaudeStateChange, ClaudeStateChangeReason, CLAUDE_DETAIL_STALE_TIMEOUT,
+};
+pub use claude_hook_event::{ClaudeHookEvent, ClaudeObserverEvent, ClaudeWrapperExited};
+pub use claude_hook_helper::run_claude_hook_helper;
+pub use claude_hooks::{
+    write_claude_observer_plugin, ClaudePluginArtifacts, ClaudePluginError, ClaudePluginOptions,
+    CLAUDE_PROMPT_HOOK_TIMEOUT_SECONDS, CLAUDE_SESSION_START_TIMEOUT_SECONDS,
+    CLAUDE_STOP_HOOK_TIMEOUT_SECONDS, CLAUDE_TOOL_HOOK_TIMEOUT_SECONDS,
+};
+pub use claude_observer::{
+    ClaudeObserverConfig, ClaudeObserverCounters, ClaudeObserverError, ClaudeObserverEvents,
+    ClaudeObserverReceiver, ClaudeObserverReceiverOptions,
+};
 pub use codex_activity::{
     AiClientStateChange, AiClientStateChangeReason, AiClientStateReducer, AiClientStateSnapshot,
     CodexActivityRuntime, CodexEventAdapter,
@@ -26,8 +46,8 @@ pub use codex_broker::{
     JsonRpcMetadata, SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256,
 };
 pub use config::{
-    AiClientConfig, AiUsageConfig, AppConfig, ClaudeCodeAiUsageConfig, ClockMode,
-    CodexAiUsageConfig, CodexClientConfig, CodexLaunchEnvironment, CodexLauncherConfig,
+    AiClientConfig, AiUsageConfig, AppConfig, ClaudeCodeAiUsageConfig, ClaudeLauncherConfig,
+    ClockMode, CodexAiUsageConfig, CodexClientConfig, CodexLaunchEnvironment, CodexLauncherConfig,
     ConfigPaths, DeviceLayerSwitchConfig, HidConfig, LayerSwitchConfig, PollingConfig, RuleConfig,
     StudioConfig, TimeConfig, TimeFormatHint, UnmatchedAction,
 };
@@ -39,11 +59,12 @@ pub use packet::{
     ComboItem, ComboName, ConfigFeature, ConfigOp, ConfigRequest, ConfigResponse, ConfigStatus,
     DeviceHello, EncoderBinding, EncoderBindingFlags, EncoderBindingSource, EncoderGetBindings,
     EncoderGetInfo, HostActionPacket, KeyStatsEntry, KeyStatsPacket, LayerStatePacket, Packet,
-    PacketType, TimeSyncPacket, UplinkPacket, CAPABILITY_AI_CLIENT_STATE,
-    CAPABILITY_AI_CLIENT_WORK_PHASE, CAPABILITY_AI_USAGE, CAPABILITY_APP_LAYER, CAPABILITY_BATTERY,
-    CAPABILITY_CONFIG_RPC, CAPABILITY_HOST_ACTION, CAPABILITY_KEY_STATS, CAPABILITY_LAYER_STATE,
-    CAPABILITY_THEME, CAPABILITY_TIME_SYNC, COMBO_ITEM_LEN, COMBO_MAX_KEYS, COMBO_MAX_SLOTS,
-    COMBO_NAME_LEN, FEATURE_AI_CLIENT, FEATURE_SYSTEM, PACKET_SIZE, REPORT_SIZE,
+    PacketType, TimeSyncPacket, UplinkPacket, CAPABILITY_AI_CLIENT_CLAUDE_CODE,
+    CAPABILITY_AI_CLIENT_STATE, CAPABILITY_AI_CLIENT_WORK_PHASE, CAPABILITY_AI_USAGE,
+    CAPABILITY_APP_LAYER, CAPABILITY_BATTERY, CAPABILITY_CONFIG_RPC, CAPABILITY_HOST_ACTION,
+    CAPABILITY_KEY_STATS, CAPABILITY_LAYER_STATE, CAPABILITY_THEME, CAPABILITY_TIME_SYNC,
+    COMBO_ITEM_LEN, COMBO_MAX_KEYS, COMBO_MAX_SLOTS, COMBO_NAME_LEN, FEATURE_AI_CLIENT,
+    FEATURE_SYSTEM, PACKET_SIZE, REPORT_SIZE,
 };
 pub use runner::{
     uplink_device_key, DeviceBatterySource, DeviceBatteryStatus, DeviceLayerState, RunEvent,

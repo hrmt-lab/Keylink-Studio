@@ -15,8 +15,9 @@ use crate::{
     config::{AppConfig, UnmatchedAction},
     hid::{DeviceInfo, HidDeviceManager, HidError, HidTransport, ProbeResult},
     packet::{
-        AiClientStatePacket, ComboInfo, ComboItem, EncoderBinding, EncoderGetBindings,
-        EncoderGetInfo, UplinkPacket, CAPABILITY_AI_CLIENT_STATE, CAPABILITY_CONFIG_RPC,
+        AiClientStatePacket, AiClientType, ComboInfo, ComboItem, EncoderBinding,
+        EncoderGetBindings, EncoderGetInfo, UplinkPacket, CAPABILITY_AI_CLIENT_CLAUDE_CODE,
+        CAPABILITY_AI_CLIENT_STATE, CAPABILITY_CONFIG_RPC,
     },
     stats::SharedKeyStatsStore,
     time::{Clock, SystemClock, TimeError, TimeSnapshot, TimeSyncState},
@@ -503,11 +504,12 @@ where
         self.hid.device_generation()
     }
 
-    pub fn has_ai_client_state_device(&self) -> bool {
-        self.hid
-            .verified_devices()
-            .iter()
-            .any(|device| device.capabilities & CAPABILITY_AI_CLIENT_STATE != 0)
+    pub fn has_ai_client_state_device(&self, client_type: AiClientType) -> bool {
+        self.hid.verified_devices().iter().any(|device| {
+            device.capabilities & CAPABILITY_AI_CLIENT_STATE != 0
+                && (client_type != AiClientType::ClaudeCode
+                    || device.capabilities & CAPABILITY_AI_CLIENT_CLAUDE_CODE != 0)
+        })
     }
 
     pub fn send_ai_client_state(

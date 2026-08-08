@@ -40,6 +40,7 @@ Host Link v1 は 32 byte packet と packet type ごとの個別 layout を使う
 | `APP_LAYER` | v2 `APP_LAYER` packet 送信と rule 管理 | `APP_LAYER` packet 受信、`APP_LAYER` capability | device ごとの UID 設定がある場合のみ送信 |
 | `TIME_SYNC` | v2 `TIME_SYNC` packet 送信 | `TIME_SYNC` packet 受信、`TIME_SYNC` capability | 毎秒送信はしない |
 | `AI_USAGE` | background worker の snapshot を v2 `AI_USAGE` packet で送信 | `AI_USAGE` packet 受信、`AI_USAGE` capability | raw credentials や API response は送信しない |
+| `AI_CLIENT_STATE` | Codex は `client_type=0x01`、Claude Code は `client_type=0x02` で状態を送信 | `AI_CLIENT_STATE` capability。Claude Code 表示には `AI_CLIENT_CLAUDE_CODE` capability も必要 | Claude Code capability のない既存 device へ `0x02` は送信しない |
 | `BATTERY_STATUS` | v2 uplink 受信と UI / tray 表示 | `BATTERY_STATUS` uplink 送信 | `source=0` は central/self、`1..=3` は peripheral |
 | `HOST_ACTION` | allowlist に基づく PC 側 action 実行 | `HOST_ACTION` uplink 送信、`HOST_ACTION` capability | header `seq` で duplicate を抑制 |
 | `KEY_STATS` | 押下回数差分の保存と表示 | `KEY_STATS` uplink 送信、`KEY_STATS` capability | 記録するのは position と回数のみ |

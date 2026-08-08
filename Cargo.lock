@@ -3466,6 +3466,9 @@ version = "1.1.2"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "directories",
+ "getrandom 0.3.4",
+ "hex",
  "image",
  "rawhid-host-core",
  "serde",

@@ -4,12 +4,14 @@ import { Save, RefreshCcw, Check, X, Plus, Copy, Play, Square, Terminal, FolderO
 import {
   getCodexIntegrationStatus,
   getLaunchAtLogin,
+  launchClaudeCode,
   launchCodexCli,
   listWslDistributions,
   reloadConfig,
   setLaunchAtLogin,
   startCodexIntegration,
   stopCodexIntegration,
+  stopClaudeCode,
 } from "../api";
 import { Toggle } from "../components/Toggle";
 import { ErrorNotice, PageHeader, PrimaryButton, SecondaryButton, SectionCard, SettingRow } from "../components/Ui";
@@ -161,6 +163,7 @@ export default function Settings({ config, setConfig, status }: Props) {
         rebaseConfig={rebase}
         status={status}
       />
+      <ClaudeCodeIntegration draft={draft} setDraft={setDraft} />
 
       {/* Polling */}
       <SectionCard title={t("settings.polling.section")}>
@@ -624,6 +627,86 @@ function CodexIntegration({
           onConfirm={confirmStop}
         />
       )}
+    </SectionCard>
+  );
+}
+
+function ClaudeCodeIntegration({
+  draft,
+  setDraft,
+}: {
+  draft: AppConfig;
+  setDraft: React.Dispatch<React.SetStateAction<AppConfig>>;
+}) {
+  const launcher = draft.ai_client.claude_launcher;
+  const [busy, setBusy] = useState(false);
+  const [running, setRunning] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const update = (next: Partial<typeof launcher>) => {
+    setDraft({
+      ...draft,
+      ai_client: {
+        ...draft.ai_client,
+        claude_launcher: { ...launcher, ...next },
+      },
+    });
+  };
+  const browse = async () => {
+    const selected = await open({
+      multiple: false,
+      directory: true,
+      defaultPath: launcher.project_directory ?? undefined,
+    });
+    if (typeof selected === "string") update({ project_directory: selected });
+  };
+  const launch = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await launchClaudeCode(launcher);
+      setRunning(true);
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  const stop = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await stopClaudeCode();
+      setRunning(false);
+    } catch (cause) {
+      setError(String(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <SectionCard title="Claude Code連携（ScreenKey）">
+      <div className="px-5 py-4">
+        <p className="text-xs text-faint">
+          Claude CodeをWindows Terminalで起動し、状態をScreenKeyへ送信します。Firmware対応前は既存のCodex表示として送信します。
+        </p>
+      </div>
+      {error && <div className="border-t border-background px-5 py-3"><ErrorNotice message="Claude Code連携を開始できません" details={error} /></div>}
+      <SettingRow label="Claude Code実行ファイル" description="空欄ならPATH上の claude を使用します。" align="start">
+        <input className="input w-72 max-w-full font-mono text-xs" value={launcher.executable_path ?? ""} disabled={running} onChange={(event) => update({ executable_path: event.target.value.trim() || null })} placeholder="claude" />
+      </SettingRow>
+      <SettingRow label="プロジェクト" description="Claude Codeを起動するWindowsのプロジェクトフォルダです。" align="start">
+        <div className="flex w-96 max-w-full items-center gap-2">
+          <input className="input min-w-0 flex-1 font-mono text-xs" value={launcher.project_directory ?? ""} disabled={running} onChange={(event) => update({ project_directory: event.target.value || null })} placeholder="C:\\path\\to\\project" />
+          <SecondaryButton onClick={() => void browse()} disabled={running} icon={<FolderOpen size={14} />}>参照</SecondaryButton>
+        </div>
+      </SettingRow>
+      <div className="border-t border-background px-5 py-4">
+        {running ? (
+          <SecondaryButton onClick={() => void stop()} disabled={busy} loading={busy} icon={<Square size={14} />}>Claude Code連携を停止</SecondaryButton>
+        ) : (
+          <PrimaryButton onClick={() => void launch()} disabled={busy} loading={busy} icon={<Terminal size={15} />}>Claude Codeを起動</PrimaryButton>
+        )}
+      </div>
     </SectionCard>
   );
 }

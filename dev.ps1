@@ -24,7 +24,16 @@ if (-not (Test-Path (Join-Path $uiDir 'node_modules'))) {
     Write-Host '[1/2] Frontend dependencies are ready.' -ForegroundColor Gray
 }
 
-Write-Host '[2/2] Starting cargo tauri dev...' -ForegroundColor Cyan
+Write-Host '[2/3] Building Claude hook Helper...' -ForegroundColor Cyan
+Push-Location $root
+try {
+    cargo build -p rawhid-host-core --bin keylink-claude-hook
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+} finally {
+    Pop-Location
+}
+
+Write-Host '[3/3] Starting cargo tauri dev...' -ForegroundColor Cyan
 Write-Host ''
 
 Push-Location $tauriDir

@@ -21,6 +21,7 @@ pub const CAPABILITY_KEY_PRESS: u32 = 1 << 8;
 pub const CAPABILITY_CONFIG_RPC: u32 = 1 << 9;
 pub const CAPABILITY_AI_CLIENT_STATE: u32 = 1 << 10;
 pub const CAPABILITY_AI_CLIENT_WORK_PHASE: u32 = 1 << 11;
+pub const CAPABILITY_AI_CLIENT_CLAUDE_CODE: u32 = 1 << 12;
 pub const FEATURE_SYSTEM: u8 = 0x00;
 pub const FEATURE_AI_CLIENT: u8 = 0x0A;
 
@@ -205,6 +206,7 @@ pub enum AiUsageErrorCode {
 #[repr(u8)]
 pub enum AiClientType {
     Codex = 0x01,
+    ClaudeCode = 0x02,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -2317,6 +2319,22 @@ mod tests {
             &detailed[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 7],
             &[0x01, 0x01, 0x01, 0x02, 0x34, 0x12, 0x02]
         );
+    }
+
+    #[test]
+    fn ai_client_state_encodes_claude_code_identity() {
+        let packet = AiClientStatePacket::new(
+            AiClientType::ClaudeCode,
+            AiClientVariant::Cli as u8,
+            true,
+            AiActivityState::Available,
+            AiWorkPhase::Unspecified,
+            1,
+        )
+        .unwrap();
+
+        let payload = packet.encode_payload(1);
+        assert_eq!(payload[PAYLOAD_OFFSET], 0x02);
     }
 
     #[test]

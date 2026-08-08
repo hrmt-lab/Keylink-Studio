@@ -272,6 +272,23 @@ Keylink StudioはWSL、Codex CLI、Windows Terminalのインストールや`.wsl
 > 詳細と確認項目は
 > `docs/codex-launcher-wsl-runtime-plan.md`を参照してください。
 
+### Claude Code連携（ScreenKey）
+
+Claude Code連携では、Windows版Claude CodeをWindows Terminalで起動し、状態をScreenKeyへ送ります。
+`Claude Code実行ファイル`は空欄ならPATH上の`claude`を使い、`プロジェクト`にはWindowsの作業フォルダを指定します。
+`Claude Codeを起動`を押すと、連携用の一時pluginを作成してClaude Codeを起動します。終了時はClaude Codeで`/exit`を実行してから、
+設定画面の`Claude Code連携を停止`を押してください。停止によりReceiverと一時pluginを削除できます。
+
+Claude Code連携中は、Host Linkで正式なClaude Code identityを送信します。ScreenKeyへClaude Codeロゴを表示するには、ファームウェアが`AI_CLIENT_STATE`（bit 10）と`AI_CLIENT_CLAUDE_CODE`（bit 12）の両方を広告し、Claude Code rendererを実装している必要があります。bit 12を広告しない既存ファームウェアへ、Keylink Studioは未知のClaude Code identityを送信しません。
+これはClaude CodeのセッションIDや会話本文をキーボードへ送るものではありません。
+
+> [!NOTE]
+> Claude CodeのhookはEsc押下や手動許可を押した瞬間を必ず通知するわけではありません。
+> 許可待ちは黄色で表示され、許可後もPost系eventが届くまで黄色を維持します。短いcommandでは青い実行表示を
+> 経由せず緑の完了表示になることがあります。Esc後に終了eventが届かない場合は、120秒後に青い
+> 「作業中・詳細不明」表示へ変わります。これは終了を推測しないための安全な表示であり、次のpromptまたは
+> 明示的な終了eventで通常表示へ回復します。
+
 ### 基本設定
 
 Polling、HID Usage Page / Usage、HELLO timeout などを編集できます。HELLO timeout の既定値は 750ms です。設定画面の数値入力では 50ms 単位で調整できます。通常の操作では細かい設定ファイルの場所や中身を意識する必要はありません。トラブルシュートや詳細調整が必要な場合だけ、設定ファイルを直接確認します。

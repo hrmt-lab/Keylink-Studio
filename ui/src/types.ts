@@ -107,9 +107,15 @@ export interface CodexLauncherConfig {
   wsl_executable: string;
 }
 
+export interface ClaudeLauncherConfig {
+  executable_path: string | null;
+  project_directory: string | null;
+}
+
 export interface AiClientConfig {
   codex: CodexClientConfig;
   codex_launcher: CodexLauncherConfig;
+  claude_launcher: ClaudeLauncherConfig;
 }
 
 export type CodexBrokerPhase =
@@ -137,6 +143,11 @@ export interface CodexLaunchResult {
   config: AppConfig;
 }
 
+export interface ClaudeLaunchResult {
+  project_directory: string;
+  plugin_directory: string;
+}
+
 export interface WslDistribution {
   name: string;
   version: number;
@@ -158,7 +169,7 @@ export type AiWorkPhase =
   | "searching";
 
 export interface AiClientStateSnapshot {
-  client_type: "codex";
+  client_type: "codex" | "claude_code";
   client_variant: "cli" | "vs_code_extension" | "desktop_app";
   session_active: boolean;
   activity_state: AiActivityState;

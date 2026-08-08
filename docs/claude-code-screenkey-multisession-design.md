@@ -1,10 +1,10 @@
 # Claude Code状態表示・複数セッション前提設計
 
-- 状態: Gate C一部実測済み／Claude Code再認証待ち
+- 状態: Keylink Studio・Firmware・ScreenKey実装、自動検証、正式Claude Code identity実機E2E完了
 - 作成日: 2026-08-04
-- Gate C更新日: 2026-08-05
+- Gate C更新日: 2026-08-08
 - 対象: Windows版Keylink Studioから起動したClaude Code
-- 基準環境: Claude Code `2.1.214`
+- 基準環境: Claude Code `2.1.224`（event意味論）、`2.1.226`（session lifecycle）
 - 関連仕様: `docs/keylink-studio-codex-screenkey-prototype-spec-reviewed-v10.md`
 
 ## 1. 目的
@@ -136,8 +136,10 @@ Windowsプロセス起動を避けるためHTTP hookを使う。
 - queue投入失敗や内部処理失敗もdecision bodyへ変換しない
 - command Helperはstdinを転送し、stdoutへ何も書かず、block用exit codeを返さない
 
-初期の恒久設定では`PermissionRequest`と`Elicitation`を直接登録せず、決定能力を持たない
-`Notification`の次のmatcherを優先する。
+製品設定では`PermissionRequest`と`Elicitation`を観測専用Receiverへ直接登録する。
+Gate Cで関連`Notification`が約6秒遅れて届くことを確認し、即時の待機表示には使えないためである。
+Receiverは常に空bodyの204だけを返し、許可・拒否・入力内容を返すdecision経路を持たない。
+`Notification`の次のmatcherは補助情報として併用する。
 
 - `permission_prompt`
 - `elicitation_dialog`
@@ -145,8 +147,8 @@ Windowsプロセス起動を避けるためHTTP hookを使う。
 - `elicitation_response`
 - `idle_prompt`
 
-Gate Cでは診断目的に限り、`PermissionRequest`／`Elicitation`も同じ観測専用Receiverへ登録して
-Notificationとの発火条件を比較する。Notificationだけで必要情報を満たせる場合は登録しない。
+`PermissionRequest`後にユーザーが許可した瞬間を示すhookはない。したがって、許可後を推測で
+`EXECUTING`へ変えず、Post系eventまたは詳細状態stale化まで`WAITING_APPROVAL`を維持する。
 
 ## 6. timeoutと受信口
 
@@ -160,14 +162,19 @@ Receiverがqueueへ投入した後にClaude Code側だけが待機を終了す�
 | イベント | timeout |
 |---|---:|
 | `PreToolUse`／`PostToolUse`／`PostToolUseFailure` | 1秒 |
+| `PermissionRequest`／`PermissionDenied`／`Elicitation`系 | 1秒 |
 | `Notification` | 1秒 |
 | `UserPromptSubmit` | 2秒 |
+| `PreCompact`／`PostCompact` | 2秒 |
 | `Stop`／`StopFailure` | 3秒 |
 | `SessionEnd` | 1秒 |
 | `SessionStart` Helper | 2秒 |
 
 `SessionEnd`は共有実行予算があるため1秒とし、長い猶予が必要になった場合は
 `CLAUDE_CODE_SESSIONEND_HOOKS_TIMEOUT_MS`を含めてGate Cで再評価する。
+SessionStart Helperとwrapper終了通知の内部HTTP送信は1回500 ms、失敗時の再試行1回、
+再試行前待機100 msとする。Helperは外側の2秒以内、wrapperは約1.1秒以内でbest-effort送信を終え、
+配送失敗をClaude Codeの失敗へ変換しない。
 
 Receiverは次の順序だけを同期的に実行する。
 
@@ -177,7 +184,7 @@ Receiverは次の順序だけを同期的に実行する。
 4. 空bodyの204応答
 
 queue満杯時に待機しない。lifecycle／終端イベント用の予約容量と、tool／Notification詳細用の
-通常容量を分ける。通常容量のoverflowは古い詳細イベントを破棄する。予約容量も使い切った場合は
+通常容量を分ける。通常容量のoverflowは満杯時に到着した詳細イベントを破棄する。予約容量も使い切った場合は
 sessionを`desynchronized`として記録し、同一sessionの最新lifecycle snapshotを優先する。
 overflow記録はアトミックカウンタとレート制限ログだけにし、ファイルログ書き込みを
 受信処理の完了条件にしない。
@@ -201,7 +208,8 @@ hookのraw JSONを共通Reducerへ渡さない。
 ### 7.2 toolイベントの順序逆転
 
 HTTP hookは並行到着するため、同じ`tool_use_id`で完了が開始より先に処理される可能性がある。
-Normalizerは`session_id + tool_use_id`をキーに短寿命tombstoneを保持する。
+Normalizerは`session_id + tool_use_id`をキーに短寿命tombstoneを保持する。初期実装は
+120秒TTL、最大256件とし、TTL経過または件数上限超過で古いものから削除する。
 
 - 未知itemへのPost／Failureを完了済みtombstoneとして記録する
 - 遅れて同じitemのPreが来たら無視する
@@ -251,19 +259,21 @@ watchdogという名称を使う場合も、詳細状態のstale化と、positiv
 ### 9.1 詳細状態のstale化
 
 active itemやapproval/input待ちが長時間更新されない場合、確定していない終了を推測せず、
-必要に応じて`WORKING + UNSPECIFIED`へ縮退する。閾値はGate Cの実測後に決める。
+最後に受理した関連eventから120秒後に`WORKING + UNSPECIFIED`へ縮退する。
+これはEsc押下をhookから直接検知できず、Esc後にPost／Stop系eventが欠落する場合の表示上の安全策である。
+stale化してもsession、Turn、active item、approval/inputの内部管理情報は終了扱いにせず保持する。
 
 ### 9.2 Turn終了の確定
 
 `AVAILABLE`／`COMPLETED`へ落とすにはpositive signalを要求する。
 
 - `Stop`／`StopFailure`
-- 中断直後に安定して届くことを確認できた`idle_prompt`
 - wrapper／SessionEndによるセッション終了
 - 将来確認された別の明示的終了イベント
 
-`idle_prompt`は即時解除の主経路と仮定しない。Gate Cで発火有無と遅延を測り、
-1～2秒程度なら主経路、数十秒なら補助、発火しないなら不採用とする。
+`idle_prompt`は正常な`Stop`から約60秒後に届く例があり、Esc直後には安定して届かなかったため、
+即時解除の主経路にせず補助signalとしてだけ扱う。120秒のstale化もpositive signalではなく、
+`AVAILABLE`／`COMPLETED`／`ERROR`への遷移やsession retireには使用しない。
 
 中断時の`PostToolUseFailure`はtool終了のpositive signal候補だが、単独ではTurn全体の終了を
 証明しない。active itemを解除した後も、別のTurn終了シグナルを待つ。
@@ -284,6 +294,12 @@ Registryの主キーは観測した`session_id`とする。各entryは少なく�
 `/clear`、`/compact`、`/resume`、forkで`session_id`が維持されるとは仮定しない。
 同じ`launch_id`から新しい`session_id`が開始された場合は、実測したイベント順序に従って
 旧entryをretireまたは置換し、孤児entryを増やさない。
+
+`SessionEnd`は`launch_id + session_id`が一致する個別sessionだけをretireする。
+wrapper終了通知は同じ`launch_id`に残る全sessionをretireし、`SessionEnd`欠落を補償する。
+最初のretireだけが状態とrevisionを変更し、後続の重複通知はno-opとする。`/clear`の
+`SessionEnd(reason = clear)`は旧sessionだけをretireし、launch自体は終了させない。
+wrapper終了済み`launch_id`はKeylink Studio終了までtombstoneとして保持し、遅延eventで復活させない。
 
 Keylink Studio再起動時にRegistryを永続化しない。検証UIから手動削除できるようにする。
 終了を確認できないAVAILABLE entryは、長時間無活動なら表示候補から外してよいが、
@@ -335,11 +351,11 @@ Host Link出力側はlatest-winsを基本とするが、送信理由を次のよ
 
 ## 12. 対応バージョン
 
-初期の最小対応Claude Codeを`2.1.214`とする。これはhook仕様から導かれる絶対下限ではなく、
+初期の最小対応Claude Codeを`2.1.224`とする。これはhook仕様から導かれる絶対下限ではなく、
 Gate Cと初期実装をこの環境で検証し、未検証の旧版をサポート対象へ含めないという実務判断である。
 
 - 最小対応版未満: 起動前に拒否する
-- 検証済み範囲: 通常起動する
+- 検証済み範囲: `2.1.224`から`2.1.226`まで通常起動する
 - 最終検証版より新しい版: 警告付きで許可する
 - 必須契約が欠ける場合: Claude Code本体は継続し、そのsessionの観測だけを安全に無効化する
 
@@ -351,8 +367,8 @@ Claude Code hooksは文書化されたJSONの限定的なfieldだけをforward-c
 
 ## 13. Firmware境界
 
-Host側のClaude Code実装だけでは現行ScreenKeyへClaudeロゴを表示できない。
-Firmware側はWSL上の正本で別タスクとして、少なくとも次を行う。
+Host側のClaude Code実装だけではScreenKeyへClaudeロゴを表示できないため、Firmware側は
+WSL上の正本で別タスクとして次を実装した。
 
 1. `RAWHID_APP_AI_CLIENT_CLAUDE_CODE = 0x02`を追加する
 2. packet decoderのclient type検証を拡張する
@@ -364,8 +380,9 @@ Firmware側はWSL上の正本で別タスクとして、少なくとも次を行
 capabilityの意味は「decoderが値を通す」だけではなく、対象Renderer方針でClaude Codeを
 表現できることである。LED-onlyなどでは専用ロゴがなくても定義された表現を持つ場合に対応とする。
 
-Firmware対応前のHost状態遷移確認では、検証ビルドに限り`client_type = Codex`で送信できるようにし、
-Claude Code識別そのもののPASSとは区別する。
+Firmware対応前のHost状態遷移確認では暫定`client_type = Codex`を使った。正式対応後はHostが
+`client_type = CLAUDE_CODE (0x02)`を送り、bit 10とbit 12を広告したdeviceだけを送信対象とする。
+bit 12のない既存deviceへ未知のclient typeは送らない。
 
 ## 14. Gate C
 
@@ -452,9 +469,9 @@ Receiverは正常時に空bodyの204だけを返し、fault時もClaude Codeをb
 極小queueでは通常`PreToolUse`を破棄しつつ`SessionStart`／`SessionEnd`をpriority queueで保持できた。
 したがって、受信処理をbounded／non-blockingにし、lifecycle用予約容量を分ける方針は成立する。
 
-一方、Claude Codeの認証状態は`loggedIn = false`、`authMethod = none`であり、debug logでも
+この時点のClaude Code認証状態は`loggedIn = false`、`authMethod = none`であり、debug logでも
 OAuth refresh token無効を確認した。ログインはユーザーの認証状態を変更するため、この作業では
-実施していない。次は再認証後に同じprobeで以下を実測する。
+実施せず、次の項目を再認証後へ残した。
 
 - toolなしTurn、tool成功／失敗／並列実行、重い処理、連続tool
 - permission許可／拒否／自動承認とNotification比較
@@ -463,7 +480,7 @@ OAuth refresh token無効を確認した。ログインはユーザーの認証�
 - `/clear`、手動／自動`/compact`、`/resume`、forkのsession identity
 - plugin再生成後の反映と`/reload-plugins`要否
 
-再認証後の最初の確認は次から開始する。promptとtool入力には合成データだけを使う。
+再認証後の最初の確認には次の合成データだけを使い、2026-08-08にPASSした。
 
 ```powershell
 cargo run -q -p rawhid-host-core --example claude_hook_probe -- run `
@@ -474,35 +491,178 @@ cargo run -q -p rawhid-host-core --example claude_hook_probe -- run `
 
 MCP elicitation確認時は`--with-mcp`を追加し、対話sessionでは`--print`を外す。
 
-上記が未実施のため、イベント対応表、終了positive signal、stale閾値、production timeoutは
-まだ確定しない。OS再起動直後と実アンチウイルス負荷はユーザー合意により今回のGate Cから
-`DEFERRED`とする。
+### 14.7 2026-08-08再認証後のevent意味論実測
+
+ユーザーによる再認証後、Claude Code `2.1.224`で対話probeを実行した。全runでReceiverの
+`unauthorized`／`malformed`／`oversized`／通常・priority overflowは0だった。主な結果は次のとおり。
+
+| ケース | 観測eventと結果 |
+|---|---|
+| toolなしTurn | `UserPromptSubmit -> Stop` |
+| tool成功 | `PreToolUse -> PostToolUse -> PostToolBatch -> Stop` |
+| tool失敗 | `PreToolUse -> PostToolUseFailure(error = Exit code 1) -> PostToolBatch -> Stop` |
+| 並列tool | 2件の`PreToolUse`後、開始順A／Bに対して完了順B／A。対応は`tool_use_id`で取る |
+| auto承認 | permission eventなしで`PreToolUse -> PostToolUse` |
+| manual許可 | `PreToolUse -> PermissionRequest -> PostToolUse`。`PreToolUse`は許可確定前に届く |
+| manual拒否／permission中Esc | `PreToolUse -> PermissionRequest`で停止し、Post／Stop系hookは届かない |
+| `AskUserQuestion`回答 | `PreToolUse -> PermissionRequest -> Notification(permission_prompt) -> PostToolUse`。回答は`tool_response`に入る |
+| `AskUserQuestion`中Esc | `PreToolUse -> PermissionRequest`で停止し、Post／Stop系hookは届かない |
+| MCP elicitation accept | `ElicitationResult(action = accept, content)`と`Notification(elicitation_response)`が届く |
+| MCP elicitation Esc | `ElicitationResult(action = cancel)`後にPost／Stopまで届く |
+
+permission／elicitation用`Notification`は元eventから約6秒後に届いた。即時状態遷移は
+`PermissionRequest`／`Elicitation`を使い、Notificationは補助とする。並列toolはevent順が逆転するため、
+Adapterは到着順ではなく`tool_use_id`で対応付ける。
+
+Esc中断の結果は次のとおり。
+
+- toolなし推論中: 最初の`UserPromptSubmit`以降、終了hookなし。次の`UserPromptSubmit`で同一sessionの復帰を確認。
+- auto modeのforeground tool実行中: `PreToolUse`以降、Post／Stop系hookなし。transcript上は
+  `toolDenialKind = user-rejected`だが、hook payloadだけでは実行中断の終了を確定できない。
+- permission待ち／`AskUserQuestion`待ち: `PermissionRequest`以降、Post／Stop系hookなし。
+- MCP elicitation待ち: `ElicitationResult(action = cancel)`で明示的に確定できる。
+- 中断runの観測時間内では`Notification: idle_prompt`は観測されなかった。
+
+後続のClaude Code `2.1.226` lifecycle runでは、正常な`Stop`から約60秒後に
+`Notification: idle_prompt`が届く例を確認した。したがって、`idle_prompt`はTurn終了主経路に採用せず、
+遅延した補助signalとしてだけ扱う。MCP elicitation以外の
+Esc中断は、次の`UserPromptSubmit`、`SessionEnd`、wrapper終了通知などのpositive signalで回復する。
+positive signalが届かない場合は120秒後に詳細表示だけを`WORKING + UNSPECIFIED`へ縮退し、
+Turn終了とはみなさない。
+
+### 14.8 2026-08-08 session lifecycle実測
+
+Claude Codeは検証途中で`2.1.224`から`2.1.226`へ更新された。`/clear`は`2.1.224`、
+手動`/compact`、`/resume`、fork、plugin再読込は`2.1.226`で確認した。確定結果は次のとおり。
+
+| 操作 | 観測eventとsession identity |
+|---|---|
+| `/clear` | 旧IDで`SessionEnd(reason = clear)`後、約0.39秒で新IDの`SessionStart(source = clear)`。同一launch内のsession置換 |
+| 手動`/compact`実行条件不足 | `PreCompact(trigger = manual)`だけが届き、`PostCompact`と`SessionStart(source = compact)`は届かない |
+| 手動`/compact`成功 | `PreCompact -> SessionStart(source = compact) -> PostCompact`。session IDは維持し、`SessionEnd`なし |
+| `/resume` | `SessionStart(source = resume)`。終了前と同じsession IDを再利用 |
+| fork | `SessionStart(source = fork)`。元sessionとは異なる新しいsession ID |
+| `/exit` | `SessionEnd(reason = prompt_input_exit)` |
+
+主な証跡runは`20260808-133936-19128`（clear）、`20260808-134753-21232`（手動compact）、
+`20260808-135625-4428`（resume）、`20260808-135919-19408`（fork）、
+`20260808-142233-27916`（plugin reload）である。各runはexit code 0で、Receiverの
+`unauthorized`／`malformed`／`oversized`／通常・priority overflowは0だった。
+
+`PreCompact`はcompact成功signalではない。成功確定には`SessionStart(source = compact)`または
+`PostCompact`を使う。`PostCompact.compact_summary`には会話要約本文が含まれるため、製品側は
+内容をHost Linkへ送らず、通常ログにも保存しない。
+
+pluginの`hooks.json`変更は実行中sessionへ自動反映されず、`/reload-plugins`後に反映された。
+一時pluginから`Stop`だけを削除した検証では、reload前はキャッシュ済み`Stop`が届き、reload後は
+`UserPromptSubmit`と`SessionEnd`を維持したまま`Stop`だけが届かなくなった。plugin生成物は
+UTF-8 BOMなしで書く。Windows PowerShell 5.1の`Set-Content -Encoding UTF8`が付けるBOMは
+reload時のplugin load errorになる。
+
+自動`/compact`は最低100k token規模の文脈生成が必要となるため、今回のGate Cでは`DEFERRED`とする。
+OS再起動直後と実アンチウイルス負荷も従来どおり`DEFERRED`とする。主要eventとsession lifecycleの
+実測は完了し、製品実装前レビューで詳細状態stale閾値120秒、wrapper補助signalの役割、
+production timeout、manual permission区間の表示を確定した。利用者向けマニュアルには、
+Escを直接検知できないこと、120秒後に詳細不明へ縮退すること、許可直後を推測で実行表示にしないことを記載した。
+
+### 14.9 2026-08-08 製品transport境界の実装
+
+製品用のobserver plugin生成、loopback HTTP Receiver、`keylink-claude-hook` Helper、
+PowerShell wrapper終了通知をHost coreへ実装した。
+
+- `claude_hooks.rs`: BOMなしplugin／hooks／observer／wrapper生成と1～3秒のhook timeout
+- `claude_observer.rs`: token／1 MiB上限／必須event名の検査、通常128件＋priority 16件のbounded queue、204応答
+- `claude_hook_helper.rs`と`keylink-claude-hook.rs`: stdoutへdecision bodyを出さない500 ms×最大2回の転送
+- `claude_hook_event.rs`: raw bodyをログ表示しないtransport eventとwrapper終了event
+- wrapperは起動時に`observer.json`をメモリへ読み、`finally`からbest-effort終了通知を送る
+
+Host core 216件はPASSした。この段階ではClaudeEventAdapter、tombstone／冪等Reducer、Session Registry、
+Tauri launcher、既存Codexとの表示選択、Host Link、Firmwareへ接続していない。
+
+### 14.10 2026-08-08 Claude状態Reducerの実装
+
+`claude_activity.rs`へClaude Code専用のAdapter／Normalizerとsession単位Reducerを実装した。
+raw hook payloadはこの境界でevent種別、`tool_use_id`、待機request keyだけへ正規化し、回答本文や
+compact要約などを状態へ保存しない。
+
+- `PostToolUse`／`PostToolUseFailure`が先に届いた`tool_use_id`はtombstone化し、後着の`PreToolUse`を無視する
+- `PermissionRequest`は`WAITING_APPROVAL`、`Elicitation`は`WAITING_INPUT`。許可・実行開始を推測しない
+- 最終関連eventから120秒後は、終端へ遷移せず`WORKING + UNSPECIFIED`だけをemitする
+- `SessionEnd`、wrapper終了、receiver側overflowなどの同期不能通知は冪等に処理する。同期不能でも進行中Turnを
+  `WORKING + UNSPECIFIED`へ縮退するだけで終了とはみなさない
+- 同じsession IDの`SessionStart`はwrapper終了前なら再開でき、wrapper終了後の遅延eventは無視する
+
+Reducer単体test 10件を追加した。この段階ではSession Registry、Tauri launcher、既存Codexとの表示選択、
+Host Link、Firmwareへは接続していない。
+
+### 14.11 2026-08-08 Keylink Studio Host接続の実装
+
+Session Registry、Tauri launcher、Settings画面、Host Link送信へ接続した。Registryは`session_id`単位で
+upsertし、`SessionEnd`を個別retire、wrapper終了をlaunch全体retireとして処理する。Receiver overflowは
+該当launchを`desynchronized`へ縮退する。Claude CodeはWindows Terminalから一時pluginで起動し、停止時に
+Receiverとplugin directoryをcleanupする。
+
+Firmwareを変更しないため、Host Linkのwire identityは暫定的に既存`Codex + CLI`を利用する。
+Claudeのsession IDや本文はpacketへ載せない。この暫定表示はFirmware側の`CLAUDE_CODE` identity実装後に
+置き換える。Host core 228件、Tauri 22件、UI production buildはPASSした。
+
+### 14.12 2026-08-08 実機E2E確認とHelper同梱
+
+Keylink Studioから起動したClaude CodeとScreenKeyについて、次を実機確認した。
+
+- Helperを含むobserver pluginが読み込まれ、SettingsからClaude Codeを起動できる
+- toolなし応答、tool実行、manual permission、`/clear`、`/exit`、連携停止後の再起動
+- permission中のEsc後、120秒で`WORKING + UNSPECIFIED`へ縮退し、新しいpromptで通常表示へ回復する
+
+manual permissionは許可直後を示すhookがない。そのため、許可待ちの黄色表示をPost系eventまたは
+120秒stale化まで維持する。短いcommandではPostとStopが連続するため、許可後の青い実行表示が
+見えず黄色から緑へ遷移しても正常である。
+
+通常の`cargo tauri dev`では別crate binaryを自動でbuildしないため、`dev.ps1`は先に
+`keylink-claude-hook`をbuildする。release buildは`build-release.ps1`がrelease HelperをTauri sidecarとして
+同梱する。この段階の実機確認は暫定`Codex + CLI` identityで行い、後続の正式identity確認と区別した。
+
+### 14.13 2026-08-08 正式Claude Code identity実装と実機E2E
+
+WSL正本の`zmk-rawhid-app`へ`CLAUDE_CODE = 0x02`とcapability bit 12を追加し、ScreenKey側へ
+96×96 RGB565ロゴとclient typeによるRenderer切り替えを実装した。HostはClaude Code状態を
+`0x02`で送り、bit 12のない既存deviceを送信対象から除外する。
+
+書き込み済みScreenKeyとKeylink Studio新ビルドで、Claude Codeロゴ、青い実行中、黄色の許可待ち、
+黄色枠点滅の入力待ち、緑の完了、`/exit`、連携停止を確認した。通常の連続許可は2回とも黄色になった。
+一方、失敗したcommandをClaude Codeが同一Turn内で自動修正・再試行した1例では、2回目の許可画面中に
+青い実行表示となった。この失敗後再試行だけは既知の境界事例として残す。
+
+自動検証はHost core 230件、Tauri 23件、UI production buildがPASSした。Firmware側は5本の
+AI Client／Rendererテストとfresh buildがPASSし、UF2は510,976 B、SHA-256は
+`402188bba5bd46a40377966e5ee115cd8c1043735f156b141bacfc378c1ba49a`である。
 
 ## 15. 実装順序
 
-1. Gate C用probeは実装済み。Claude Code再認証後にモデル依存イベントとversion依存を確定する。
-2. observer plugin生成、Receiver、Helper、wrapper終了通知を実装する。
-3. ClaudeEventAdapter／Normalizerとtombstoneを実装する。
-4. Session Registryを導入し、既存Codexを含む複数session構造へ寄せる。
-5. feature gate付きの一時的なScreenKey切り替え機構を実装する。
-6. Host出力のcoalescing、heartbeat、selection triggerを実装する。
-7. 暫定Codex identityで状態遷移を実機確認する。
-8. WSL正本側でFirmwareのClaude Code識別、capability、ロゴを実装する。
-9. Claude Code identityでend-to-end確認する。
+1. Gate C用probe、Claude Code `2.1.224`のevent意味論、`2.1.226`の主要session lifecycle実測、
+   stale／終了／timeout／manual permissionの実装前レビューは完了。自動compactは`DEFERRED`。
+2. observer plugin生成、Receiver、Helper、wrapper終了通知のHost core境界は実装済み。
+3. ClaudeEventAdapter／Normalizer、tombstone、120秒の詳細状態stale化、session単位の冪等Reducerを実装済み。
+4. Session Registry、Tauri launcher、Settings画面、Host Link送信を実装済み。
+5. 暫定Codex identityでのClaude起動・状態遷移を実機確認済み。
+6. WSL正本側へFirmwareのClaude Code識別、capability、ロゴを実装済み。
+7. 正式Claude Code identityでend-to-end確認済み。
 
-## 16. 未確定事項
+## 16. 実機確認結果
 
-次はGate C結果が出るまで確定扱いにしない。
+- Settings起動、observer／Session Registry、正式Claude Codeロゴ、manual permission、Esc stale化、
+  stale後の次prompt回復、`/clear`、`/exit`、停止→再起動を確認済み。
+- `AskUserQuestion`による入力待ちはClaude Codeロゴと黄色枠点滅になり、選択後に完了表示へ戻ることを確認済み。
+- command失敗後の自動再試行で2回目の許可待ちだけ青くなった1例は既知の境界事例。通常の連続許可は正常。
+- 2台以上の同時Claude session表示、receiver overflowの実機注入、OS再起動直後／実AV負荷は未確認であり、
+  初期対応の完了条件には含めない。
 
-- Esc後にTurn終了を確定できるpositive signal
-- `idle_prompt`の主経路／補助／不採用
-- 詳細状態stale化の閾値
-- `/clear`／`/compact`前後のsession identity
-- Notificationだけでpermission／elicitation待ちを十分に表現できるか
-- 初期timeout値の負荷下での実効性
-- 最終検証済みClaude Codeバージョン
+## 17. 次の作業
 
-## 17. 非対象
+WSL正本2リポジトリとKeylink Studioをリポジトリ別にcommitする。失敗後自動再試行時の2回目の
+permission表示は、必要に応じてraw hookを再採取してClaude Code側のevent欠落かHost reducer側かを切り分ける。
+
+## 18. 非対象
 
 - 初期段階でのWSL Claude Code
 - Keylink Studio外から起動したsessionの自動発見

@@ -45,6 +45,25 @@ impl Default for AppConfig {
 pub struct AiClientConfig {
     pub codex: CodexClientConfig,
     pub codex_launcher: CodexLauncherConfig,
+    pub claude_launcher: ClaudeLauncherConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct ClaudeLauncherConfig {
+    /// Absolute path override. When omitted, `claude` is resolved from PATH.
+    pub executable_path: Option<String>,
+    /// Windows project directory opened by Claude Code.
+    pub project_directory: Option<String>,
+}
+
+impl Default for ClaudeLauncherConfig {
+    fn default() -> Self {
+        Self {
+            executable_path: None,
+            project_directory: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -564,6 +583,10 @@ environment = "windows" # windows | wsl
 # wsl_project_directory = "/home/user/project"
 # wsl_distribution = "Ubuntu"
 wsl_executable = "codex"
+
+[ai_client.claude_launcher]
+# executable_path = "C:\\path\\to\\claude.exe"
+# project_directory = "C:\\path\\to\\project"
 
 [polling]
 interval_ms = 500

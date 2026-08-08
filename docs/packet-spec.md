@@ -197,6 +197,11 @@ header `seq` は duplicate 抑制に使います。
 | 7 | `LAYER_STATE` | `LAYER_STATE` uplink |
 | 8 | `KEY_PRESS` | `KEY_PRESS` uplink |
 | 9 | `CONFIG_RPC` | `CONFIG_REQUEST` / `CONFIG_RESPONSE` support |
+| 10 | `AI_CLIENT_STATE` | AI client state downlink |
+| 11 | `AI_CLIENT_WORK_PHASE` | 7-byte AI client state payload with work phase |
+| 12 | `AI_CLIENT_CLAUDE_CODE` | `client_type=0x02 CLAUDE_CODE` renderer support; bit 10 is also required |
+
+AI client type は `0x01 CODEX`、`0x02 CLAUDE_CODE` とします。Host は Claude Code state を、bit 10 と bit 12 の両方を広告した device にだけ送信します。bit 12 を広告しない既存 device へ未知の client type は送信しません。
 
 Keylink Studio は capability を機能 gate として扱います。`BATTERY_STATUS` は既存互換のため capability 未広告でも表示対象として受ける場合がありますが、その他の uplink は該当 capability がない device からは破棄します。
 

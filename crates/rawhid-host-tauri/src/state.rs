@@ -19,6 +19,10 @@ use rawhid_host_core::{
     studio::StudioEditSession,
 };
 
+use rawhid_host_core::{
+    ClaudeObserverCounters, ClaudeObserverEvents, ClaudeObserverReceiver, ClaudeSessionRegistry,
+};
+
 pub const MAX_LOG_ENTRIES: usize = 200;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -70,11 +74,27 @@ pub struct AppState {
     pub ai_usage_refreshing: Arc<AtomicBool>,
     pub ai_usage_runtime: Arc<Mutex<Option<AiUsageRuntime>>>,
     pub codex_activity: Arc<CodexActivityRuntime>,
+    pub claude_integration: Arc<Mutex<Option<ClaudeIntegration>>>,
+    pub ai_display_source: Arc<Mutex<AiDisplaySource>>,
     pub codex_broker: CodexBrokerManager,
     pub key_stats: SharedKeyStatsStore,
     pub studio_edit: Arc<Mutex<Option<StudioEditSession>>>,
     pub encoder_restore_rollbacks:
         Arc<Mutex<HashMap<(String, u64), BTreeMap<(u32, u8), EncoderGetBindings>>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AiDisplaySource {
+    Codex,
+    Claude,
+}
+
+pub struct ClaudeIntegration {
+    pub receiver: ClaudeObserverReceiver,
+    pub events: ClaudeObserverEvents,
+    pub registry: ClaudeSessionRegistry,
+    pub last_counters: ClaudeObserverCounters,
+    pub plugin_root: PathBuf,
 }
 
 #[derive(Debug)]
@@ -171,6 +191,8 @@ impl AppState {
             ai_usage_refreshing: Arc::new(AtomicBool::new(false)),
             ai_usage_runtime: Arc::new(Mutex::new(ai_usage_runtime)),
             codex_activity,
+            claude_integration: Arc::new(Mutex::new(None)),
+            ai_display_source: Arc::new(Mutex::new(AiDisplaySource::Codex)),
             codex_broker,
             key_stats,
             studio_edit: Arc::new(Mutex::new(None)),

@@ -9,22 +9,27 @@ use std::{
     time::{Duration, Instant},
 };
 
+use directories::ProjectDirs;
+use getrandom::fill as fill_random;
 #[cfg(debug_assertions)]
 use rawhid_host_core::hid::DeviceInfo;
 use rawhid_host_core::{
     active_app::SystemActiveAppProvider,
     ai_usage::{AiUsageRefreshError, AiUsageRuntime, AiUsageShared},
+    claude_activity::{ClaudeSessionSnapshot, ClaudeStateChange},
+    claude_hooks::{write_claude_observer_plugin, ClaudePluginOptions},
+    claude_observer::{ClaudeObserverReceiver, ClaudeObserverReceiverOptions},
     codex_activity::{AiClientStateChange, AiClientStateSnapshot, CodexActivityRuntime},
     codex_broker::{CodexAppServerRuntime, CodexBrokerConfig, CodexBrokerPhase, CodexBrokerStatus},
     config::{
-        load_config, ActionsConfig, AppConfig, CodexLaunchEnvironment, CodexLauncherConfig,
-        ConfigPaths,
+        load_config, ActionsConfig, AppConfig, ClaudeLauncherConfig, CodexLaunchEnvironment,
+        CodexLauncherConfig, ConfigPaths,
     },
     hid::{HidDeviceManager, HidError, ProbeResult},
     packet::{
-        AiClientStatePacket, ComboBinding, ComboInfo, ComboItem, ConfigStatus, EncoderBinding,
-        EncoderBindingFlags, EncoderBindingSource, EncoderGetBindings, EncoderGetInfo,
-        UplinkPacket,
+        AiActivityState, AiClientStatePacket, AiClientType, AiClientVariant, AiWorkPhase,
+        ComboBinding, ComboInfo, ComboItem, ConfigStatus, EncoderBinding, EncoderBindingFlags,
+        EncoderBindingSource, EncoderGetBindings, EncoderGetInfo, UplinkPacket,
     },
     runner::{uplink_device_key, RunEvent, Runner},
     stats::{KeyStatsSummary, SharedKeyStatsStore, StatsPeriod},
@@ -44,10 +49,10 @@ use tauri::{AppHandle, Emitter, State};
 
 use crate::foreground::ForegroundWatcher;
 use crate::state::{
-    add_log, AppState, HostLinkCall, HostLinkRequest, HostLinkResponse, LogEntry, MonitorCommand,
-    MonitorStatus,
+    add_log, AiDisplaySource, AppState, ClaudeIntegration, HostLinkCall, HostLinkRequest,
+    HostLinkResponse, LogEntry, MonitorCommand, MonitorStatus,
 };
-use crate::{actions, codex_launcher, icon, startup};
+use crate::{actions, claude_launcher, codex_launcher, icon, startup};
 
 type MonitorRunner = Runner<SystemActiveAppProvider, rawhid_host_core::hid::RealHidTransport>;
 
@@ -59,6 +64,8 @@ pub struct MonitorExtras {
     pub ai_usage_refreshing: Arc<AtomicBool>,
     pub key_stats: SharedKeyStatsStore,
     pub codex_activity: Arc<CodexActivityRuntime>,
+    pub claude_integration: Arc<Mutex<Option<ClaudeIntegration>>>,
+    pub ai_display_source: Arc<Mutex<AiDisplaySource>>,
 }
 
 #[derive(Default)]
@@ -71,7 +78,7 @@ const AI_CLIENT_STATE_RESEND_INTERVAL: Duration = Duration::from_secs(5);
 
 trait AiClientStateTransport {
     fn device_generation(&self) -> u64;
-    fn has_ai_client_state_device(&self) -> bool;
+    fn has_ai_client_state_device(&self, client_type: AiClientType) -> bool;
     fn send_ai_client_state(
         &mut self,
         packet: AiClientStatePacket,
@@ -84,8 +91,8 @@ impl AiClientStateTransport for MonitorRunner {
         self.device_generation()
     }
 
-    fn has_ai_client_state_device(&self) -> bool {
-        self.has_ai_client_state_device()
+    fn has_ai_client_state_device(&self, client_type: AiClientType) -> bool {
+        self.has_ai_client_state_device(client_type)
     }
 
     fn send_ai_client_state(
@@ -474,6 +481,7 @@ pub async fn launch_codex_cli(
     .await
     .map_err(|error| error.to_string())??;
 
+    *state.ai_display_source.lock().unwrap() = AiDisplaySource::Codex;
     Ok(CodexLaunchCommandResult {
         environment: launched.environment,
         project_directory: launched.project_directory,
@@ -481,9 +489,151 @@ pub async fn launch_codex_cli(
     })
 }
 
+#[tauri::command]
+pub async fn launch_claude_code(
+    launcher: ClaudeLauncherConfig,
+    state: State<'_, AppState>,
+) -> Result<claude_launcher::ClaudeLaunchResult, String> {
+    let to_validate = launcher.clone();
+    tauri::async_runtime::spawn_blocking(move || claude_launcher::validate(&to_validate))
+        .await
+        .map_err(|error| error.to_string())??;
+    if state.claude_integration.lock().unwrap().is_some() {
+        return Err(
+            "Claude Code連携はすでに起動しています。停止してから再度起動してください".to_string(),
+        );
+    }
+
+    let mut token = [0_u8; 32];
+    fill_random(&mut token)
+        .map_err(|error| format!("Claude Code連携用tokenを生成できません: {error}"))?;
+    let launch_id = format!(
+        "claude-{}-{}",
+        std::process::id(),
+        chrono::Utc::now().timestamp_millis()
+    );
+    let (receiver, events) = ClaudeObserverReceiver::bind(ClaudeObserverReceiverOptions::loopback(
+        launch_id,
+        hex::encode(token),
+    ))
+    .await
+    .map_err(|error| error.to_string())?;
+    let plugin_root = claude_plugin_root(receiver.config().launch_id.as_str())?;
+    let helper_executable = claude_helper_executable()?;
+    let options = ClaudePluginOptions {
+        plugin_root: plugin_root.clone(),
+        helper_executable: helper_executable.clone(),
+        observer: receiver.config().clone(),
+    };
+    let artifacts =
+        match tauri::async_runtime::spawn_blocking(move || write_claude_observer_plugin(&options))
+            .await
+        {
+            Ok(Ok(artifacts)) => artifacts,
+            Ok(Err(error)) => {
+                let _ = receiver.shutdown().await;
+                return Err(error.to_string());
+            }
+            Err(error) => {
+                let _ = receiver.shutdown().await;
+                return Err(error.to_string());
+            }
+        };
+    let launcher_for_spawn = launcher.clone();
+    let artifacts_for_spawn = artifacts.clone();
+    let helper_for_spawn = helper_executable.clone();
+    let launched = match tauri::async_runtime::spawn_blocking(move || {
+        claude_launcher::launch(&launcher_for_spawn, &artifacts_for_spawn, &helper_for_spawn)
+    })
+    .await
+    {
+        Ok(Ok(result)) => result,
+        Ok(Err(error)) => {
+            let _ = receiver.shutdown().await;
+            let _ = std::fs::remove_dir_all(&plugin_root);
+            return Err(error);
+        }
+        Err(error) => {
+            let _ = receiver.shutdown().await;
+            let _ = std::fs::remove_dir_all(&plugin_root);
+            return Err(error.to_string());
+        }
+    };
+
+    let updated = config_with_claude_launcher(state.config.lock().unwrap().clone(), launcher);
+    persist_config(updated, state.inner())?;
+    *state.claude_integration.lock().unwrap() = Some(ClaudeIntegration {
+        receiver,
+        events,
+        registry: Default::default(),
+        last_counters: Default::default(),
+        plugin_root,
+    });
+    *state.ai_display_source.lock().unwrap() = AiDisplaySource::Claude;
+    Ok(launched)
+}
+
+#[tauri::command]
+pub fn get_claude_sessions(state: State<AppState>) -> Vec<ClaudeSessionSnapshot> {
+    state
+        .claude_integration
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|integration| integration.registry.snapshots())
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub async fn stop_claude_code(state: State<'_, AppState>) -> Result<(), String> {
+    let integration = state.claude_integration.lock().unwrap().take();
+    let Some(integration) = integration else {
+        return Ok(());
+    };
+    let root = integration.plugin_root.clone();
+    integration
+        .receiver
+        .shutdown()
+        .await
+        .map_err(|error| error.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || {
+        std::fs::remove_dir_all(root).map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+    *state.ai_display_source.lock().unwrap() = AiDisplaySource::Codex;
+    Ok(())
+}
+
 fn config_with_codex_launcher(mut config: AppConfig, launcher: CodexLauncherConfig) -> AppConfig {
     config.ai_client.codex_launcher = launcher;
     config
+}
+
+fn config_with_claude_launcher(mut config: AppConfig, launcher: ClaudeLauncherConfig) -> AppConfig {
+    config.ai_client.claude_launcher = launcher;
+    config
+}
+
+fn claude_plugin_root(launch_id: &str) -> Result<PathBuf, String> {
+    let data = ProjectDirs::from("", "", "Keylink Studio")
+        .ok_or_else(|| "Keylink Studioのデータディレクトリを決定できません".to_string())?
+        .data_local_dir()
+        .join("claude-observer");
+    Ok(data.join(launch_id))
+}
+
+fn claude_helper_executable() -> Result<PathBuf, String> {
+    let executable = std::env::current_exe().map_err(|error| error.to_string())?;
+    let directory = executable
+        .parent()
+        .ok_or_else(|| "Keylink Studio実行ファイルの親ディレクトリを取得できません".to_string())?;
+    let name = if cfg!(windows) {
+        "keylink-claude-hook.exe"
+    } else {
+        "keylink-claude-hook"
+    };
+    Ok(directory.join(name))
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -3753,6 +3903,8 @@ pub fn start_host_link_worker(
         ai_usage_refreshing: Arc::clone(&state.ai_usage_refreshing),
         key_stats: Arc::clone(&state.key_stats),
         codex_activity: Arc::clone(&state.codex_activity),
+        claude_integration: Arc::clone(&state.claude_integration),
+        ai_display_source: Arc::clone(&state.ai_display_source),
     };
 
     let (tx, rx) = mpsc::channel();
@@ -4004,6 +4156,63 @@ fn drain_ai_client_state_changes(activity: &CodexActivityRuntime) -> Vec<AiClien
     changes
 }
 
+fn claude_as_ai_snapshot(snapshot: Option<ClaudeSessionSnapshot>) -> AiClientStateSnapshot {
+    match snapshot {
+        Some(snapshot) => AiClientStateSnapshot {
+            client_type: AiClientType::ClaudeCode,
+            client_variant: AiClientVariant::Cli,
+            session_active: snapshot.session_active,
+            activity_state: snapshot.activity_state,
+            work_phase: snapshot.work_phase,
+            revision: snapshot.revision,
+        },
+        None => AiClientStateSnapshot {
+            client_type: AiClientType::ClaudeCode,
+            client_variant: AiClientVariant::Cli,
+            session_active: false,
+            activity_state: AiActivityState::None,
+            work_phase: AiWorkPhase::Unspecified,
+            revision: 0,
+        },
+    }
+}
+
+fn drain_claude_state_changes(
+    integration: &Arc<Mutex<Option<ClaudeIntegration>>>,
+    now: Instant,
+) -> (AiClientStateSnapshot, Vec<AiClientStateChange>) {
+    let mut guard = integration.lock().unwrap();
+    let Some(integration) = guard.as_mut() else {
+        return (claude_as_ai_snapshot(None), Vec::new());
+    };
+    let mut claude_changes: Vec<ClaudeStateChange> = Vec::new();
+    while let Ok(event) = integration.events.try_recv() {
+        if let Ok(mut changes) = integration.registry.apply(event, now) {
+            claude_changes.append(&mut changes);
+        }
+    }
+    let counters = integration.receiver.counters();
+    if counters.normal_overflow > integration.last_counters.normal_overflow
+        || counters.priority_overflow > integration.last_counters.priority_overflow
+    {
+        let launch_id = integration.receiver.config().launch_id.clone();
+        claude_changes.extend(integration.registry.mark_launch_desynchronized(&launch_id));
+    }
+    integration.last_counters = counters;
+    claude_changes.extend(integration.registry.tick(now));
+    let snapshot = claude_as_ai_snapshot(integration.registry.selected_snapshot());
+    let changes = claude_changes
+        .into_iter()
+        .map(|change| AiClientStateChange {
+            state: claude_as_ai_snapshot(Some(change.state)),
+            // Claude hook changes are full state transitions. Work-phase-only
+            // targeting is reserved for Codex's detailed activity stream.
+            reason: rawhid_host_core::AiClientStateChangeReason::SessionStarted,
+        })
+        .collect();
+    (snapshot, changes)
+}
+
 fn sync_ai_client_state<T>(
     transport: &mut T,
     snapshot: AiClientStateSnapshot,
@@ -4018,13 +4227,14 @@ where
     let mut sent_change = false;
 
     for change in changes {
-        if !transport.has_ai_client_state_device() {
+        let packet = ai_client_state_packet(change.state)?;
+        if !transport.has_ai_client_state_device(packet.client_type) {
             tracker.last_device_generation = None;
             tracker.last_sent_at = None;
             continue;
         }
         transport.send_ai_client_state(
-            ai_client_state_packet(change.state)?,
+            packet,
             change.reason == rawhid_host_core::AiClientStateChangeReason::WorkPhaseChanged,
         )?;
         sent_change = true;
@@ -4035,13 +4245,13 @@ where
     });
     if !sent_change
         && (tracker.last_device_generation != Some(device_generation) || periodic_due)
-        && transport.has_ai_client_state_device()
+        && transport.has_ai_client_state_device(snapshot.client_type)
     {
         transport.send_ai_client_state(ai_client_state_packet(snapshot)?, false)?;
         sent_change = true;
     }
 
-    if transport.has_ai_client_state_device() {
+    if transport.has_ai_client_state_device(snapshot.client_type) {
         tracker.last_device_generation = Some(device_generation);
         if sent_change {
             tracker.last_sent_at = Some(now);
@@ -4563,12 +4773,20 @@ fn run_monitor_loop(
             }
         }
 
+        let now = Instant::now();
+        let (ai_snapshot, ai_changes) = match *extras.ai_display_source.lock().unwrap() {
+            AiDisplaySource::Codex => (
+                extras.codex_activity.snapshot(),
+                drain_ai_client_state_changes(&extras.codex_activity),
+            ),
+            AiDisplaySource::Claude => drain_claude_state_changes(&extras.claude_integration, now),
+        };
         if let Err(error) = sync_ai_client_state(
             &mut runner,
-            extras.codex_activity.snapshot(),
-            drain_ai_client_state_changes(&extras.codex_activity),
+            ai_snapshot,
+            ai_changes,
             &mut ai_client_state_send,
-            Instant::now(),
+            now,
         ) {
             let msg = format!("AI client state send error: {error}");
             let entry = add_log(&log_entries, &log_counter, "error", &msg);
@@ -4808,6 +5026,7 @@ mod tests {
     struct FakeAiClientTransport {
         device_generation: u64,
         capable: bool,
+        claude_capable: bool,
         sent: Vec<AiClientStatePacket>,
         work_phase_only: Vec<bool>,
     }
@@ -4817,8 +5036,8 @@ mod tests {
             self.device_generation
         }
 
-        fn has_ai_client_state_device(&self) -> bool {
-            self.capable
+        fn has_ai_client_state_device(&self, client_type: AiClientType) -> bool {
+            self.capable && (client_type != AiClientType::ClaudeCode || self.claude_capable)
         }
 
         fn send_ai_client_state(
@@ -4835,6 +5054,17 @@ mod tests {
     fn ai_state(activity_state: AiActivityState, revision: u16) -> AiClientStateSnapshot {
         AiClientStateSnapshot {
             client_type: AiClientType::Codex,
+            client_variant: AiClientVariant::Cli,
+            session_active: activity_state != AiActivityState::None,
+            activity_state,
+            work_phase: AiWorkPhase::Unspecified,
+            revision,
+        }
+    }
+
+    fn claude_state(activity_state: AiActivityState, revision: u16) -> AiClientStateSnapshot {
+        AiClientStateSnapshot {
+            client_type: AiClientType::ClaudeCode,
             client_variant: AiClientVariant::Cli,
             session_active: activity_state != AiActivityState::None,
             activity_state,
@@ -4962,6 +5192,35 @@ mod tests {
         assert_eq!(transport.sent.len(), 1);
         assert_eq!(transport.sent[0].activity_state, AiActivityState::Completed);
         assert_eq!(transport.sent[0].revision, 12);
+    }
+
+    #[test]
+    fn claude_code_state_waits_for_a_device_with_renderer_capability() {
+        let mut transport = FakeAiClientTransport {
+            device_generation: 10,
+            capable: true,
+            claude_capable: false,
+            ..Default::default()
+        };
+        let mut tracker = AiClientStateSendTracker::default();
+        let snapshot = claude_state(AiActivityState::Available, 20);
+        let now = Instant::now();
+
+        sync_ai_client_state(
+            &mut transport,
+            snapshot,
+            [ai_change(snapshot)],
+            &mut tracker,
+            now,
+        )
+        .unwrap();
+        assert!(transport.sent.is_empty());
+        assert_eq!(tracker.last_device_generation, None);
+
+        transport.claude_capable = true;
+        sync_ai_client_state(&mut transport, snapshot, [], &mut tracker, now).unwrap();
+        assert_eq!(transport.sent.len(), 1);
+        assert_eq!(transport.sent[0].client_type, AiClientType::ClaudeCode);
     }
 
     #[test]

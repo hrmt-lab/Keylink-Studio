@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use crate::{
     claude_hook_event::{ClaudeHookEvent, ClaudeObserverEvent},
+    next_ai_session_registration_order,
     packet::{AiActivityState, AiWorkPhase},
 };
 
@@ -39,6 +40,7 @@ pub enum ClaudeStateChangeReason {
 pub struct ClaudeSessionSnapshot {
     pub launch_id: String,
     pub session_id: String,
+    pub registration_order: u64,
     pub session_active: bool,
     pub activity_state: AiActivityState,
     pub work_phase: AiWorkPhase,
@@ -277,6 +279,7 @@ impl ClaudeSessionReducer {
             snapshot: ClaudeSessionSnapshot {
                 launch_id: launch_id.into(),
                 session_id: session_id.into(),
+                registration_order: next_ai_session_registration_order(),
                 session_active: false,
                 activity_state: AiActivityState::None,
                 work_phase: AiWorkPhase::Unspecified,

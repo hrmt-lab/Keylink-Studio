@@ -523,3 +523,26 @@ Host Linkはbit 11 `CAP_AI_CLIENT_WORK_PHASE`でgateし、旧Firmwareへは従�
 - ScreenKey Rendererは対象キーボードfirmware側に置く。
 - Gate A／Bの生ログ、token、認証情報、一時ファイルをcommitしない。
 - ユーザーのCodex認証、恒久設定、`CODEX_HOME`を変更しない。
+
+## 2026-08-08 Codex複数セッションHost実装
+
+- Codex CLI `0.147.0`の単一App Serverへ2 clientを接続する事前互換性ゲートに合格した。
+  別threadの同時Turn、同一JSON-RPC IDの接続分離、一方の切断後の他方継続、approval、
+  `requestUserInput`を実測した。
+- Brokerを最大8接続へ拡張し、接続ごとに上流WebSocket、転送task、`connection_id`を分離した。
+  `connected_client_count`を追加し、`client_connected == (connected_client_count > 0)`を維持した。
+- Codex Event Adapterを接続ごとに分離し、最大32件のSession Registryを追加した。
+  `thread_id`単位でReducer、snapshot、revision、Turn、request、item、work phase、期限を保持する。
+- 同一threadの別接続resumeは所有権移譲とし、旧所有接続のeventを破棄する。CLI切断から3秒以内の
+  同一thread再接続ではsnapshotとrevisionを維持し、1接続の切断で他threadを終了しない。
+- Codex／Claude Codeの候補を初回有効登録順の共通列として保持し、複数Codexと複数Claude Codeを
+  `cycle_ai_session`で循環できる。非選択eventは内部状態だけ更新し、現在表示を奪わない。
+- SettingsのCodex起動操作は接続中でも追加起動でき、現在の接続数を最大8件として表示する。
+- Host Link packet、Firmware、ScreenKey Rendererには変更を加えていない。
+- Broker、Registry、共通セレクタの受け入れ条件を自動テスト化し、Host core 251件、Tauri 34件、
+  UI production buildが成功した。
+- 2026-08-09の再レビューで、再有効化した候補が末尾へ移る問題とApp Server error response後の
+  request相関残留を修正した。候補は常に全クライアント共通の初回登録順へ戻り、失敗した
+  thread操作の相関は接続継続中でも解放される。
+- Keylink Studioから2つのCodex CLIを実際に起動し、実ScreenKeyで切り替える確認は未実施である。
+  実機確認が完了するまで、本項は「Host実装・自動テスト完了」の扱いとする。

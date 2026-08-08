@@ -1,3 +1,11 @@
+use std::sync::atomic::{AtomicU64, Ordering};
+
+static NEXT_AI_SESSION_REGISTRATION_ORDER: AtomicU64 = AtomicU64::new(1);
+
+pub(crate) fn next_ai_session_registration_order() -> u64 {
+    NEXT_AI_SESSION_REGISTRATION_ORDER.fetch_add(1, Ordering::Relaxed)
+}
+
 pub mod active_app;
 pub mod ai_usage;
 pub mod app_match;
@@ -38,12 +46,13 @@ pub use claude_observer::{
 };
 pub use codex_activity::{
     AiClientStateChange, AiClientStateChangeReason, AiClientStateReducer, AiClientStateSnapshot,
-    CodexActivityRuntime, CodexEventAdapter,
+    CodexActivityRuntime, CodexEventAdapter, CodexSessionRegistry, CodexSessionSnapshot,
+    CodexStateChange, MAX_CODEX_SESSIONS,
 };
 pub use codex_broker::{
     BrokerDirection, CodexAppServerRuntime, CodexBrokerConfig, CodexBrokerError, CodexBrokerEvent,
     CodexBrokerManager, CodexBrokerPhase, CodexBrokerStatus, CodexClientLaunchInfo, JsonRpcKind,
-    JsonRpcMetadata, SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256,
+    JsonRpcMetadata, MAX_CODEX_CLIENTS, SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256,
 };
 pub use config::{
     AiClientConfig, AiUsageConfig, AppConfig, ClaudeCodeAiUsageConfig, ClaudeLauncherConfig,

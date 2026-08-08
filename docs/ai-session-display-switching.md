@@ -14,14 +14,14 @@
 
 ## 3. 表示候補
 
-候補順は次のとおりとする。
+候補順はクライアント種別でグループ化せず、Codex／Claude Codeを通した初回有効登録順とする。
+Codexは`thread_id`、Claude Codeは`(launch_id, session_id)`を識別子とする。同じ`thread_id`を
+別接続がresumeした場合は候補を重複させず所有権を移す。同じClaude Code `session_id`でも
+別起動なら別候補である。
 
-1. 現在のCodexセッション（有効な場合）
-2. Claude Codeセッション（Keylink Studioへ登録された順）
-
-Claude Codeは`(launch_id, session_id)`を識別子とする。同じ`session_id`でも別起動なら別候補である。
-
-現行Codex Brokerは、表示用には現在追跡中のthreadを1件だけ保持する。このため複数のCodex threadを同時に候補へ残すことは本仕様の対象外であり、Codex候補は最大1件である。Claude Codeは複数起動・複数sessionを候補にできる。
+Codex Session Registryは最大32件のthreadを保持できる。Claude Codeも複数起動・複数sessionを
+候補にできる。上限到達時は、選択中、実行中、approval待ち、input待ちを保護して安全な最古候補を
+退避する。
 
 終了済み、retired、`session_active = false`のsessionは候補に含めない。
 
@@ -67,17 +67,24 @@ Host Link packet形式とFirmware Coreの変更は不要である。アクショ
 SettingsからClaude Codeを追加起動できる。起動ごとにReceiver、token、plugin directory、`launch_id`を分離する。
 停止操作はKeylink Studioが起動したClaude Code連携をまとめてshutdownし、各plugin directoryをcleanupする。
 
+CodexもSettingsから追加起動できる。1つのApp Serverを共有し、各CLI接続のWebSocket、転送task、
+`connection_id`を分離する。UIには現在のCodex CLI接続数を表示し、最大8接続とする。
+
 ## 8. 非対象
 
 - 1つのAIセッションを複数ScreenKeyへ個別割当する機能
 - 複数ScreenKeyへ異なる選択を保持する機能
-- 複数Codex threadを同時に候補として保持する機能
 - ScreenKeyからapproval／inputへ回答する機能
 - Firmwareへsession IDや選択状態を保存する機能
+- 同一Codex threadを複数CLIから同時操作する完全同期
+- 複数ScreenKeyへの個別割り当て
+
+Codex側の接続、所有権、切断猶予、Registry上限は
+[Codex複数セッション対応仕様](codex-multisession-design.md)を参照する。
 
 ## 9. 受け入れ条件
 
-- Codex 1件とClaude Code 1件以上を候補として循環できる
+- 複数Codexと複数Claude Codeを初回有効登録順に循環できる
 - Claude Code同士も登録順に循環できる
 - 非選択候補のeventで表示が奪われない
 - 選択中候補の終了時に次の候補へ移る

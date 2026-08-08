@@ -3,7 +3,10 @@ use std::{
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
     process::Stdio,
-    sync::{mpsc as std_mpsc, Arc, Mutex, RwLock},
+    sync::{
+        atomic::{AtomicU64, AtomicUsize, Ordering},
+        mpsc as std_mpsc, Arc, Mutex, RwLock,
+    },
     thread,
     time::Duration,
 };
@@ -46,6 +49,7 @@ const COMPATIBLE_CODEX_RELEASES: &[(&str, &str)] = &[
 ];
 const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
+pub const MAX_CODEX_CLIENTS: usize = 8;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexAppServerRuntime {
@@ -137,6 +141,8 @@ pub struct CodexBrokerStatus {
     pub broker_port: Option<u16>,
     pub codex_version: Option<String>,
     pub client_connected: bool,
+    pub connected_client_count: usize,
+    pub max_client_count: usize,
     pub cli_connection_command: Option<String>,
     pub last_error: Option<String>,
 }
@@ -149,6 +155,8 @@ impl Default for CodexBrokerStatus {
             broker_port: None,
             codex_version: None,
             client_connected: false,
+            connected_client_count: 0,
+            max_client_count: MAX_CODEX_CLIENTS,
             cli_connection_command: None,
             last_error: None,
         }
@@ -194,6 +202,7 @@ pub struct JsonRpcMetadata {
     pub item_type: Option<String>,
     pub request_id: Option<Value>,
     pub result_thread_id: Option<String>,
+    pub response_is_error: bool,
     pub turn_status: Option<String>,
     pub turn_has_error: bool,
     pub will_retry: Option<bool>,
@@ -409,7 +418,7 @@ async fn manager_loop(
                     }
                     ManagerCommand::Stop(reply) => {
                         let result = if let Some(current) = session.take() {
-                            set_phase(&status, CodexBrokerPhase::Stopping, false, None);
+                            set_phase(&status, CodexBrokerPhase::Stopping, 0, None);
                             stop_session(current).await;
                             set_stopped_status(&status);
                             let _ = event_tx.send(CodexBrokerEvent::Stopped);
@@ -430,12 +439,17 @@ async fn manager_loop(
                             })
                             .and_then(|current| {
                                 let current_status = status.read().unwrap();
-                                if current_status.client_connected {
+                                if current_status.connected_client_count >= MAX_CODEX_CLIENTS {
                                     return Err(CodexBrokerError::InvalidConfig(
-                                        "Codex CLI is already connected".to_string(),
+                                        "Codex CLI connection limit has been reached".to_string(),
                                     ));
                                 }
-                                if current_status.phase != CodexBrokerPhase::WaitingForClient {
+                                if !matches!(
+                                    current_status.phase,
+                                    CodexBrokerPhase::WaitingForClient
+                                        | CodexBrokerPhase::Connected
+                                        | CodexBrokerPhase::Reconnecting
+                                ) {
                                     return Err(CodexBrokerError::InvalidConfig(format!(
                                         "Codex CLI cannot be launched while integration is {:?}",
                                         current_status.phase
@@ -616,6 +630,7 @@ async fn start_session(
         current.phase = CodexBrokerPhase::WaitingForClient;
         current.codex_version = Some(version);
         current.client_connected = false;
+        current.connected_client_count = 0;
         current.cli_connection_command = Some(cli_connection_command);
         current.last_error = None;
     }
@@ -791,8 +806,9 @@ async fn run_broker(
     mut shutdown_rx: oneshot::Receiver<()>,
     args: BrokerRuntimeArgs,
 ) -> Result<(), CodexBrokerError> {
-    let active = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let reconnect_generation = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let reserved_slots = Arc::new(AtomicUsize::new(0));
+    let connected_count = Arc::new(AtomicUsize::new(0));
+    let reconnect_generation = Arc::new(AtomicU64::new(0));
     let (connection_shutdown, _) = broadcast::channel::<()>(1);
     let mut connections = JoinSet::new();
     loop {
@@ -809,7 +825,8 @@ async fn run_broker(
                     client_token: args.client_token.clone(),
                     app_server_token: args.app_server_token.clone(),
                     upstream_timeout: args.upstream_timeout,
-                    active: active.clone(),
+                    reserved_slots: reserved_slots.clone(),
+                    connected_count: connected_count.clone(),
                     reconnect_generation: reconnect_generation.clone(),
                     event_tx: args.event_tx.clone(),
                     status: args.status.clone(),
@@ -856,19 +873,44 @@ struct ConnectionArgs {
     client_token: String,
     app_server_token: String,
     upstream_timeout: Duration,
-    active: Arc<std::sync::atomic::AtomicBool>,
-    reconnect_generation: Arc<std::sync::atomic::AtomicU64>,
+    reserved_slots: Arc<AtomicUsize>,
+    connected_count: Arc<AtomicUsize>,
+    reconnect_generation: Arc<AtomicU64>,
     event_tx: std_mpsc::Sender<CodexBrokerEvent>,
     status: Arc<RwLock<CodexBrokerStatus>>,
     shutdown_rx: broadcast::Receiver<()>,
 }
 
-struct ActiveConnectionGuard(Arc<std::sync::atomic::AtomicBool>);
+struct ConnectionSlotGuard {
+    reserved_slots: Arc<AtomicUsize>,
+    connected_count: Arc<AtomicUsize>,
+    connected: bool,
+}
 
-impl Drop for ActiveConnectionGuard {
-    fn drop(&mut self) {
-        self.0.store(false, std::sync::atomic::Ordering::Release);
+impl ConnectionSlotGuard {
+    fn promote(&mut self) {
+        if !self.connected {
+            self.connected_count.fetch_add(1, Ordering::AcqRel);
+            self.connected = true;
+        }
     }
+}
+
+impl Drop for ConnectionSlotGuard {
+    fn drop(&mut self) {
+        if self.connected {
+            self.connected_count.fetch_sub(1, Ordering::AcqRel);
+        }
+        self.reserved_slots.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+fn try_acquire_client_slot(connected_count: &AtomicUsize) -> bool {
+    connected_count
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            (count < MAX_CODEX_CLIENTS).then_some(count + 1)
+        })
+        .is_ok()
 }
 
 async fn handle_connection(
@@ -892,29 +934,23 @@ async fn handle_connection(
         reject_upgrade(&mut downstream, "401 Unauthorized", "Unauthorized").await;
         return Ok(());
     }
-    if args
-        .active
-        .compare_exchange(
-            false,
-            true,
-            std::sync::atomic::Ordering::AcqRel,
-            std::sync::atomic::Ordering::Acquire,
-        )
-        .is_err()
-    {
+    if !try_acquire_client_slot(&args.reserved_slots) {
         let _ = args
             .event_tx
             .send(CodexBrokerEvent::AdditionalClientRejected);
         reject_upgrade(
             &mut downstream,
             "409 Conflict",
-            "A CLI client is already connected",
+            "Codex CLI connection limit reached",
         )
         .await;
         return Ok(());
     }
-    let _active_guard = ActiveConnectionGuard(args.active.clone());
-
+    let mut slot_guard = ConnectionSlotGuard {
+        reserved_slots: args.reserved_slots.clone(),
+        connected_count: args.connected_count.clone(),
+        connected: false,
+    };
     let mut upstream_request = args
         .upstream_url
         .as_str()
@@ -945,9 +981,13 @@ async fn handle_connection(
     accept_upgrade(&mut downstream, &request.websocket_key).await?;
     let downstream = WebSocketStream::from_raw_socket(downstream, Role::Server, None).await;
     let connection_id = random_identifier()?;
-    args.reconnect_generation
-        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-    set_phase(&args.status, CodexBrokerPhase::Connected, true, None);
+    slot_guard.promote();
+    args.reconnect_generation.fetch_add(1, Ordering::AcqRel);
+    sync_connection_status(
+        &args.status,
+        &args.connected_count,
+        CodexBrokerPhase::WaitingForClient,
+    );
     let _ = args.event_tx.send(CodexBrokerEvent::ClientConnected {
         connection_id: connection_id.clone(),
     });
@@ -959,21 +999,21 @@ async fn handle_connection(
         &mut args.shutdown_rx,
     )
     .await;
-    let reconnecting = origin == "cli";
-    set_phase(
+    drop(slot_guard);
+    let remaining = sync_connection_status(
         &args.status,
-        if reconnecting {
+        &args.connected_count,
+        if origin == "cli" {
             CodexBrokerPhase::Reconnecting
         } else {
             CodexBrokerPhase::WaitingForClient
         },
-        false,
-        None,
     );
+    let reconnecting = origin == "cli" && remaining == 0;
     if reconnecting {
         let generation = args
             .reconnect_generation
-            .fetch_add(1, std::sync::atomic::Ordering::AcqRel)
+            .fetch_add(1, Ordering::AcqRel)
             .wrapping_add(1);
         schedule_waiting_for_client_after_grace(
             args.status.clone(),
@@ -1051,6 +1091,7 @@ fn emit_message_metadata(
             item_type: None,
             request_id: None,
             result_thread_id: None,
+            response_is_error: false,
             turn_status: None,
             turn_has_error: false,
             will_retry: None,
@@ -1191,6 +1232,7 @@ pub fn classify_json_rpc(text: &str) -> JsonRpcMetadata {
             item_type: None,
             request_id: None,
             result_thread_id: None,
+            response_is_error: false,
             turn_status: None,
             turn_has_error: false,
             will_retry: None,
@@ -1231,6 +1273,7 @@ pub fn classify_json_rpc(text: &str) -> JsonRpcMetadata {
         item_type: string_at(&value, &["params", "item", "type"]),
         request_id: scalar_at(&value, &["params", "requestId"]),
         result_thread_id: string_at(&value, &["result", "thread", "id"]),
+        response_is_error: object.contains_key("error"),
         turn_status: string_at(&value, &["params", "turn", "status"]),
         turn_has_error: value_at(&value, &["params", "turn", "error"])
             .is_some_and(|error| !error.is_null()),
@@ -1250,6 +1293,7 @@ fn empty_metadata(kind: JsonRpcKind) -> JsonRpcMetadata {
         item_type: None,
         request_id: None,
         result_thread_id: None,
+        response_is_error: false,
         turn_status: None,
         turn_has_error: false,
         will_retry: None,
@@ -1661,6 +1705,7 @@ fn set_starting_status(status: &Arc<RwLock<CodexBrokerStatus>>, config: &CodexBr
     current.broker_port = Some(config.broker_port);
     current.codex_version = None;
     current.client_connected = false;
+    current.connected_client_count = 0;
     current.cli_connection_command = None;
     current.last_error = None;
 }
@@ -1673,24 +1718,49 @@ fn set_error_status(status: &Arc<RwLock<CodexBrokerStatus>>, detail: String) {
     let mut current = status.write().unwrap();
     current.phase = CodexBrokerPhase::Error;
     current.client_connected = false;
+    current.connected_client_count = 0;
     current.last_error = Some(detail);
 }
 
 fn set_phase(
     status: &Arc<RwLock<CodexBrokerStatus>>,
     phase: CodexBrokerPhase,
-    connected: bool,
+    connected_client_count: usize,
     error: Option<String>,
 ) {
     let mut current = status.write().unwrap();
     current.phase = phase;
-    current.client_connected = connected;
+    current.connected_client_count = connected_client_count;
+    current.client_connected = connected_client_count > 0;
     current.last_error = error;
+}
+
+fn sync_connection_status(
+    status: &Arc<RwLock<CodexBrokerStatus>>,
+    connected_count: &AtomicUsize,
+    no_client_phase: CodexBrokerPhase,
+) -> usize {
+    let mut current = status.write().unwrap();
+    let count = connected_count.load(Ordering::Acquire);
+    if matches!(
+        current.phase,
+        CodexBrokerPhase::Stopping | CodexBrokerPhase::Error
+    ) {
+        return count;
+    }
+    current.phase = if count > 0 {
+        CodexBrokerPhase::Connected
+    } else {
+        no_client_phase
+    };
+    current.connected_client_count = count;
+    current.client_connected = count > 0;
+    count
 }
 
 fn schedule_waiting_for_client_after_grace(
     status: Arc<RwLock<CodexBrokerStatus>>,
-    reconnect_generation: Arc<std::sync::atomic::AtomicU64>,
+    reconnect_generation: Arc<AtomicU64>,
     generation: u64,
 ) {
     tokio::spawn(async move {
@@ -1701,11 +1771,11 @@ fn schedule_waiting_for_client_after_grace(
 
 fn complete_reconnect_grace(
     status: &Arc<RwLock<CodexBrokerStatus>>,
-    reconnect_generation: &std::sync::atomic::AtomicU64,
+    reconnect_generation: &AtomicU64,
     generation: u64,
 ) {
     let mut current = status.write().unwrap();
-    if reconnect_generation.load(std::sync::atomic::Ordering::Acquire) == generation
+    if reconnect_generation.load(Ordering::Acquire) == generation
         && current.phase == CodexBrokerPhase::Reconnecting
     {
         current.phase = CodexBrokerPhase::WaitingForClient;
@@ -1717,7 +1787,15 @@ mod tests {
     use super::{
         classify_json_rpc, compatible_codex_versions, compatible_schema_sha256,
         complete_reconnect_grace, make_cli_connection_command, select_codex_executable,
-        CodexBrokerPhase, CodexBrokerStatus, SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256,
+        try_acquire_client_slot, BrokerRuntimeArgs, CodexBrokerEvent, CodexBrokerPhase,
+        CodexBrokerStatus, JsonRpcKind, MAX_CODEX_CLIENTS, SUPPORTED_CODEX_VERSION,
+        SUPPORTED_SCHEMA_SHA256,
+    };
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::{net::TcpListener, sync::oneshot, time};
+    use tokio_tungstenite::{
+        accept_async, connect_async,
+        tungstenite::{client::IntoClientRequest, protocol::Message},
     };
 
     #[test]
@@ -1746,12 +1824,234 @@ mod tests {
         assert_eq!(metadata.item_id.as_deref(), Some("item-a"));
         assert_eq!(metadata.item_type.as_deref(), Some("webSearch"));
     }
+
+    #[test]
+    fn broker_accepts_eight_slots_and_rejects_the_ninth() {
+        let count = AtomicUsize::new(0);
+        for expected in 1..=MAX_CODEX_CLIENTS {
+            assert!(try_acquire_client_slot(&count));
+            assert_eq!(count.load(Ordering::Acquire), expected);
+        }
+        assert!(!try_acquire_client_slot(&count));
+        assert_eq!(count.load(Ordering::Acquire), MAX_CODEX_CLIENTS);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn broker_keeps_two_authenticated_connections_isolated() {
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = upstream_listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let Ok(mut socket) = accept_async(socket).await else {
+                        return;
+                    };
+                    while let Some(Ok(message)) = socket.next().await {
+                        let closed = message.is_close();
+                        if socket.send(message).await.is_err() || closed {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let broker_addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let status = Arc::new(RwLock::new(CodexBrokerStatus::default()));
+        let broker_status = status.clone();
+        let broker = tokio::spawn(super::run_broker(
+            listener,
+            shutdown_rx,
+            BrokerRuntimeArgs {
+                upstream_url: format!("ws://{upstream_addr}"),
+                client_token: "client-token".to_string(),
+                app_server_token: "upstream-token".to_string(),
+                upstream_timeout: Duration::from_secs(2),
+                event_tx,
+                status: broker_status,
+            },
+        ));
+
+        let connect = |name: &'static str| async move {
+            let mut request = format!("ws://{broker_addr}").into_client_request().unwrap();
+            request
+                .headers_mut()
+                .insert("authorization", "Bearer client-token".parse().unwrap());
+            let (socket, _) = connect_async(request).await.unwrap();
+            (name, socket)
+        };
+        let ((_, mut first), (_, mut second)) = tokio::join!(connect("a"), connect("b"));
+        first
+            .send(Message::Text(
+                r#"{"jsonrpc":"2.0","id":1,"method":"first"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        second
+            .send(Message::Text(
+                r#"{"jsonrpc":"2.0","id":1,"method":"second"}"#.into(),
+            ))
+            .await
+            .unwrap();
+        assert!(first
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap()
+            .contains("first"));
+        assert!(second
+            .next()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_text()
+            .unwrap()
+            .contains("second"));
+
+        let mut connection_ids = std::collections::HashSet::new();
+        let mut methods_by_connection = std::collections::HashMap::new();
+        while connection_ids.len() < 2 || methods_by_connection.len() < 2 {
+            match event_rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+                CodexBrokerEvent::ClientConnected { connection_id } => {
+                    connection_ids.insert(connection_id);
+                }
+                CodexBrokerEvent::Message {
+                    connection_id,
+                    metadata,
+                    ..
+                } if metadata.kind == JsonRpcKind::Request => {
+                    methods_by_connection.insert(connection_id, metadata.method.clone());
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(methods_by_connection.len(), 2);
+        assert!(methods_by_connection
+            .values()
+            .any(|method| method.as_deref() == Some("first")));
+        assert!(methods_by_connection
+            .values()
+            .any(|method| method.as_deref() == Some("second")));
+        assert_eq!(status.read().unwrap().connected_client_count, 2);
+        assert!(status.read().unwrap().client_connected);
+
+        first.close(None).await.unwrap();
+        time::timeout(Duration::from_secs(2), async {
+            loop {
+                if status.read().unwrap().connected_client_count == 1 {
+                    break;
+                }
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(status.read().unwrap().phase, CodexBrokerPhase::Connected);
+        assert!(status.read().unwrap().client_connected);
+
+        let _ = shutdown_tx.send(());
+        broker.await.unwrap().unwrap();
+        time::timeout(Duration::from_secs(2), second.next())
+            .await
+            .expect("active downstream task did not stop with Broker");
+        upstream.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn broker_accepts_eight_websocket_clients_and_rejects_the_ninth_with_conflict() {
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let upstream = tokio::spawn(async move {
+            loop {
+                let Ok((socket, _)) = upstream_listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let Ok(mut socket) = accept_async(socket).await else {
+                        return;
+                    };
+                    while let Some(Ok(message)) = socket.next().await {
+                        if message.is_close() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let broker_addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (event_tx, _event_rx) = std::sync::mpsc::channel();
+        let status = Arc::new(RwLock::new(CodexBrokerStatus::default()));
+        let broker = tokio::spawn(super::run_broker(
+            listener,
+            shutdown_rx,
+            BrokerRuntimeArgs {
+                upstream_url: format!("ws://{upstream_addr}"),
+                client_token: "client-token".to_string(),
+                app_server_token: "upstream-token".to_string(),
+                upstream_timeout: Duration::from_secs(2),
+                event_tx,
+                status: status.clone(),
+            },
+        ));
+
+        let mut clients = Vec::new();
+        for _ in 0..MAX_CODEX_CLIENTS {
+            let mut request = format!("ws://{broker_addr}").into_client_request().unwrap();
+            request
+                .headers_mut()
+                .insert("authorization", "Bearer client-token".parse().unwrap());
+            clients.push(connect_async(request).await.unwrap().0);
+        }
+        time::timeout(Duration::from_secs(2), async {
+            loop {
+                if status.read().unwrap().connected_client_count == MAX_CODEX_CLIENTS {
+                    break;
+                }
+                time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+
+        let mut ninth_request = format!("ws://{broker_addr}").into_client_request().unwrap();
+        ninth_request
+            .headers_mut()
+            .insert("authorization", "Bearer client-token".parse().unwrap());
+        let rejection = connect_async(ninth_request)
+            .await
+            .expect_err("ninth client must be rejected");
+        assert!(matches!(
+            rejection,
+            tokio_tungstenite::tungstenite::Error::Http(response) if response.status() == 409
+        ));
+        assert_eq!(
+            status.read().unwrap().connected_client_count,
+            MAX_CODEX_CLIENTS
+        );
+
+        let _ = shutdown_tx.send(());
+        broker.await.unwrap().unwrap();
+        drop(clients);
+        upstream.abort();
+    }
     use std::{
         path::{Path, PathBuf},
         sync::{
-            atomic::{AtomicU64, Ordering},
+            atomic::{AtomicU64, AtomicUsize, Ordering},
             Arc, RwLock,
         },
+        time::Duration,
     };
 
     #[test]

@@ -85,7 +85,9 @@ pub struct AppState {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AiDisplayTarget {
-    Codex,
+    Codex {
+        thread_id: String,
+    },
     Claude {
         launch_id: String,
         session_id: String,
@@ -95,7 +97,9 @@ pub enum AiDisplayTarget {
 impl AiDisplayTarget {
     pub fn label(&self) -> String {
         match self {
-            Self::Codex => "Codex".to_string(),
+            Self::Codex { thread_id } => {
+                format!("Codex {}", thread_id.chars().take(8).collect::<String>())
+            }
             Self::Claude { session_id, .. } => format!("Claude Code {session_id}"),
         }
     }
@@ -105,6 +109,8 @@ impl AiDisplayTarget {
 pub struct AiDisplayCandidate {
     pub target: AiDisplayTarget,
     pub snapshot: AiClientStateSnapshot,
+    /// First successful registration order across all AI client types.
+    pub registration_order: u64,
 }
 
 #[derive(Debug, Default)]
@@ -121,6 +127,8 @@ impl AiDisplaySelection {
                 .iter()
                 .position(|candidate| &candidate.target == selected)
         });
+        let mut candidates = candidates;
+        candidates.sort_by_key(|candidate| candidate.registration_order);
         let next = self
             .selected
             .as_ref()
@@ -349,6 +357,7 @@ mod tests {
                 work_phase: AiWorkPhase::Unspecified,
                 revision,
             },
+            registration_order: u64::from(revision),
         }
     }
 
@@ -359,12 +368,18 @@ mod tests {
         }
     }
 
+    fn codex(thread_id: &str) -> AiDisplayTarget {
+        AiDisplayTarget::Codex {
+            thread_id: thread_id.to_string(),
+        }
+    }
+
     #[test]
     fn adding_a_candidate_does_not_steal_the_current_selection() {
         let mut selection = AiDisplaySelection::default();
         selection.update_candidates(vec![candidate(claude("one"), 1)]);
         selection.update_candidates(vec![
-            candidate(AiDisplayTarget::Codex, 2),
+            candidate(codex("codex-one"), 2),
             candidate(claude("one"), 1),
         ]);
 
@@ -375,7 +390,7 @@ mod tests {
     fn removing_the_selected_candidate_advances_from_its_old_position() {
         let mut selection = AiDisplaySelection::default();
         selection.update_candidates(vec![
-            candidate(AiDisplayTarget::Codex, 1),
+            candidate(codex("codex-one"), 1),
             candidate(claude("one"), 2),
             candidate(claude("two"), 3),
         ]);
@@ -383,9 +398,103 @@ mod tests {
         assert_eq!(selection.selected_target(), Some(&claude("one")));
 
         selection.update_candidates(vec![
-            candidate(AiDisplayTarget::Codex, 1),
+            candidate(codex("codex-one"), 1),
             candidate(claude("two"), 3),
         ]);
         assert_eq!(selection.selected_target(), Some(&claude("two")));
+    }
+
+    #[test]
+    fn candidates_cycle_in_cross_client_registration_order() {
+        let mut selection = AiDisplaySelection::default();
+        selection.update_candidates(vec![candidate(claude("one"), 1)]);
+        selection.update_candidates(vec![
+            candidate(codex("codex-one"), 2),
+            candidate(claude("one"), 1),
+        ]);
+        selection.update_candidates(vec![
+            candidate(codex("codex-one"), 2),
+            candidate(codex("codex-two"), 3),
+            candidate(claude("one"), 1),
+            candidate(claude("two"), 4),
+        ]);
+
+        assert_eq!(selection.selected_target(), Some(&claude("one")));
+        assert_eq!(selection.cycle(), Some(codex("codex-one")));
+        assert_eq!(selection.cycle(), Some(codex("codex-two")));
+        assert_eq!(selection.cycle(), Some(claude("two")));
+        assert_eq!(selection.cycle(), Some(claude("one")));
+    }
+
+    #[test]
+    fn first_batch_uses_shared_registration_order_not_client_type_order() {
+        let mut selection = AiDisplaySelection::default();
+        selection.update_candidates(vec![
+            candidate(codex("codex-first-in_input"), 2),
+            candidate(claude("claude-registered-first"), 1),
+        ]);
+
+        assert_eq!(
+            selection.selected_target(),
+            Some(&claude("claude-registered-first"))
+        );
+        assert_eq!(selection.cycle(), Some(codex("codex-first-in_input")));
+    }
+
+    #[test]
+    fn reactivated_candidate_returns_to_its_original_registration_position() {
+        let mut selection = AiDisplaySelection::default();
+        selection.update_candidates(vec![candidate(claude("a"), 1), candidate(claude("b"), 2)]);
+        // B temporarily leaves the active candidates, while later sessions
+        // become active. A resumed B must retain its original position.
+        selection.update_candidates(vec![candidate(claude("a"), 1)]);
+        selection.update_candidates(vec![
+            candidate(claude("a"), 1),
+            candidate(codex("c"), 3),
+            candidate(codex("d"), 4),
+        ]);
+        selection.update_candidates(vec![
+            candidate(claude("a"), 1),
+            candidate(claude("b"), 2),
+            candidate(codex("c"), 3),
+            candidate(codex("d"), 4),
+        ]);
+
+        assert_eq!(selection.selected_target(), Some(&claude("a")));
+        assert_eq!(selection.cycle(), Some(claude("b")));
+        assert_eq!(selection.cycle(), Some(codex("c")));
+        assert_eq!(selection.cycle(), Some(codex("d")));
+        assert_eq!(selection.cycle(), Some(claude("a")));
+    }
+
+    #[test]
+    fn updating_a_non_selected_candidate_does_not_change_selection() {
+        let mut selection = AiDisplaySelection::default();
+        selection.update_candidates(vec![
+            candidate(codex("codex-one"), 1),
+            candidate(codex("codex-two"), 2),
+        ]);
+        selection.update_candidates(vec![
+            candidate(codex("codex-one"), 1),
+            candidate(codex("codex-two"), 99),
+        ]);
+
+        assert_eq!(selection.selected_target(), Some(&codex("codex-one")));
+        assert_eq!(selection.selected_snapshot().unwrap().revision, 1);
+    }
+
+    #[test]
+    fn zero_and_one_candidate_are_safe_to_cycle() {
+        let mut selection = AiDisplaySelection::default();
+        assert_eq!(selection.cycle(), None);
+        assert_eq!(selection.selected_target(), None);
+
+        let only = codex("codex-one");
+        selection.update_candidates(vec![candidate(only.clone(), 1)]);
+        assert_eq!(selection.cycle(), Some(only.clone()));
+        assert_eq!(selection.cycle(), Some(only));
+
+        selection.update_candidates(Vec::new());
+        assert_eq!(selection.selected_target(), None);
     }
 }

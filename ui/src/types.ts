@@ -133,6 +133,8 @@ export interface CodexBrokerStatus {
   broker_port: number | null;
   codex_version: string | null;
   client_connected: boolean;
+  connected_client_count: number;
+  max_client_count: number;
   cli_connection_command: string | null;
   last_error: string | null;
 }

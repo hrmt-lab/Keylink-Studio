@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     sync::{mpsc, Arc, Mutex, RwLock},
     thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -12,6 +12,7 @@ use crate::{
     codex_broker::{
         BrokerDirection, CodexBrokerEvent, CodexBrokerManager, JsonRpcKind, JsonRpcMetadata,
     },
+    next_ai_session_registration_order,
     packet::{AiActivityState, AiClientType, AiClientVariant, AiWorkPhase},
 };
 
@@ -20,6 +21,7 @@ const COMPLETED_DISPLAY_DURATION: Duration = Duration::from_secs(30);
 const THINKING_STABILITY: Duration = Duration::from_millis(150);
 const EXECUTION_RETURN_STABILITY: Duration = Duration::from_millis(250);
 const MAX_PENDING_CHANGES: usize = 64;
+pub const MAX_CODEX_SESSIONS: usize = 32;
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -50,6 +52,21 @@ pub struct AiClientStateSnapshot {
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 pub struct AiClientStateChange {
+    pub state: AiClientStateSnapshot,
+    pub reason: AiClientStateChangeReason,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CodexSessionSnapshot {
+    pub thread_id: String,
+    pub owner_connection_id: String,
+    pub registration_order: u64,
+    pub state: AiClientStateSnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct CodexStateChange {
+    pub thread_id: String,
     pub state: AiClientStateSnapshot,
     pub reason: AiClientStateChangeReason,
 }
@@ -91,6 +108,7 @@ enum AiClientEvent {
     },
     RequestResolved {
         key: String,
+        thread_id: String,
     },
     ItemStarted {
         thread_id: String,
@@ -252,7 +270,7 @@ impl AiClientStateReducer {
                     AiClientStateChangeReason::RequestStarted,
                 )]
             }
-            AiClientEvent::RequestResolved { key } => {
+            AiClientEvent::RequestResolved { key, .. } => {
                 if self.requests.remove(&key).is_none() {
                     return Vec::new();
                 }
@@ -523,7 +541,10 @@ pub struct CodexEventAdapter {
     connection_id: Option<String>,
     confirmed_thread_id: Option<String>,
     announced_thread_id: Option<String>,
+    owned_thread_ids: HashSet<String>,
     client_requests: HashMap<String, PendingClientRequest>,
+    pending_turn_starts: HashMap<String, String>,
+    authorized_unknown_turn_threads: HashSet<String>,
     server_requests: HashMap<String, PendingServerRequest>,
 }
 
@@ -533,7 +554,10 @@ impl CodexEventAdapter {
             CodexBrokerEvent::ClientConnected { connection_id } => {
                 self.connection_id = Some(connection_id);
                 self.announced_thread_id = None;
+                self.owned_thread_ids.clear();
                 self.client_requests.clear();
+                self.pending_turn_starts.clear();
+                self.authorized_unknown_turn_threads.clear();
                 self.server_requests.clear();
                 Vec::new()
             }
@@ -543,7 +567,10 @@ impl CodexEventAdapter {
             } if self.connection_id.as_deref() == Some(connection_id.as_str()) => {
                 self.connection_id = None;
                 self.announced_thread_id = None;
+                self.owned_thread_ids.clear();
                 self.client_requests.clear();
+                self.pending_turn_starts.clear();
+                self.authorized_unknown_turn_threads.clear();
                 self.server_requests.clear();
                 if origin == "cli" {
                     vec![AiClientEvent::ClientDisconnected]
@@ -558,11 +585,18 @@ impl CodexEventAdapter {
             } if self.connection_id.as_deref() == Some(connection_id.as_str()) => {
                 self.adapt_message(direction, *metadata)
             }
-            CodexBrokerEvent::Stopped | CodexBrokerEvent::Error { .. } => {
+            CodexBrokerEvent::Stopped
+            | CodexBrokerEvent::Error {
+                component: "lifecycle",
+                ..
+            } => {
                 self.connection_id = None;
                 self.confirmed_thread_id = None;
                 self.announced_thread_id = None;
+                self.owned_thread_ids.clear();
                 self.client_requests.clear();
+                self.pending_turn_starts.clear();
+                self.authorized_unknown_turn_threads.clear();
                 self.server_requests.clear();
                 vec![AiClientEvent::SessionEnded]
             }
@@ -588,9 +622,7 @@ impl CodexEventAdapter {
             };
             match metadata.method.as_deref() {
                 Some("thread/start") => {
-                    self.confirmed_thread_id = None;
                     self.announced_thread_id = None;
-                    self.server_requests.clear();
                     self.client_requests
                         .insert(key, PendingClientRequest::ThreadStart);
                     return vec![AiClientEvent::SessionRequested {
@@ -600,7 +632,6 @@ impl CodexEventAdapter {
                 Some("thread/resume") => {
                     if let Some(thread_id) = metadata.thread_id {
                         self.announced_thread_id = None;
-                        self.server_requests.clear();
                         self.client_requests.insert(
                             key,
                             PendingClientRequest::ThreadResume {
@@ -616,6 +647,11 @@ impl CodexEventAdapter {
                     self.client_requests
                         .insert(key, PendingClientRequest::ThreadFork);
                 }
+                Some("turn/start") => {
+                    if let Some(thread_id) = metadata.thread_id {
+                        self.pending_turn_starts.insert(key, thread_id);
+                    }
+                }
                 _ => {}
             }
             return Vec::new();
@@ -626,10 +662,13 @@ impl CodexEventAdapter {
         let Some(key) = metadata.id.as_ref().and_then(rpc_key) else {
             return Vec::new();
         };
-        if self.server_requests.remove(&key).is_some() {
-            return vec![AiClientEvent::RequestResolved { key }];
+        if let Some(request) = self.server_requests.remove(&key) {
+            return vec![AiClientEvent::RequestResolved {
+                key,
+                thread_id: request.thread_id,
+            }];
         }
-        self.handle_thread_response(key, metadata)
+        Vec::new()
     }
 
     fn handle_thread_response(
@@ -640,21 +679,16 @@ impl CodexEventAdapter {
         let Some(request) = self.client_requests.remove(&key) else {
             return Vec::new();
         };
+        // This is an App Server -> CLI response, so it is the terminal result
+        // for the matching client request even if it is an error response
+        // without `result.thread.id`.
         let Some(result_thread_id) = metadata.result_thread_id else {
             return Vec::new();
         };
-        if self
-            .announced_thread_id
-            .as_deref()
-            .is_some_and(|announced| announced != result_thread_id)
-        {
-            self.confirmed_thread_id = None;
-            self.announced_thread_id = None;
-            return vec![AiClientEvent::SessionEnded];
-        }
         match request {
             PendingClientRequest::ThreadStart => {
                 self.confirmed_thread_id = Some(result_thread_id.clone());
+                self.owned_thread_ids.insert(result_thread_id.clone());
                 vec![AiClientEvent::SessionStarted {
                     thread_id: result_thread_id,
                 }]
@@ -663,6 +697,7 @@ impl CodexEventAdapter {
                 requested_thread_id,
             } if requested_thread_id == result_thread_id => {
                 self.confirmed_thread_id = Some(result_thread_id.clone());
+                self.owned_thread_ids.insert(result_thread_id.clone());
                 vec![AiClientEvent::SessionStarted {
                     thread_id: result_thread_id,
                 }]
@@ -674,6 +709,7 @@ impl CodexEventAdapter {
             PendingClientRequest::ThreadFork => {
                 self.confirmed_thread_id = Some(result_thread_id.clone());
                 self.announced_thread_id = None;
+                self.owned_thread_ids.insert(result_thread_id.clone());
                 vec![AiClientEvent::SessionForked {
                     thread_id: result_thread_id,
                 }]
@@ -686,6 +722,12 @@ impl CodexEventAdapter {
             let Some(key) = metadata.id.as_ref().and_then(rpc_key) else {
                 return Vec::new();
             };
+            if let Some(thread_id) = self.pending_turn_starts.remove(&key) {
+                if !metadata.response_is_error {
+                    self.authorized_unknown_turn_threads.insert(thread_id);
+                }
+                return Vec::new();
+            }
             return self.handle_thread_response(key, metadata);
         }
         match (metadata.kind, metadata.method.as_deref()) {
@@ -693,32 +735,37 @@ impl CodexEventAdapter {
                 let Some(thread_id) = metadata.thread_id else {
                     return Vec::new();
                 };
-                if let Some(confirmed) = self.confirmed_thread_id.as_deref() {
-                    if confirmed != thread_id {
-                        // `/side` (`/btw`) creates another, ephemeral thread while
-                        // the parent remains active. Its notification must not end
-                        // the ScreenKey session tracked for that parent. Explicit
-                        // `thread/start` / `thread/resume` responses are the only
-                        // session-replacement boundary.
-                        return Vec::new();
-                    }
-                } else {
-                    self.announced_thread_id = Some(thread_id);
-                }
+                // App Server notifications are broadcast to all WebSocket clients.
+                // A request/response pair on this connection is the ownership proof.
+                let _ = thread_id;
                 Vec::new()
             }
             (JsonRpcKind::Notification, Some("turn/started"))
                 if metadata.turn_status.as_deref() == Some("inProgress") =>
             {
-                self.server_requests.clear();
                 match (metadata.thread_id, metadata.turn_id) {
                     (Some(thread_id), Some(turn_id)) => {
+                        let is_known_owner = self.owned_thread_ids.contains(&thread_id);
+                        let is_authorized_unknown =
+                            self.authorized_unknown_turn_threads.remove(&thread_id);
+                        if !is_known_owner && !is_authorized_unknown {
+                            return Vec::new();
+                        }
+                        self.server_requests.retain(|_, request| {
+                            request.thread_id != thread_id
+                                || request.turn_id.as_deref() == Some(turn_id.as_str())
+                        });
                         // `/side` can return to its parent without issuing a
                         // `thread/resume` request. The next turn on either the
                         // parent or fork is therefore the authoritative display
                         // focus. Switch without emitting NONE, then apply the turn.
                         let mut events = Vec::new();
-                        if self.confirmed_thread_id.as_deref() != Some(thread_id.as_str()) {
+                        if !is_known_owner {
+                            self.owned_thread_ids.insert(thread_id.clone());
+                            events.push(AiClientEvent::SessionStarted {
+                                thread_id: thread_id.clone(),
+                            });
+                        } else if self.confirmed_thread_id.as_deref() != Some(thread_id.as_str()) {
                             self.confirmed_thread_id = Some(thread_id.clone());
                             events.push(AiClientEvent::SessionForked {
                                 thread_id: thread_id.clone(),
@@ -742,6 +789,9 @@ impl CodexEventAdapter {
                 };
                 match (metadata.thread_id, metadata.turn_id, outcome) {
                     (Some(thread_id), Some(turn_id), Some(outcome)) => {
+                        if !self.owned_thread_ids.contains(&thread_id) {
+                            return Vec::new();
+                        }
                         self.server_requests.retain(|_, request| {
                             request.thread_id != thread_id
                                 || request.turn_id.as_deref() != Some(turn_id.as_str())
@@ -764,6 +814,9 @@ impl CodexEventAdapter {
                 ) else {
                     return Vec::new();
                 };
+                if !self.owned_thread_ids.contains(&thread_id) {
+                    return Vec::new();
+                }
                 vec![AiClientEvent::ItemStarted {
                     thread_id,
                     turn_id,
@@ -777,6 +830,9 @@ impl CodexEventAdapter {
                 else {
                     return Vec::new();
                 };
+                if !self.owned_thread_ids.contains(&thread_id) {
+                    return Vec::new();
+                }
                 vec![AiClientEvent::ItemCompleted {
                     thread_id,
                     turn_id,
@@ -798,6 +854,9 @@ impl CodexEventAdapter {
                 ) else {
                     return Vec::new();
                 };
+                if !self.owned_thread_ids.contains(&thread_id) {
+                    return Vec::new();
+                }
                 if method == "item/tool/requestUserInput" && metadata.turn_id.is_none() {
                     return Vec::new();
                 }
@@ -824,8 +883,13 @@ impl CodexEventAdapter {
                 let Some(key) = metadata.request_id.as_ref().and_then(rpc_key) else {
                     return Vec::new();
                 };
-                self.server_requests.remove(&key);
-                vec![AiClientEvent::RequestResolved { key }]
+                let Some(request) = self.server_requests.remove(&key) else {
+                    return Vec::new();
+                };
+                vec![AiClientEvent::RequestResolved {
+                    key,
+                    thread_id: request.thread_id,
+                }]
             }
             // `error` notifications remain diagnostic metadata. They do not end a Turn.
             _ => Vec::new(),
@@ -833,41 +897,328 @@ impl CodexEventAdapter {
     }
 }
 
+struct CodexSessionEntry {
+    owner_connection_id: String,
+    registration_order: u64,
+    reducer: AiClientStateReducer,
+}
+
+pub struct CodexSessionRegistry {
+    sessions: HashMap<String, CodexSessionEntry>,
+    order: Vec<String>,
+    next_revision: u16,
+    selected_thread_id: Option<String>,
+}
+
+impl Default for CodexSessionRegistry {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl CodexSessionRegistry {
+    pub fn new() -> Self {
+        Self {
+            sessions: HashMap::new(),
+            order: Vec::new(),
+            next_revision: initial_revision(),
+            selected_thread_id: None,
+        }
+    }
+
+    pub fn snapshots(&self) -> Vec<CodexSessionSnapshot> {
+        self.order
+            .iter()
+            .filter_map(|thread_id| {
+                self.sessions
+                    .get(thread_id)
+                    .map(|entry| CodexSessionSnapshot {
+                        thread_id: thread_id.clone(),
+                        owner_connection_id: entry.owner_connection_id.clone(),
+                        registration_order: entry.registration_order,
+                        state: entry.reducer.snapshot(),
+                    })
+            })
+            .collect()
+    }
+
+    pub fn set_selected_thread(&mut self, thread_id: Option<String>) {
+        self.selected_thread_id = thread_id;
+    }
+
+    fn apply(
+        &mut self,
+        connection_id: &str,
+        event: AiClientEvent,
+        now: Instant,
+    ) -> Vec<CodexStateChange> {
+        if let AiClientEvent::SessionStarted { thread_id }
+        | AiClientEvent::SessionForked { thread_id } = &event
+        {
+            if !self.sessions.contains_key(thread_id) && !self.make_room() {
+                tracing::warn!(thread_id, "Codex session registry limit reached");
+                return Vec::new();
+            }
+            if !self.sessions.contains_key(thread_id) {
+                let revision = self.allocate_revision();
+                self.sessions.insert(
+                    thread_id.clone(),
+                    CodexSessionEntry {
+                        owner_connection_id: connection_id.to_string(),
+                        registration_order: next_ai_session_registration_order(),
+                        reducer: AiClientStateReducer::with_initial_revision(revision),
+                    },
+                );
+                self.order.push(thread_id.clone());
+            } else {
+                let entry = self.sessions.get_mut(thread_id).expect("checked above");
+                if entry.owner_connection_id != connection_id {
+                    tracing::info!(
+                        thread_id,
+                        old_connection_id = %entry.owner_connection_id,
+                        new_connection_id = connection_id,
+                        "Codex thread ownership transferred"
+                    );
+                    entry.owner_connection_id = connection_id.to_string();
+                }
+            }
+        }
+
+        let Some(thread_id) = semantic_thread_id(&event).map(str::to_string) else {
+            return Vec::new();
+        };
+        let Some(entry) = self.sessions.get_mut(&thread_id) else {
+            return Vec::new();
+        };
+        if entry.owner_connection_id != connection_id {
+            tracing::warn!(thread_id, connection_id, "ignored non-owner Codex event");
+            return Vec::new();
+        }
+        entry
+            .reducer
+            .apply(event, now)
+            .into_iter()
+            .map(|change| CodexStateChange {
+                thread_id: thread_id.clone(),
+                state: change.state,
+                reason: change.reason,
+            })
+            .collect()
+    }
+
+    fn disconnect(
+        &mut self,
+        connection_id: &str,
+        graceful: bool,
+        now: Instant,
+    ) -> Vec<CodexStateChange> {
+        let owned: Vec<String> = self
+            .order
+            .iter()
+            .filter(|thread_id| {
+                self.sessions
+                    .get(*thread_id)
+                    .is_some_and(|entry| entry.owner_connection_id == connection_id)
+            })
+            .cloned()
+            .collect();
+        let changes = owned
+            .iter()
+            .cloned()
+            .into_iter()
+            .flat_map(|thread_id| {
+                let entry = self.sessions.get_mut(&thread_id).expect("collected above");
+                let event = if graceful {
+                    AiClientEvent::ClientDisconnected
+                } else {
+                    AiClientEvent::SessionEnded
+                };
+                entry
+                    .reducer
+                    .apply(event, now)
+                    .into_iter()
+                    .map(move |change| CodexStateChange {
+                        thread_id: thread_id.clone(),
+                        state: change.state,
+                        reason: change.reason,
+                    })
+            })
+            .collect();
+        if !graceful {
+            for thread_id in &owned {
+                self.sessions.remove(thread_id);
+            }
+            self.order.retain(|thread_id| !owned.contains(thread_id));
+        }
+        changes
+    }
+
+    fn end_all(&mut self, now: Instant) -> Vec<CodexStateChange> {
+        let keys = self.order.clone();
+        let mut changes = Vec::new();
+        for thread_id in keys {
+            let Some(entry) = self.sessions.get_mut(&thread_id) else {
+                continue;
+            };
+            changes.extend(
+                entry
+                    .reducer
+                    .apply(AiClientEvent::SessionEnded, now)
+                    .into_iter()
+                    .map(|change| CodexStateChange {
+                        thread_id: thread_id.clone(),
+                        state: change.state,
+                        reason: change.reason,
+                    }),
+            );
+        }
+        self.sessions.clear();
+        self.order.clear();
+        changes
+    }
+
+    fn tick(&mut self, now: Instant) -> Vec<CodexStateChange> {
+        let mut changes = Vec::new();
+        let mut retired = Vec::new();
+        for thread_id in &self.order {
+            let Some(entry) = self.sessions.get_mut(thread_id) else {
+                continue;
+            };
+            for change in entry.reducer.tick(now) {
+                if change.reason == AiClientStateChangeReason::SessionEnded {
+                    retired.push(thread_id.clone());
+                }
+                changes.push(CodexStateChange {
+                    thread_id: thread_id.clone(),
+                    state: change.state,
+                    reason: change.reason,
+                });
+            }
+        }
+        for thread_id in retired {
+            self.sessions.remove(&thread_id);
+            self.order.retain(|candidate| candidate != &thread_id);
+        }
+        changes
+    }
+
+    fn make_room(&mut self) -> bool {
+        if self.sessions.len() < MAX_CODEX_SESSIONS {
+            return true;
+        }
+        let candidate = self.order.iter().find(|thread_id| {
+            self.selected_thread_id.as_ref() != Some(*thread_id)
+                && self.sessions.get(*thread_id).is_some_and(|entry| {
+                    !matches!(
+                        entry.reducer.snapshot().activity_state,
+                        AiActivityState::Working
+                            | AiActivityState::WaitingApproval
+                            | AiActivityState::WaitingInput
+                    )
+                })
+        });
+        let Some(candidate) = candidate.cloned() else {
+            return false;
+        };
+        self.sessions.remove(&candidate);
+        self.order.retain(|thread_id| thread_id != &candidate);
+        true
+    }
+
+    fn allocate_revision(&mut self) -> u16 {
+        let revision = self.next_revision;
+        self.next_revision = self.next_revision.wrapping_add(1);
+        revision
+    }
+}
+
+fn semantic_thread_id(event: &AiClientEvent) -> Option<&str> {
+    match event {
+        AiClientEvent::SessionStarted { thread_id }
+        | AiClientEvent::SessionForked { thread_id }
+        | AiClientEvent::TurnStarted { thread_id, .. }
+        | AiClientEvent::RequestStarted { thread_id, .. }
+        | AiClientEvent::RequestResolved { thread_id, .. }
+        | AiClientEvent::ItemStarted { thread_id, .. }
+        | AiClientEvent::ItemCompleted { thread_id, .. }
+        | AiClientEvent::TurnFinished { thread_id, .. } => Some(thread_id),
+        AiClientEvent::SessionRequested { .. }
+        | AiClientEvent::ClientDisconnected
+        | AiClientEvent::SessionEnded => None,
+    }
+}
+
 pub struct CodexActivityRuntime {
-    snapshot: Arc<RwLock<AiClientStateSnapshot>>,
-    changes: Arc<Mutex<VecDeque<AiClientStateChange>>>,
+    snapshots: Arc<RwLock<Vec<CodexSessionSnapshot>>>,
+    changes: Arc<Mutex<VecDeque<CodexStateChange>>>,
+    selected_thread_id: Arc<RwLock<Option<String>>>,
     stop_tx: mpsc::Sender<()>,
     worker: Option<thread::JoinHandle<()>>,
 }
 
 impl CodexActivityRuntime {
     pub fn start(broker: CodexBrokerManager) -> Self {
-        let reducer = AiClientStateReducer::new_codex_cli();
-        let snapshot = Arc::new(RwLock::new(reducer.snapshot()));
-        let worker_snapshot = snapshot.clone();
+        let snapshots = Arc::new(RwLock::new(Vec::new()));
+        let worker_snapshots = snapshots.clone();
         let changes = Arc::new(Mutex::new(VecDeque::new()));
         let worker_changes = changes.clone();
+        let selected_thread_id = Arc::new(RwLock::new(None));
+        let worker_selected_thread_id = selected_thread_id.clone();
         let (stop_tx, stop_rx) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("codex-activity-reducer".to_string())
             .spawn(move || {
-                run_activity_loop(broker, reducer, worker_snapshot, worker_changes, stop_rx)
+                run_activity_loop(
+                    broker,
+                    worker_snapshots,
+                    worker_changes,
+                    worker_selected_thread_id,
+                    stop_rx,
+                )
             })
             .expect("failed to create Codex Activity reducer thread");
         Self {
-            snapshot,
+            snapshots,
             changes,
+            selected_thread_id,
             stop_tx,
             worker: Some(worker),
         }
     }
 
     pub fn snapshot(&self) -> AiClientStateSnapshot {
-        *self.snapshot.read().unwrap()
+        self.snapshots()
+            .into_iter()
+            .find(|snapshot| snapshot.state.session_active)
+            .map(|snapshot| snapshot.state)
+            .unwrap_or(AiClientStateSnapshot {
+                client_type: AiClientType::Codex,
+                client_variant: AiClientVariant::Cli,
+                session_active: false,
+                activity_state: AiActivityState::Available,
+                work_phase: AiWorkPhase::Unspecified,
+                revision: 0,
+            })
     }
 
     pub fn try_recv_change(&self) -> Option<AiClientStateChange> {
+        self.try_recv_session_change()
+            .map(|change| AiClientStateChange {
+                state: change.state,
+                reason: change.reason,
+            })
+    }
+
+    pub fn snapshots(&self) -> Vec<CodexSessionSnapshot> {
+        self.snapshots.read().unwrap().clone()
+    }
+
+    pub fn try_recv_session_change(&self) -> Option<CodexStateChange> {
         self.changes.lock().unwrap().pop_front()
+    }
+
+    pub fn set_selected_thread(&self, thread_id: Option<String>) {
+        *self.selected_thread_id.write().unwrap() = thread_id;
     }
 }
 
@@ -882,32 +1233,113 @@ impl Drop for CodexActivityRuntime {
 
 fn run_activity_loop(
     broker: CodexBrokerManager,
-    mut reducer: AiClientStateReducer,
-    snapshot: Arc<RwLock<AiClientStateSnapshot>>,
-    changes: Arc<Mutex<VecDeque<AiClientStateChange>>>,
+    snapshots: Arc<RwLock<Vec<CodexSessionSnapshot>>>,
+    changes: Arc<Mutex<VecDeque<CodexStateChange>>>,
+    selected_thread_id: Arc<RwLock<Option<String>>>,
     stop_rx: mpsc::Receiver<()>,
 ) {
-    let mut adapter = CodexEventAdapter::default();
+    let mut adapters: HashMap<String, CodexEventAdapter> = HashMap::new();
+    let mut registry = CodexSessionRegistry::new();
     loop {
         if stop_rx.try_recv().is_ok() {
             break;
         }
         let now = Instant::now();
-        publish_changes(reducer.tick(now), &snapshot, &changes);
+        registry.set_selected_thread(selected_thread_id.read().unwrap().clone());
+        publish_registry_changes(
+            registry.tick(now),
+            &registry,
+            &snapshots,
+            &changes,
+            &selected_thread_id,
+        );
         match broker.recv_event_timeout(Duration::from_millis(100)) {
             Ok(event) => {
                 let now = Instant::now();
-                publish_changes(reducer.tick(now), &snapshot, &changes);
-                for semantic_event in adapter.adapt(event) {
-                    publish_changes(reducer.apply(semantic_event, now), &snapshot, &changes);
+                publish_registry_changes(
+                    registry.tick(now),
+                    &registry,
+                    &snapshots,
+                    &changes,
+                    &selected_thread_id,
+                );
+                match event {
+                    CodexBrokerEvent::ClientConnected { connection_id } => {
+                        let mut adapter = CodexEventAdapter::default();
+                        adapter.adapt(CodexBrokerEvent::ClientConnected {
+                            connection_id: connection_id.clone(),
+                        });
+                        adapters.insert(connection_id, adapter);
+                    }
+                    CodexBrokerEvent::ClientDisconnected {
+                        connection_id,
+                        origin,
+                    } => {
+                        adapters.remove(&connection_id);
+                        let changes_for_connection =
+                            registry.disconnect(&connection_id, origin == "cli", now);
+                        publish_registry_changes(
+                            changes_for_connection,
+                            &registry,
+                            &snapshots,
+                            &changes,
+                            &selected_thread_id,
+                        );
+                    }
+                    CodexBrokerEvent::Message {
+                        connection_id,
+                        direction,
+                        metadata,
+                    } => {
+                        let Some(adapter) = adapters.get_mut(&connection_id) else {
+                            continue;
+                        };
+                        let semantic = adapter.adapt(CodexBrokerEvent::Message {
+                            connection_id: connection_id.clone(),
+                            direction,
+                            metadata,
+                        });
+                        for event in semantic {
+                            let applied = registry.apply(&connection_id, event, now);
+                            publish_registry_changes(
+                                applied,
+                                &registry,
+                                &snapshots,
+                                &changes,
+                                &selected_thread_id,
+                            );
+                        }
+                    }
+                    CodexBrokerEvent::Stopped
+                    | CodexBrokerEvent::Error {
+                        component: "lifecycle",
+                        ..
+                    } => {
+                        adapters.clear();
+                        let ended = registry.end_all(now);
+                        publish_registry_changes(
+                            ended,
+                            &registry,
+                            &snapshots,
+                            &changes,
+                            &selected_thread_id,
+                        );
+                    }
+                    CodexBrokerEvent::Error { component, detail } => {
+                        tracing::warn!(%component, %detail, "Codex Broker connection-local error");
+                    }
+                    _ => {}
                 }
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                publish_changes(
-                    reducer.apply(AiClientEvent::SessionEnded, Instant::now()),
-                    &snapshot,
+                let ended = registry.end_all(Instant::now());
+                publish_registry_changes(
+                    ended,
+                    &registry,
+                    &snapshots,
                     &changes,
+                    &selected_thread_id,
                 );
                 break;
             }
@@ -915,16 +1347,23 @@ fn run_activity_loop(
     }
 }
 
-fn publish_changes(
-    changes: Vec<AiClientStateChange>,
-    snapshot: &Arc<RwLock<AiClientStateSnapshot>>,
-    pending: &Arc<Mutex<VecDeque<AiClientStateChange>>>,
+fn publish_registry_changes(
+    changes: Vec<CodexStateChange>,
+    registry: &CodexSessionRegistry,
+    snapshots: &Arc<RwLock<Vec<CodexSessionSnapshot>>>,
+    pending: &Arc<Mutex<VecDeque<CodexStateChange>>>,
+    selected_thread_id: &Arc<RwLock<Option<String>>>,
 ) {
+    *snapshots.write().unwrap() = registry.snapshots();
+    let selected_thread_id = selected_thread_id.read().unwrap().clone();
     for change in changes {
-        *snapshot.write().unwrap() = change.state;
         let mut pending = pending.lock().unwrap();
         if pending.len() == MAX_PENDING_CHANGES {
-            pending.pop_front();
+            let eviction_index = pending
+                .iter()
+                .position(|queued| Some(&queued.thread_id) != selected_thread_id.as_ref())
+                .unwrap_or(0);
+            pending.remove(eviction_index);
         }
         pending.push_back(change);
     }
@@ -991,6 +1430,7 @@ mod tests {
     const THREAD_A: &str = "thread-a";
     const THREAD_B: &str = "thread-b";
     const TURN_A: &str = "turn-a";
+    const TURN_B: &str = "turn-b";
 
     fn apply_one(
         reducer: &mut AiClientStateReducer,
@@ -1084,6 +1524,7 @@ mod tests {
             &mut reducer,
             AiClientEvent::RequestResolved {
                 key: "approval".to_string(),
+                thread_id: THREAD_A.to_string(),
             },
             now,
         );
@@ -1096,6 +1537,7 @@ mod tests {
             &mut reducer,
             AiClientEvent::RequestResolved {
                 key: "input".to_string(),
+                thread_id: THREAD_A.to_string(),
             },
             now,
         );
@@ -1288,6 +1730,14 @@ mod tests {
         adapter.adapt(CodexBrokerEvent::ClientConnected {
             connection_id: "connection-1".to_string(),
         });
+        adapter.adapt(message(
+            BrokerDirection::CliToAppServer,
+            r#"{"jsonrpc":"2.0","id":"start","method":"thread/start","params":{}}"#,
+        ));
+        adapter.adapt(message(
+            BrokerDirection::AppServerToCli,
+            r#"{"jsonrpc":"2.0","id":"start","result":{"thread":{"id":"thread-a"}}}"#,
+        ));
 
         let started = adapter.adapt(message(
             BrokerDirection::AppServerToCli,
@@ -1431,6 +1881,7 @@ mod tests {
             &mut reducer,
             AiClientEvent::RequestResolved {
                 key: "approval".to_string(),
+                thread_id: THREAD_A.to_string(),
             },
             now,
         );
@@ -1537,7 +1988,8 @@ mod tests {
         ));
         assert!(matches!(
             events.as_slice(),
-            [AiClientEvent::RequestResolved { key }] if key == "n:99"
+            [AiClientEvent::RequestResolved { key, thread_id }]
+                if key == "n:99" && thread_id == THREAD_A
         ));
     }
 
@@ -1574,6 +2026,159 @@ mod tests {
                 turn_id,
             }] if thread_id == THREAD_A && turn_id == TURN_A
         ));
+    }
+
+    #[test]
+    fn adapter_keeps_approval_correlation_for_another_thread_on_the_same_connection() {
+        let mut adapter = CodexEventAdapter::default();
+        adapter.adapt(CodexBrokerEvent::ClientConnected {
+            connection_id: "connection-1".to_string(),
+        });
+        for (request_id, thread_id) in [("start-a", THREAD_A), ("start-b", THREAD_B)] {
+            adapter.adapt(message(
+                BrokerDirection::CliToAppServer,
+                &format!(r#"{{"jsonrpc":"2.0","id":"{request_id}","method":"thread/start","params":{{}}}}"#),
+            ));
+            adapter.adapt(message(
+                BrokerDirection::AppServerToCli,
+                &format!(r#"{{"jsonrpc":"2.0","id":"{request_id}","result":{{"thread":{{"id":"{thread_id}"}}}}}}"#),
+            ));
+        }
+        adapter.adapt(message(
+            BrokerDirection::AppServerToCli,
+            r#"{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thread-a","turn":{"id":"turn-a","status":"inProgress"}}}"#,
+        ));
+        adapter.adapt(message(
+            BrokerDirection::AppServerToCli,
+            r#"{"jsonrpc":"2.0","id":11,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-a","turnId":"turn-a","item":{"id":"item-a"}}}"#,
+        ));
+        adapter.adapt(message(
+            BrokerDirection::AppServerToCli,
+            r#"{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thread-b","turn":{"id":"turn-b","status":"inProgress"}}}"#,
+        ));
+
+        let resolved = adapter.adapt(message(
+            BrokerDirection::CliToAppServer,
+            r#"{"jsonrpc":"2.0","id":11,"result":{}}"#,
+        ));
+        assert!(matches!(
+            resolved.as_slice(),
+            [AiClientEvent::RequestResolved { thread_id, .. }] if thread_id == THREAD_A
+        ));
+    }
+
+    #[test]
+    fn adapter_keeps_client_request_when_a_server_response_reuses_its_json_rpc_id() {
+        let mut adapter = CodexEventAdapter::default();
+        adapter.adapt(CodexBrokerEvent::ClientConnected {
+            connection_id: "connection-1".to_string(),
+        });
+        adapter.adapt(message(
+            BrokerDirection::CliToAppServer,
+            r#"{"jsonrpc":"2.0","id":"seed","method":"thread/start","params":{}}"#,
+        ));
+        adapter.adapt(message(
+            BrokerDirection::AppServerToCli,
+            r#"{"jsonrpc":"2.0","id":"seed","result":{"thread":{"id":"thread-a"}}}"#,
+        ));
+        adapter.adapt(message(
+            BrokerDirection::CliToAppServer,
+            r#"{"jsonrpc":"2.0","id":1,"method":"thread/start","params":{}}"#,
+        ));
+        adapter.adapt(message(
+            BrokerDirection::AppServerToCli,
+            r#"{"jsonrpc":"2.0","id":1,"method":"item/commandExecution/requestApproval","params":{"threadId":"thread-a","turnId":"turn-a","item":{"id":"item-a"}}}"#,
+        ));
+        let resolved = adapter.adapt(message(
+            BrokerDirection::CliToAppServer,
+            r#"{"jsonrpc":"2.0","id":1,"result":{}}"#,
+        ));
+        assert!(matches!(
+            resolved.as_slice(),
+            [AiClientEvent::RequestResolved { .. }]
+        ));
+
+        let started = adapter.adapt(message(
+            BrokerDirection::AppServerToCli,
+            r#"{"jsonrpc":"2.0","id":1,"result":{"thread":{"id":"thread-b"}}}"#,
+        ));
+        assert!(matches!(
+            started.as_slice(),
+            [AiClientEvent::SessionStarted { thread_id }] if thread_id == THREAD_B
+        ));
+    }
+
+    #[test]
+    fn adapter_registers_an_unknown_thread_only_after_its_local_turn_start_succeeds() {
+        let mut adapter = CodexEventAdapter::default();
+        adapter.adapt(CodexBrokerEvent::ClientConnected {
+            connection_id: "connection-1".to_string(),
+        });
+        adapter.adapt(message(
+            BrokerDirection::CliToAppServer,
+            r#"{"jsonrpc":"2.0","id":"turn","method":"turn/start","params":{"threadId":"thread-b"}}"#,
+        ));
+        adapter.adapt(message(
+            BrokerDirection::AppServerToCli,
+            r#"{"jsonrpc":"2.0","id":"turn","result":{}}"#,
+        ));
+        let events = adapter.adapt(message(
+            BrokerDirection::AppServerToCli,
+            r#"{"jsonrpc":"2.0","method":"turn/started","params":{"threadId":"thread-b","turn":{"id":"turn-b","status":"inProgress"}}}"#,
+        ));
+        assert!(matches!(
+            events.as_slice(),
+            [
+                AiClientEvent::SessionStarted { thread_id },
+                AiClientEvent::TurnStarted { thread_id: turn_thread_id, turn_id }
+            ] if thread_id == THREAD_B && turn_thread_id == THREAD_B && turn_id == TURN_B
+        ));
+    }
+
+    #[test]
+    fn adapter_ignores_connection_local_broker_errors() {
+        let mut adapter = CodexEventAdapter::default();
+        adapter.adapt(CodexBrokerEvent::ClientConnected {
+            connection_id: "connection-1".to_string(),
+        });
+        assert!(adapter
+            .adapt(CodexBrokerEvent::Error {
+                component: "connection",
+                detail: "reset".to_string(),
+            })
+            .is_empty());
+        assert_eq!(adapter.connection_id.as_deref(), Some("connection-1"));
+    }
+
+    #[test]
+    fn adapter_releases_client_request_correlations_after_error_responses() {
+        let mut adapter = CodexEventAdapter::default();
+        adapter.adapt(CodexBrokerEvent::ClientConnected {
+            connection_id: "connection-1".to_string(),
+        });
+        adapter.adapt(message(
+            BrokerDirection::CliToAppServer,
+            r#"{"jsonrpc":"2.0","id":"failed-thread","method":"thread/start","params":{}}"#,
+        ));
+        adapter.adapt(message(
+            BrokerDirection::CliToAppServer,
+            r#"{"jsonrpc":"2.0","id":"failed-turn","method":"turn/start","params":{"threadId":"thread-a"}}"#,
+        ));
+
+        assert!(adapter
+            .adapt(message(
+                BrokerDirection::AppServerToCli,
+                r#"{"jsonrpc":"2.0","id":"failed-thread","error":{"code":-1,"message":"failed"}}"#,
+            ))
+            .is_empty());
+        assert!(adapter
+            .adapt(message(
+                BrokerDirection::AppServerToCli,
+                r#"{"jsonrpc":"2.0","id":"failed-turn","error":{"code":-1,"message":"failed"}}"#,
+            ))
+            .is_empty());
+        assert!(adapter.client_requests.is_empty());
+        assert!(adapter.pending_turn_starts.is_empty());
     }
 
     #[test]
@@ -1663,6 +2268,300 @@ mod tests {
         assert_eq!(
             returned_to_parent[1].state.activity_state,
             AiActivityState::Working
+        );
+    }
+
+    #[test]
+    fn registry_keeps_threads_and_runtime_state_independent() {
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-b",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_B.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_A.to_string(),
+                turn_id: TURN_A.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::RequestStarted {
+                key: "input-a".to_string(),
+                kind: RequestKind::Input,
+                thread_id: THREAD_A.to_string(),
+                turn_id: Some(TURN_A.to_string()),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-b",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_B.to_string(),
+                turn_id: TURN_B.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-b",
+            AiClientEvent::ItemStarted {
+                thread_id: THREAD_B.to_string(),
+                turn_id: TURN_B.to_string(),
+                item_id: "command-b".to_string(),
+                work_phase: AiWorkPhase::Executing,
+            },
+            now,
+        );
+        registry.apply(
+            "connection-b",
+            AiClientEvent::RequestStarted {
+                key: "approval-b".to_string(),
+                kind: RequestKind::Approval,
+                thread_id: THREAD_B.to_string(),
+                turn_id: Some(TURN_B.to_string()),
+            },
+            now,
+        );
+
+        let snapshots = registry.snapshots();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(
+            snapshots[0].state.activity_state,
+            AiActivityState::WaitingInput
+        );
+        assert_eq!(
+            snapshots[1].state.activity_state,
+            AiActivityState::WaitingApproval
+        );
+        assert_ne!(snapshots[0].state.revision, snapshots[1].state.revision);
+
+        registry.apply(
+            "connection-a",
+            AiClientEvent::RequestResolved {
+                key: "input-a".to_string(),
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        );
+        let snapshots = registry.snapshots();
+        assert_eq!(snapshots[0].state.activity_state, AiActivityState::Working);
+        assert_eq!(
+            snapshots[1].state.activity_state,
+            AiActivityState::WaitingApproval
+        );
+    }
+
+    #[test]
+    fn registry_retains_old_thread_when_one_connection_starts_another() {
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+        for thread_id in [THREAD_A, THREAD_B] {
+            registry.apply(
+                "connection-a",
+                AiClientEvent::SessionStarted {
+                    thread_id: thread_id.to_string(),
+                },
+                now,
+            );
+        }
+
+        let snapshots = registry.snapshots();
+        assert_eq!(snapshots.len(), 2);
+        assert_eq!(snapshots[0].thread_id, THREAD_A);
+        assert_eq!(snapshots[1].thread_id, THREAD_B);
+    }
+
+    #[test]
+    fn resume_transfers_ownership_without_resetting_revision() {
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        );
+        let revision = registry.snapshots()[0].state.revision;
+        registry.disconnect("connection-a", true, now);
+        // The production loop ticks every 100 ms while the reconnect grace is
+        // active; it must not retire this thread before the new owner resumes.
+        registry.tick(now + Duration::from_secs(1));
+        registry.apply(
+            "connection-b",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_A.to_string(),
+            },
+            now + Duration::from_secs(2),
+        );
+        let ignored = registry.apply(
+            "connection-a",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_A.to_string(),
+                turn_id: TURN_A.to_string(),
+            },
+            now + Duration::from_secs(2),
+        );
+
+        let snapshots = registry.snapshots();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].owner_connection_id, "connection-b");
+        assert_eq!(snapshots[0].state.revision, revision);
+        assert!(ignored.is_empty());
+        assert_eq!(
+            snapshots[0].state.activity_state,
+            AiActivityState::Available
+        );
+    }
+
+    #[test]
+    fn disconnect_expiry_retires_only_threads_owned_by_that_connection() {
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-b",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_B.to_string(),
+            },
+            now,
+        );
+        registry.disconnect("connection-a", true, now);
+        registry.tick(now + RECONNECT_GRACE + Duration::from_millis(1));
+
+        let snapshots = registry.snapshots();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].thread_id, THREAD_B);
+        assert!(snapshots[0].state.session_active);
+    }
+
+    #[test]
+    fn registry_caps_sessions_at_thirty_two_with_safe_oldest_eviction() {
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+        registry.set_selected_thread(Some("thread-0".to_string()));
+        for index in 0..=MAX_CODEX_SESSIONS {
+            registry.apply(
+                "connection-a",
+                AiClientEvent::SessionStarted {
+                    thread_id: format!("thread-{index}"),
+                },
+                now,
+            );
+        }
+
+        let snapshots = registry.snapshots();
+        assert_eq!(snapshots.len(), MAX_CODEX_SESSIONS);
+        assert!(snapshots
+            .iter()
+            .any(|snapshot| snapshot.thread_id == "thread-0"));
+        assert!(snapshots
+            .iter()
+            .all(|snapshot| snapshot.thread_id != "thread-1"));
+        assert!(snapshots
+            .iter()
+            .any(|snapshot| snapshot.thread_id == format!("thread-{MAX_CODEX_SESSIONS}")));
+    }
+
+    #[test]
+    fn registry_refuses_a_new_thread_when_every_session_is_protected() {
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+        for index in 0..MAX_CODEX_SESSIONS {
+            let thread_id = format!("thread-{index}");
+            registry.apply(
+                "connection-a",
+                AiClientEvent::SessionStarted {
+                    thread_id: thread_id.clone(),
+                },
+                now,
+            );
+            registry.apply(
+                "connection-a",
+                AiClientEvent::TurnStarted {
+                    thread_id,
+                    turn_id: format!("turn-{index}"),
+                },
+                now,
+            );
+        }
+
+        let changes = registry.apply(
+            "connection-b",
+            AiClientEvent::SessionStarted {
+                thread_id: "thread-overflow".to_string(),
+            },
+            now,
+        );
+        assert!(changes.is_empty());
+        assert_eq!(registry.snapshots().len(), MAX_CODEX_SESSIONS);
+        assert!(registry
+            .snapshots()
+            .iter()
+            .all(|snapshot| snapshot.thread_id != "thread-overflow"));
+    }
+
+    #[test]
+    fn registry_expires_completed_session_while_another_thread_is_selected() {
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+        for (connection_id, thread_id, turn_id) in [
+            ("connection-a", THREAD_A, TURN_A),
+            ("connection-b", THREAD_B, TURN_B),
+        ] {
+            registry.apply(
+                connection_id,
+                AiClientEvent::SessionStarted {
+                    thread_id: thread_id.to_string(),
+                },
+                now,
+            );
+            registry.apply(
+                connection_id,
+                AiClientEvent::TurnStarted {
+                    thread_id: thread_id.to_string(),
+                    turn_id: turn_id.to_string(),
+                },
+                now,
+            );
+        }
+        registry.apply(
+            "connection-b",
+            AiClientEvent::TurnFinished {
+                thread_id: THREAD_B.to_string(),
+                turn_id: TURN_B.to_string(),
+                outcome: TurnOutcome::Completed,
+            },
+            now,
+        );
+        registry.set_selected_thread(Some(THREAD_A.to_string()));
+
+        registry.tick(now + COMPLETED_DISPLAY_DURATION + Duration::from_millis(1));
+
+        let snapshots = registry.snapshots();
+        assert_eq!(snapshots[0].state.activity_state, AiActivityState::Working);
+        assert_eq!(
+            snapshots[1].state.activity_state,
+            AiActivityState::Available
         );
     }
 }

@@ -55,3 +55,4 @@ Host Link v1 は 32 byte packet と packet type ごとの個別 layout を使う
 - `DEVICE_HELLO` v2 は `capabilities` と `device_uid_hash` を返します。v1 の `protocol_min` / `protocol_max` はありません。
 - `device_uid_hash = 0` は host 側で `None` に正規化します。
 - Config RPCは`ENCODER` / `COMBO` featureをHost／Firmwareとも実装済みです。ComboはKeymap Viewerの共通保存／破棄／`.keymapに戻す`と`.keymap.json` Export／Restoreへ統合済みです。tap danceなど52 byte payloadを超えるデータの分割方式は将来拡張です。
+- Codex CLI `0.147.0`では、1つのApp Serverに2つのCLI相当clientを接続する互換性ゲートに合格しています。Hostは最大8接続、最大32 threadを内部管理し、ScreenKeyへは共通セレクタで選択中の1件だけを既存`AI_CLIENT_STATE`形式で送ります。この対応によるHost Link packet／Firmware変更はありません。実ScreenKeyを使った複数Codex切替確認は未実施です。

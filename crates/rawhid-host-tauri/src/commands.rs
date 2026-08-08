@@ -19,7 +19,10 @@ use rawhid_host_core::{
     claude_activity::{ClaudeSessionSnapshot, ClaudeStateChange},
     claude_hooks::{write_claude_observer_plugin, ClaudePluginOptions},
     claude_observer::{ClaudeObserverReceiver, ClaudeObserverReceiverOptions},
-    codex_activity::{AiClientStateChange, AiClientStateSnapshot, CodexActivityRuntime},
+    codex_activity::{
+        AiClientStateChange, AiClientStateSnapshot, CodexActivityRuntime, CodexSessionSnapshot,
+        CodexStateChange,
+    },
     codex_broker::{CodexAppServerRuntime, CodexBrokerConfig, CodexBrokerPhase, CodexBrokerStatus},
     config::{
         load_config, ActionsConfig, AppConfig, ClaudeLauncherConfig, CodexLaunchEnvironment,
@@ -409,7 +412,19 @@ pub fn get_codex_integration_status(state: State<AppState>) -> CodexBrokerStatus
 
 #[tauri::command]
 pub fn get_ai_client_state(state: State<AppState>) -> AiClientStateSnapshot {
-    state.codex_activity.snapshot()
+    state
+        .ai_display_selection
+        .lock()
+        .expect("AI display selection lock poisoned")
+        .selected_snapshot()
+        .unwrap_or(AiClientStateSnapshot {
+            client_type: AiClientType::Codex,
+            client_variant: AiClientVariant::Cli,
+            session_active: false,
+            activity_state: AiActivityState::None,
+            work_phase: AiWorkPhase::Unspecified,
+            revision: 0,
+        })
 }
 
 #[tauri::command]
@@ -433,13 +448,10 @@ pub async fn launch_codex_cli(
     match manager.status().phase {
         CodexBrokerPhase::Stopped
         | CodexBrokerPhase::Error
-        | CodexBrokerPhase::WaitingForClient => {}
-        CodexBrokerPhase::Connected => {
-            return Err("Codex CLIはすでに接続されています".to_string());
-        }
-        CodexBrokerPhase::Starting
-        | CodexBrokerPhase::Reconnecting
-        | CodexBrokerPhase::Stopping => {
+        | CodexBrokerPhase::WaitingForClient
+        | CodexBrokerPhase::Connected
+        | CodexBrokerPhase::Reconnecting => {}
+        CodexBrokerPhase::Starting | CodexBrokerPhase::Stopping => {
             return Err("Codex連携の状態遷移が完了してから、もう一度起動してください".to_string());
         }
     }
@@ -462,13 +474,10 @@ pub async fn launch_codex_cli(
                     .start(codex_broker_config(&persisted_config)?)
                     .map_err(|error| error.to_string())?;
             }
-            CodexBrokerPhase::WaitingForClient => {}
-            CodexBrokerPhase::Connected => {
-                return Err("Codex CLIはすでに接続されています".to_string());
-            }
-            CodexBrokerPhase::Starting
-            | CodexBrokerPhase::Reconnecting
-            | CodexBrokerPhase::Stopping => {
+            CodexBrokerPhase::WaitingForClient
+            | CodexBrokerPhase::Connected
+            | CodexBrokerPhase::Reconnecting => {}
+            CodexBrokerPhase::Starting | CodexBrokerPhase::Stopping => {
                 return Err(
                     "Codex連携の状態遷移が完了してから、もう一度起動してください".to_string(),
                 );
@@ -4157,9 +4166,9 @@ fn apply_runner_view(s: &mut MonitorStatus, runner: &MonitorRunner) {
     s.device_layers = runner.layer_states();
 }
 
-fn drain_ai_client_state_changes(activity: &CodexActivityRuntime) -> Vec<AiClientStateChange> {
+fn drain_codex_state_changes(activity: &CodexActivityRuntime) -> Vec<CodexStateChange> {
     let mut changes = Vec::new();
-    while let Some(change) = activity.try_recv_change() {
+    while let Some(change) = activity.try_recv_session_change() {
         changes.push(change);
     }
     changes
@@ -4215,20 +4224,26 @@ fn drain_claude_state_changes(
 }
 
 fn selected_ai_output(
-    codex_snapshot: AiClientStateSnapshot,
-    codex_changes: Vec<AiClientStateChange>,
+    codex_snapshots: Vec<CodexSessionSnapshot>,
+    codex_changes: Vec<CodexStateChange>,
     claude_snapshots: Vec<ClaudeSessionSnapshot>,
     claude_changes: Vec<ClaudeStateChange>,
     selection: &mut AiDisplaySelection,
     last_selection_epoch: &mut u64,
 ) -> (AiClientStateSnapshot, Vec<AiClientStateChange>) {
     let mut candidates = Vec::new();
-    if codex_snapshot.session_active {
-        candidates.push(AiDisplayCandidate {
-            target: AiDisplayTarget::Codex,
-            snapshot: codex_snapshot,
-        });
-    }
+    candidates.extend(
+        codex_snapshots
+            .iter()
+            .filter(|snapshot| snapshot.state.session_active)
+            .map(|snapshot| AiDisplayCandidate {
+                target: AiDisplayTarget::Codex {
+                    thread_id: snapshot.thread_id.clone(),
+                },
+                snapshot: snapshot.state,
+                registration_order: snapshot.registration_order,
+            }),
+    );
     candidates.extend(
         claude_snapshots
             .iter()
@@ -4239,12 +4254,22 @@ fn selected_ai_output(
                     session_id: snapshot.session_id.clone(),
                 },
                 snapshot: claude_as_ai_snapshot(Some(snapshot.clone())),
+                registration_order: snapshot.registration_order,
             }),
     );
     selection.update_candidates(candidates);
 
     let selected_target = selection.selected_target().cloned();
-    let snapshot = selection.selected_snapshot().unwrap_or(codex_snapshot);
+    let snapshot = selection
+        .selected_snapshot()
+        .unwrap_or(AiClientStateSnapshot {
+            client_type: AiClientType::Codex,
+            client_variant: AiClientVariant::Cli,
+            session_active: false,
+            activity_state: AiActivityState::None,
+            work_phase: AiWorkPhase::Unspecified,
+            revision: 0,
+        });
     let selection_changed = selection.epoch() != *last_selection_epoch;
     *last_selection_epoch = selection.epoch();
     if selection_changed {
@@ -4258,7 +4283,14 @@ fn selected_ai_output(
     }
 
     let changes = match selected_target {
-        Some(AiDisplayTarget::Codex) => codex_changes,
+        Some(AiDisplayTarget::Codex { thread_id }) => codex_changes
+            .into_iter()
+            .filter(|change| change.thread_id == thread_id)
+            .map(|change| AiClientStateChange {
+                state: change.state,
+                reason: change.reason,
+            })
+            .collect(),
         Some(AiDisplayTarget::Claude {
             launch_id,
             session_id,
@@ -4848,18 +4880,29 @@ fn run_monitor_loop(
         }
 
         let now = Instant::now();
-        let codex_snapshot = extras.codex_activity.snapshot();
-        let codex_changes = drain_ai_client_state_changes(&extras.codex_activity);
+        let codex_snapshots = extras.codex_activity.snapshots();
+        let codex_changes = drain_codex_state_changes(&extras.codex_activity);
         let (claude_snapshots, claude_changes) =
             drain_claude_state_changes(&extras.claude_integration, now);
-        let (ai_snapshot, ai_changes) = selected_ai_output(
-            codex_snapshot,
-            codex_changes,
-            claude_snapshots,
-            claude_changes,
-            &mut extras.ai_display_selection.lock().unwrap(),
-            &mut last_ai_selection_epoch,
-        );
+        let (ai_snapshot, ai_changes, selected_codex_thread) = {
+            let mut selection = extras.ai_display_selection.lock().unwrap();
+            let (snapshot, changes) = selected_ai_output(
+                codex_snapshots,
+                codex_changes,
+                claude_snapshots,
+                claude_changes,
+                &mut selection,
+                &mut last_ai_selection_epoch,
+            );
+            let selected_codex_thread = match selection.selected_target() {
+                Some(AiDisplayTarget::Codex { thread_id }) => Some(thread_id.clone()),
+                _ => None,
+            };
+            (snapshot, changes, selected_codex_thread)
+        };
+        extras
+            .codex_activity
+            .set_selected_thread(selected_codex_thread);
         if let Err(error) = sync_ai_client_state(
             &mut runner,
             ai_snapshot,
@@ -5166,18 +5209,32 @@ mod tests {
             work_phase: AiWorkPhase::Unspecified,
             desynchronized: false,
             revision,
+            registration_order: u64::from(revision),
+        }
+    }
+
+    fn codex_session(
+        thread_id: &str,
+        activity_state: AiActivityState,
+        revision: u16,
+    ) -> CodexSessionSnapshot {
+        CodexSessionSnapshot {
+            thread_id: thread_id.to_string(),
+            owner_connection_id: "connection-1".to_string(),
+            state: ai_state(activity_state, revision),
+            registration_order: u64::from(revision),
         }
     }
 
     #[test]
     fn ai_selection_cycles_from_codex_to_claude_and_forces_snapshot() {
-        let codex = ai_state(AiActivityState::Working, 5);
+        let codex = codex_session("thread-1", AiActivityState::Working, 5);
         let claude = claude_session("session-1", AiActivityState::WaitingApproval, 10);
         let mut selection = AiDisplaySelection::default();
         let mut epoch = 0;
 
         let (snapshot, changes) = selected_ai_output(
-            codex,
+            vec![codex.clone()],
             Vec::new(),
             vec![claude.clone()],
             Vec::new(),
@@ -5189,7 +5246,7 @@ mod tests {
 
         selection.cycle();
         let (snapshot, changes) = selected_ai_output(
-            codex,
+            vec![codex],
             Vec::new(),
             vec![claude],
             Vec::new(),
@@ -5203,7 +5260,7 @@ mod tests {
 
     #[test]
     fn ai_output_ignores_changes_from_a_non_selected_session() {
-        let codex = ai_state(AiActivityState::Working, 5);
+        let codex = codex_session("thread-1", AiActivityState::Working, 5);
         let first = claude_session("session-1", AiActivityState::Available, 10);
         let second = claude_session("session-2", AiActivityState::Working, 20);
         let other_change = ClaudeStateChange {
@@ -5213,7 +5270,7 @@ mod tests {
         let mut selection = AiDisplaySelection::default();
         let mut epoch = 0;
         selected_ai_output(
-            codex,
+            vec![codex.clone()],
             Vec::new(),
             vec![first.clone(), second.clone()],
             Vec::new(),
@@ -5222,7 +5279,7 @@ mod tests {
         );
         selection.cycle();
         selected_ai_output(
-            codex,
+            vec![codex.clone()],
             Vec::new(),
             vec![first.clone(), second.clone()],
             Vec::new(),
@@ -5230,10 +5287,80 @@ mod tests {
             &mut epoch,
         );
         let (_, changes) = selected_ai_output(
-            codex,
+            vec![codex],
             Vec::new(),
             vec![first, second],
             vec![other_change],
+            &mut selection,
+            &mut epoch,
+        );
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn ai_output_cycles_multiple_codex_and_claude_sessions() {
+        let first = codex_session("thread-1", AiActivityState::Working, 1);
+        let second = codex_session("thread-2", AiActivityState::Completed, 2);
+        let claude = claude_session("session-1", AiActivityState::WaitingInput, 3);
+        let mut selection = AiDisplaySelection::default();
+        let mut epoch = 0;
+
+        selected_ai_output(
+            vec![first.clone(), second.clone()],
+            Vec::new(),
+            vec![claude.clone()],
+            Vec::new(),
+            &mut selection,
+            &mut epoch,
+        );
+        selection.cycle();
+        let (snapshot, _) = selected_ai_output(
+            vec![first.clone(), second.clone()],
+            Vec::new(),
+            vec![claude.clone()],
+            Vec::new(),
+            &mut selection,
+            &mut epoch,
+        );
+        assert_eq!(snapshot.activity_state, AiActivityState::Completed);
+
+        selection.cycle();
+        let (snapshot, _) = selected_ai_output(
+            vec![first, second],
+            Vec::new(),
+            vec![claude],
+            Vec::new(),
+            &mut selection,
+            &mut epoch,
+        );
+        assert_eq!(snapshot.client_type, AiClientType::ClaudeCode);
+        assert_eq!(snapshot.activity_state, AiActivityState::WaitingInput);
+    }
+
+    #[test]
+    fn ai_output_ignores_non_selected_codex_changes() {
+        let first = codex_session("thread-1", AiActivityState::Working, 1);
+        let second = codex_session("thread-2", AiActivityState::Available, 2);
+        let mut selection = AiDisplaySelection::default();
+        let mut epoch = 0;
+        selected_ai_output(
+            vec![first.clone(), second.clone()],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            &mut selection,
+            &mut epoch,
+        );
+
+        let (_, changes) = selected_ai_output(
+            vec![first, second.clone()],
+            vec![CodexStateChange {
+                thread_id: second.thread_id,
+                state: ai_state(AiActivityState::Working, 3),
+                reason: rawhid_host_core::AiClientStateChangeReason::TurnStarted,
+            }],
+            Vec::new(),
+            Vec::new(),
             &mut selection,
             &mut epoch,
         );

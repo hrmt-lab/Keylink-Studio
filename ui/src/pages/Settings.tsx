@@ -358,7 +358,11 @@ function CodexIntegration({
   const editable = phase === "stopped" || phase === "error";
   const running = !editable;
   const launchable =
-    phase === "stopped" || phase === "error" || phase === "waiting_for_client";
+    phase === "stopped" ||
+    phase === "error" ||
+    phase === "waiting_for_client" ||
+    phase === "connected" ||
+    phase === "reconnecting";
   const capableDevices = status.host_link_devices.filter(
     (device) => (device.capabilities & (1 << 10)) !== 0,
   ).length;
@@ -503,6 +507,12 @@ function CodexIntegration({
             <div>
               <p className="text-sm font-medium text-ink">{t(`settings.codex.phase.${phase}`)}</p>
               <p className="mt-0.5 text-xs text-faint">{broker?.codex_version ? t("settings.codex.version", { version: broker.codex_version }) : t("settings.codex.version_unknown")}</p>
+              <p className="mt-0.5 text-xs text-faint">
+                {t("settings.codex.connected_clients", {
+                  count: broker?.connected_client_count ?? 0,
+                  max: broker?.max_client_count ?? 8,
+                })}
+              </p>
             </div>
           </div>
           {running ? (
@@ -599,7 +609,7 @@ function CodexIntegration({
         <div className="flex flex-wrap items-center gap-3">
           <PrimaryButton
             onClick={() => void launchCli()}
-            disabled={busy || launchBusy || codexConfigDirty || !launchable || broker?.client_connected === true}
+            disabled={busy || launchBusy || codexConfigDirty || !launchable || (broker?.connected_client_count ?? 0) >= (broker?.max_client_count ?? 8)}
             loading={launchBusy}
             icon={<Terminal size={15} />}
           >

@@ -363,6 +363,8 @@ WSL正本の`zmk-rawhid-app`へClaude Code client typeとcapability bit 12、Scr
 Renderer切り替えを実装し、UF2を書き込んだ。正式Claude Code identityで、ロゴ、実行中、許可待ち、入力待ち、
 完了、`/exit`、連携停止を実機確認した。Host core 230件、Tauri 23件、UI production buildもPASSした。
 失敗したcommandの同一Turn内自動再試行で、2回目の許可画面だけ青表示になった1例は既知の境界事例として残す。
+Firmware側は`zmk-rawhid-app`を`1a2ee78`、`zmk-config-screenkeytest`を`7b24ec9`としてcommit済み。
+どちらも`develop`で`origin/develop`より1コミット先行し、未pushである。
 
 ScreenKey単体プロトタイプの実装、検証、feature branchの最終レビュー、
 `develop`への統合・push、検証用fault injectionの撤去、96×96 pixelロゴの

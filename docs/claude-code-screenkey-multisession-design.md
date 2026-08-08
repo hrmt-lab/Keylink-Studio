@@ -636,6 +636,9 @@ WSL正本の`zmk-rawhid-app`へ`CLAUDE_CODE = 0x02`とcapability bit 12を追加
 自動検証はHost core 230件、Tauri 23件、UI production buildがPASSした。Firmware側は5本の
 AI Client／Rendererテストとfresh buildがPASSし、UF2は510,976 B、SHA-256は
 `402188bba5bd46a40377966e5ee115cd8c1043735f156b141bacfc378c1ba49a`である。
+Firmwareは`zmk-rawhid-app`の`1a2ee78 feat: add Claude Code AI client type and capability bit`と、
+`zmk-config-screenkeytest`の`7b24ec9 feat: show the Claude Code logo on ScreenKey`へ分けてcommitした。
+どちらも`develop`で`origin/develop`より1コミット先行し、未pushである。
 
 ## 15. 実装順序
 
@@ -659,7 +662,7 @@ AI Client／Rendererテストとfresh buildがPASSし、UF2は510,976 B、SHA-25
 
 ## 17. 次の作業
 
-WSL正本2リポジトリとKeylink Studioをリポジトリ別にcommitする。失敗後自動再試行時の2回目の
+3リポジトリのcommitをreviewし、明示指示後にpush／統合する。失敗後自動再試行時の2回目の
 permission表示は、必要に応じてraw hookを再採取してClaude Code側のevent欠落かHost reducer側かを切り分ける。
 
 ## 18. 非対象

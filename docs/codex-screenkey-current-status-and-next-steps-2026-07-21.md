@@ -364,7 +364,7 @@ Renderer切り替えを実装し、UF2を書き込んだ。正式Claude Code ide
 完了、`/exit`、連携停止を実機確認した。Host core 230件、Tauri 23件、UI production buildもPASSした。
 失敗したcommandの同一Turn内自動再試行で、2回目の許可画面だけ青表示になった1例は既知の境界事例として残す。
 Firmware側は`zmk-rawhid-app`を`1a2ee78`、`zmk-config-screenkeytest`を`7b24ec9`としてcommit済み。
-どちらも`develop`で`origin/develop`より1コミット先行し、未pushである。
+両commitはそれぞれの`origin/develop`へpush済み。
 
 ScreenKey単体プロトタイプの実装、検証、feature branchの最終レビュー、
 `develop`への統合・push、検証用fault injectionの撤去、96×96 pixelロゴの
@@ -438,7 +438,7 @@ Host Linkはbit 11 `CAP_AI_CLIENT_WORK_PHASE`でgateし、旧Firmwareへは従�
 - Claude Code ScreenKey対応は
   `cfc15ae merge: integrate Claude Code ScreenKey support`で`develop`へ統合済み。
   この統合には`28f8e18`、`58e3c57`、`5c157ac`を含む。
-- `origin/develop`へのpushは未実施。
+- 統合commitと`679ce0c docs: record Claude Code develop integration`は`origin/develop`へpush済み。
 - Codex CLI `0.145.0`対応基準更新:
   `bce8bed chore(codex): support Codex CLI 0.145.0`
 - プロトタイプ完了記録:

@@ -638,11 +638,11 @@ AI Client／Rendererテストとfresh buildがPASSし、UF2は510,976 B、SHA-25
 `402188bba5bd46a40377966e5ee115cd8c1043735f156b141bacfc378c1ba49a`である。
 Firmwareは`zmk-rawhid-app`の`1a2ee78 feat: add Claude Code AI client type and capability bit`と、
 `zmk-config-screenkeytest`の`7b24ec9 feat: show the Claude Code logo on ScreenKey`へ分けてcommitした。
-どちらも`develop`で`origin/develop`より1コミット先行し、未pushである。
+両commitはそれぞれの`origin/develop`へpush済みである。
 
 Keylink Studio側は`28f8e18`、`58e3c57`、`5c157ac`を含むClaude Code featureを
 `cfc15ae merge: integrate Claude Code ScreenKey support`で`develop`へ統合した。
-`origin/develop`へのpushは次の明示指示を待つ。
+統合commitと`679ce0c docs: record Claude Code develop integration`は`origin/develop`へpush済みである。
 
 ## 15. 実装順序
 

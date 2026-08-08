@@ -640,6 +640,10 @@ Firmwareは`zmk-rawhid-app`の`1a2ee78 feat: add Claude Code AI client type and 
 `zmk-config-screenkeytest`の`7b24ec9 feat: show the Claude Code logo on ScreenKey`へ分けてcommitした。
 どちらも`develop`で`origin/develop`より1コミット先行し、未pushである。
 
+Keylink Studio側は`28f8e18`、`58e3c57`、`5c157ac`を含むClaude Code featureを
+`cfc15ae merge: integrate Claude Code ScreenKey support`で`develop`へ統合した。
+`origin/develop`へのpushは次の明示指示を待つ。
+
 ## 15. 実装順序
 
 1. Gate C用probe、Claude Code `2.1.224`のevent意味論、`2.1.226`の主要session lifecycle実測、

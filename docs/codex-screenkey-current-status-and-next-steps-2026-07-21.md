@@ -434,8 +434,11 @@ Host Linkはbit 11 `CAP_AI_CLIENT_WORK_PHASE`でgateし、旧Firmwareへは従�
 ## 現在のリポジトリ状態
 
 - path: `C:\01.keyboards\OriginalKeyboards\02.SW\Keylink-Studio`
-- branch: `feat/claude-code-hook-gate-c`
-- HEAD: `28f8e18 feat(claude): add Gate C hook probe`
+- branch: `develop`
+- Claude Code ScreenKey対応は
+  `cfc15ae merge: integrate Claude Code ScreenKey support`で`develop`へ統合済み。
+  この統合には`28f8e18`、`58e3c57`、`5c157ac`を含む。
+- `origin/develop`へのpushは未実施。
 - Codex CLI `0.145.0`対応基準更新:
   `bce8bed chore(codex): support Codex CLI 0.145.0`
 - プロトタイプ完了記録:
@@ -459,9 +462,10 @@ Host Linkはbit 11 `CAP_AI_CLIENT_WORK_PHASE`でgateし、旧Firmwareへは従�
 - SHA-256:
   `aea3340c650d2d8632db0ac40f3a330430fa76a796a00c1a4be1ca2fd6649db4`
 
-未追跡の`.claude/`、`docs/keylink-studio-codex-screenkey-prototype-spec.md`、3つのzipは
+未追跡の`docs/keylink-studio-codex-screenkey-prototype-spec.md`と3つのzipは
 ユーザー所有物として扱い、stageまたは削除しない。Gate C結果を反映した本書と
-`docs/claude-code-screenkey-multisession-design.md`は未コミットであり、commit／pushは行っていない。
+`docs/claude-code-screenkey-multisession-design.md`はClaude Code featureへcommit済みであり、
+`cfc15ae`で`develop`へ統合済みである。
 
 ## 2026-08-02 Turn内状態細分化
 

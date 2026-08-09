@@ -56,9 +56,9 @@ Firmwareは受信した`client_type`でロゴを選び、activity stateは既存
 
 ## 6. キー入力
 
-既存`HOST_ACTION`へ組み込みaction `cycle_ai_session`を追加する。Actions画面で任意のaction IDへ割り当て、Firmware keymapでは同じIDを`&host_action <ID> 0`へ設定する。
+既存`HOST_ACTION`へ組み込みaction `cycle_ai_session`を追加する。Actions画面で任意のaction IDへ割り当て、Firmware keymapでは同じIDを`&host_action <ID> 0`へ設定する。`value=0`は従来互換のslot 0であり、複数論理表示slotを使う場合は`value=1..7`で対象slotを指定できる。
 
-Host Link packet形式とFirmware Coreの変更は不要である。アクション許可リストと「監視中のみ実行」の既存制約をそのまま適用する。
+`HOST_ACTION` uplink packet形式とFirmware Coreの変更は不要である。複数slotのdownlink表示はHost Link capability bit 13を用いるため、詳細は[複数ScreenKey表示設計](ai-display-slot-multiscreen-host-design.md)を参照する。アクション許可リストと「監視中のみ実行」の既存制約をそのまま適用する。
 
 候補がない場合は`no_active_ai_sessions`としてログへ記録し、表示状態を変更しない。
 
@@ -72,12 +72,10 @@ CodexもSettingsから追加起動できる。1つのApp Serverを共有し、�
 
 ## 8. 非対象
 
-- 1つのAIセッションを複数ScreenKeyへ個別割当する機能
-- 複数ScreenKeyへ異なる選択を保持する機能
 - ScreenKeyからapproval／inputへ回答する機能
 - Firmwareへsession IDや選択状態を保存する機能
 - 同一Codex threadを複数CLIから同時操作する完全同期
-- 複数ScreenKeyへの個別割り当て
+- 1画面へ複数sessionを同時描画する機能
 
 Codex側の接続、所有権、切断猶予、Registry上限は
 [Codex複数セッション対応仕様](codex-multisession-design.md)を参照する。

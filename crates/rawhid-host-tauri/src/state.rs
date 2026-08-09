@@ -24,6 +24,7 @@ use rawhid_host_core::{
 };
 
 pub const MAX_LOG_ENTRIES: usize = 200;
+pub const MAX_AI_DISPLAY_SLOTS: u8 = 8;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct LogEntry {
@@ -75,7 +76,7 @@ pub struct AppState {
     pub ai_usage_runtime: Arc<Mutex<Option<AiUsageRuntime>>>,
     pub codex_activity: Arc<CodexActivityRuntime>,
     pub claude_integration: Arc<Mutex<Option<ClaudeIntegration>>>,
-    pub ai_display_selection: Arc<Mutex<AiDisplaySelection>>,
+    pub ai_display_slots: Arc<Mutex<AiDisplaySlots>>,
     pub codex_broker: CodexBrokerManager,
     pub key_stats: SharedKeyStatsStore,
     pub studio_edit: Arc<Mutex<Option<StudioEditSession>>>,
@@ -83,7 +84,8 @@ pub struct AppState {
         Arc<Mutex<HashMap<(String, u64), BTreeMap<(u32, u8), EncoderGetBindings>>>>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AiDisplayTarget {
     Codex {
         thread_id: String,
@@ -113,85 +115,261 @@ pub struct AiDisplayCandidate {
     pub registration_order: u64,
 }
 
-#[derive(Debug, Default)]
-pub struct AiDisplaySelection {
-    candidates: Vec<AiDisplayCandidate>,
-    selected: Option<AiDisplayTarget>,
-    epoch: u64,
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "mode", content = "target", rename_all = "snake_case")]
+pub enum AiDisplaySlotMode {
+    Auto,
+    Pinned(AiDisplayTarget),
 }
 
-impl AiDisplaySelection {
+#[derive(Debug, Clone)]
+pub struct AiDisplaySlot {
+    pub slot: u8,
+    pub mode: AiDisplaySlotMode,
+    pub assigned: Option<AiDisplayTarget>,
+    pub epoch: u64,
+    /// Retained after an Auto target disappears so its replacement advances in
+    /// the common registration order rather than jumping back to the first.
+    last_registration_order: Option<u64>,
+}
+
+#[derive(Debug)]
+pub struct AiDisplaySlots {
+    candidates: Vec<AiDisplayCandidate>,
+    slots: Vec<AiDisplaySlot>,
+    /// Slots removed by a configuration reduction.  The monitor consumes this
+    /// list and emits a single inactive state so capable renderers clear them.
+    retired_slots: Vec<u8>,
+}
+
+impl Default for AiDisplaySlots {
+    fn default() -> Self {
+        Self::new(1)
+    }
+}
+
+impl AiDisplaySlots {
+    pub fn new(slot_count: u8) -> Self {
+        let count = slot_count.clamp(1, MAX_AI_DISPLAY_SLOTS);
+        Self {
+            candidates: Vec::new(),
+            slots: (0..count)
+                .map(|slot| AiDisplaySlot {
+                    slot,
+                    mode: AiDisplaySlotMode::Auto,
+                    assigned: None,
+                    epoch: 0,
+                    last_registration_order: None,
+                })
+                .collect(),
+            retired_slots: Vec::new(),
+        }
+    }
+
+    pub fn set_slot_count(&mut self, slot_count: u8) {
+        let count = slot_count.clamp(1, MAX_AI_DISPLAY_SLOTS);
+        if self.slots.len() > usize::from(count) {
+            self.retired_slots.extend(
+                self.slots[usize::from(count)..]
+                    .iter()
+                    .map(|slot| slot.slot),
+            );
+        }
+        self.slots.truncate(usize::from(count));
+        while self.slots.len() < usize::from(count) {
+            let slot = self.slots.len() as u8;
+            self.slots.push(AiDisplaySlot {
+                slot,
+                mode: AiDisplaySlotMode::Auto,
+                assigned: None,
+                epoch: 0,
+                last_registration_order: None,
+            });
+        }
+        self.refresh_assignments();
+    }
+
     pub fn update_candidates(&mut self, candidates: Vec<AiDisplayCandidate>) {
-        let old_index = self.selected.as_ref().and_then(|selected| {
-            self.candidates
-                .iter()
-                .position(|candidate| &candidate.target == selected)
-        });
         let mut candidates = candidates;
         candidates.sort_by_key(|candidate| candidate.registration_order);
-        let next = self
-            .selected
-            .as_ref()
-            .filter(|selected| {
-                candidates
-                    .iter()
-                    .any(|candidate| &candidate.target == *selected)
-            })
-            .cloned()
-            .or_else(|| {
-                (!candidates.is_empty()).then(|| {
-                    candidates[old_index.unwrap_or(0) % candidates.len()]
-                        .target
-                        .clone()
-                })
-            });
         self.candidates = candidates;
-        self.set_selected(next);
+        self.refresh_assignments();
     }
 
+    #[cfg(test)]
     pub fn cycle(&mut self) -> Option<AiDisplayTarget> {
-        if self.candidates.is_empty() {
-            self.set_selected(None);
-            return None;
+        self.cycle_slot(0)
+    }
+
+    pub fn cycle_slot(&mut self, slot: u8) -> Option<AiDisplayTarget> {
+        let slot_index = usize::from(slot);
+        let current = self.slots.get(slot_index)?.assigned.clone();
+        let current_index = current.as_ref().and_then(|target| {
+            self.candidates
+                .iter()
+                .position(|candidate| &candidate.target == target)
+        });
+        for offset in 1..=self.candidates.len() {
+            let index = current_index
+                .map(|index| (index + offset) % self.candidates.len())
+                .unwrap_or(offset - 1);
+            let target = self.candidates[index].target.clone();
+            if self.slots.iter().enumerate().all(|(index, other)| {
+                index == slot_index || other.assigned.as_ref() != Some(&target)
+            }) {
+                self.set_assigned(slot_index, Some(target.clone()));
+                return Some(target);
+            }
         }
-        let next_index = self
-            .selected
-            .as_ref()
-            .and_then(|selected| {
-                self.candidates
-                    .iter()
-                    .position(|candidate| &candidate.target == selected)
-            })
-            .map(|index| (index + 1) % self.candidates.len())
-            .unwrap_or(0);
-        let next = self.candidates[next_index].target.clone();
-        self.set_selected(Some(next.clone()));
-        Some(next)
+        current
     }
 
-    pub fn selected_target(&self) -> Option<&AiDisplayTarget> {
-        self.selected.as_ref()
+    pub fn pin(&mut self, slot: u8, target: AiDisplayTarget) -> Result<(), String> {
+        if !self
+            .candidates
+            .iter()
+            .any(|candidate| candidate.target == target)
+        {
+            return Err("ai_display_target_not_active".to_string());
+        }
+        let index = usize::from(slot);
+        let Some(destination) = self.slots.get(index) else {
+            return Err("invalid_ai_display_slot".to_string());
+        };
+        let previous = destination.assigned.clone();
+        let source = self
+            .slots
+            .iter()
+            .position(|other| other.assigned.as_ref() == Some(&target));
+        if let Some(source) = source.filter(|source| *source != index) {
+            // The target is now pinned at the destination. The source must no
+            // longer remain pinned to the same target, otherwise refresh would
+            // immediately recreate a duplicate assignment.
+            self.slots[source].mode = AiDisplaySlotMode::Auto;
+            self.set_assigned(source, previous);
+        }
+        self.slots[index].mode = AiDisplaySlotMode::Pinned(target.clone());
+        self.set_assigned(index, Some(target));
+        self.refresh_assignments();
+        Ok(())
     }
 
-    pub fn selected_snapshot(&self) -> Option<AiClientStateSnapshot> {
-        let selected = self.selected.as_ref()?;
+    pub fn set_auto(&mut self, slot: u8) -> Result<(), String> {
+        let index = usize::from(slot);
+        let Some(entry) = self.slots.get_mut(index) else {
+            return Err("invalid_ai_display_slot".to_string());
+        };
+        entry.mode = AiDisplaySlotMode::Auto;
+        self.refresh_assignments();
+        Ok(())
+    }
+
+    pub fn slots(&self) -> &[AiDisplaySlot] {
+        &self.slots
+    }
+
+    pub fn all_candidates(&self) -> &[AiDisplayCandidate] {
+        &self.candidates
+    }
+
+    pub fn candidate_snapshot(&self, target: &AiDisplayTarget) -> Option<AiClientStateSnapshot> {
         self.candidates
             .iter()
-            .find(|candidate| &candidate.target == selected)
+            .find(|candidate| &candidate.target == target)
             .map(|candidate| candidate.snapshot)
     }
 
-    pub fn epoch(&self) -> u64 {
-        self.epoch
+    pub fn slot_snapshot(&self, slot: u8) -> Option<AiClientStateSnapshot> {
+        self.slots
+            .get(usize::from(slot))
+            .and_then(|entry| entry.assigned.as_ref())
+            .and_then(|target| self.candidate_snapshot(target))
     }
 
-    fn set_selected(&mut self, selected: Option<AiDisplayTarget>) {
-        if self.selected != selected {
-            self.selected = selected;
-            self.epoch = self.epoch.wrapping_add(1);
+    /// Compatibility accessors for the original single-ScreenKey API.
+    pub fn selected_target(&self) -> Option<&AiDisplayTarget> {
+        self.slots.first().and_then(|slot| slot.assigned.as_ref())
+    }
+
+    pub fn selected_snapshot(&self) -> Option<AiClientStateSnapshot> {
+        self.slot_snapshot(0)
+    }
+
+    pub fn epoch(&self) -> u64 {
+        self.slots.first().map(|slot| slot.epoch).unwrap_or(0)
+    }
+
+    pub fn take_retired_slots(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.retired_slots)
+    }
+
+    fn refresh_assignments(&mut self) {
+        for index in 0..self.slots.len() {
+            match self.slots[index].mode.clone() {
+                AiDisplaySlotMode::Auto => {
+                    if self.slots[index]
+                        .assigned
+                        .as_ref()
+                        .is_some_and(|target| self.candidate_snapshot(target).is_none())
+                    {
+                        self.set_assigned(index, None);
+                    }
+                }
+                AiDisplaySlotMode::Pinned(target) => {
+                    let next = self.candidate_snapshot(&target).is_some().then_some(target);
+                    self.set_assigned(index, next);
+                }
+            }
+        }
+        for index in 0..self.slots.len() {
+            if !matches!(self.slots[index].mode, AiDisplaySlotMode::Auto)
+                || self.slots[index].assigned.is_some()
+            {
+                continue;
+            }
+            let last_registration_order = self.slots[index].last_registration_order;
+            let is_available = |candidate: &AiDisplayCandidate| {
+                !self
+                    .slots
+                    .iter()
+                    .any(|slot| slot.assigned.as_ref() == Some(&candidate.target))
+            };
+            let next = self
+                .candidates
+                .iter()
+                .filter(|candidate| is_available(candidate))
+                .find(|candidate| {
+                    last_registration_order
+                        .is_some_and(|order| candidate.registration_order > order)
+                })
+                .or_else(|| {
+                    self.candidates
+                        .iter()
+                        .find(|candidate| is_available(candidate))
+                })
+                .map(|candidate| candidate.target.clone());
+            self.set_assigned(index, next);
+        }
+    }
+
+    fn set_assigned(&mut self, index: usize, assigned: Option<AiDisplayTarget>) {
+        if self.slots[index].assigned != assigned {
+            self.slots[index].assigned = assigned;
+            self.slots[index].epoch = self.slots[index].epoch.wrapping_add(1);
+        }
+        if let Some(target) = self.slots[index].assigned.as_ref() {
+            self.slots[index].last_registration_order = self
+                .candidates
+                .iter()
+                .find(|candidate| &candidate.target == target)
+                .map(|candidate| candidate.registration_order);
         }
     }
 }
+
+/// Compatibility name retained while callers migrate to slot-aware display
+/// handling. It always exposes slot zero for the legacy methods.
+pub type AiDisplaySelection = AiDisplaySlots;
 
 pub struct ClaudeIntegration {
     pub launches: BTreeMap<String, ClaudeLaunchIntegration>,
@@ -274,6 +452,7 @@ pub enum HostLinkResponse {
 
 impl AppState {
     pub fn new(config: AppConfig, config_path: Option<PathBuf>) -> Self {
+        let display_slot_count = config.ai_client.display.slot_count;
         let codex_broker = CodexBrokerManager::new();
         let codex_activity = Arc::new(CodexActivityRuntime::start(codex_broker.clone()));
         let ai_usage_runtime = AiUsageRuntime::start(config.ai_usage.clone());
@@ -300,7 +479,7 @@ impl AppState {
             ai_usage_runtime: Arc::new(Mutex::new(ai_usage_runtime)),
             codex_activity,
             claude_integration: Arc::new(Mutex::new(None)),
-            ai_display_selection: Arc::new(Mutex::new(AiDisplaySelection::default())),
+            ai_display_slots: Arc::new(Mutex::new(AiDisplaySlots::new(display_slot_count))),
             codex_broker,
             key_stats,
             studio_edit: Arc::new(Mutex::new(None)),
@@ -496,5 +675,52 @@ mod tests {
 
         selection.update_candidates(Vec::new());
         assert_eq!(selection.selected_target(), None);
+    }
+
+    #[test]
+    fn auto_slots_fill_in_registration_order_without_duplicates() {
+        let mut slots = AiDisplaySlots::new(3);
+        slots.update_candidates(vec![
+            candidate(codex("one"), 1),
+            candidate(claude("two"), 2),
+            candidate(codex("three"), 3),
+        ]);
+
+        assert_eq!(slots.slots()[0].assigned, Some(codex("one")));
+        assert_eq!(slots.slots()[1].assigned, Some(claude("two")));
+        assert_eq!(slots.slots()[2].assigned, Some(codex("three")));
+    }
+
+    #[test]
+    fn pinning_an_assigned_target_swaps_slots_and_pinned_target_waits_for_return() {
+        let mut slots = AiDisplaySlots::new(2);
+        slots.update_candidates(vec![
+            candidate(codex("one"), 1),
+            candidate(claude("two"), 2),
+        ]);
+
+        slots.pin(1, codex("one")).unwrap();
+        assert_eq!(slots.slots()[0].assigned, Some(claude("two")));
+        assert_eq!(slots.slots()[1].assigned, Some(codex("one")));
+        assert!(matches!(
+            slots.slots()[1].mode,
+            AiDisplaySlotMode::Pinned(_)
+        ));
+
+        slots.update_candidates(vec![candidate(claude("two"), 2)]);
+        assert_eq!(slots.slots()[1].assigned, None);
+        slots.update_candidates(vec![
+            candidate(codex("one"), 1),
+            candidate(claude("two"), 2),
+        ]);
+        assert_eq!(slots.slots()[1].assigned, Some(codex("one")));
+    }
+
+    #[test]
+    fn reducing_slot_count_reports_each_retired_slot_once() {
+        let mut slots = AiDisplaySlots::new(4);
+        slots.set_slot_count(2);
+        assert_eq!(slots.take_retired_slots(), vec![2, 3]);
+        assert!(slots.take_retired_slots().is_empty());
     }
 }

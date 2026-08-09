@@ -23,7 +23,7 @@ pub enum ActionOutcome {
 pub fn execute(
     app: &AppHandle,
     binding: &ActionBinding,
-    _value: u8,
+    value: u8,
     extras: &MonitorExtras,
     status: &Arc<Mutex<MonitorStatus>>,
 ) -> Result<ActionOutcome, String> {
@@ -74,10 +74,10 @@ pub fn execute(
         }
         HostActionKind::CycleAiSession => {
             let selected = extras
-                .ai_display_selection
+                .ai_display_slots
                 .lock()
                 .unwrap()
-                .cycle()
+                .cycle_slot(value)
                 .ok_or_else(|| "no_active_ai_sessions".to_string())?;
             Ok(ActionOutcome::AiSessionSelected {
                 label: selected.label(),

@@ -46,6 +46,31 @@ pub struct AiClientConfig {
     pub codex: CodexClientConfig,
     pub codex_launcher: CodexLauncherConfig,
     pub claude_launcher: ClaudeLauncherConfig,
+    pub display: AiClientDisplayConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(default)]
+pub struct AiClientDisplayConfig {
+    /// Number of logical ScreenKey display slots managed by the host.
+    pub slot_count: u8,
+}
+
+impl Default for AiClientDisplayConfig {
+    fn default() -> Self {
+        Self { slot_count: 1 }
+    }
+}
+
+#[cfg(test)]
+mod ai_client_display_tests {
+    use super::*;
+
+    #[test]
+    fn ai_client_display_slot_count_defaults_to_one_for_existing_config() {
+        let config: AppConfig = toml::from_str("[ai_client]\n").unwrap();
+        assert_eq!(config.ai_client.display.slot_count, 1);
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

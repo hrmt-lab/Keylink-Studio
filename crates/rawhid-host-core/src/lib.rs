@@ -55,10 +55,10 @@ pub use codex_broker::{
     JsonRpcMetadata, MAX_CODEX_CLIENTS, SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256,
 };
 pub use config::{
-    AiClientConfig, AiUsageConfig, AppConfig, ClaudeCodeAiUsageConfig, ClaudeLauncherConfig,
-    ClockMode, CodexAiUsageConfig, CodexClientConfig, CodexLaunchEnvironment, CodexLauncherConfig,
-    ConfigPaths, DeviceLayerSwitchConfig, HidConfig, LayerSwitchConfig, PollingConfig, RuleConfig,
-    StudioConfig, TimeConfig, TimeFormatHint, UnmatchedAction,
+    AiClientConfig, AiClientDisplayConfig, AiUsageConfig, AppConfig, ClaudeCodeAiUsageConfig,
+    ClaudeLauncherConfig, ClockMode, CodexAiUsageConfig, CodexClientConfig, CodexLaunchEnvironment,
+    CodexLauncherConfig, ConfigPaths, DeviceLayerSwitchConfig, HidConfig, LayerSwitchConfig,
+    PollingConfig, RuleConfig, StudioConfig, TimeConfig, TimeFormatHint, UnmatchedAction,
 };
 pub use hid::{DeviceConnectionType, DeviceInfo, HidDeviceManager, HidTransport, ProbeResult};
 pub use packet::{
@@ -69,11 +69,11 @@ pub use packet::{
     DeviceHello, EncoderBinding, EncoderBindingFlags, EncoderBindingSource, EncoderGetBindings,
     EncoderGetInfo, HostActionPacket, KeyStatsEntry, KeyStatsPacket, LayerStatePacket, Packet,
     PacketType, TimeSyncPacket, UplinkPacket, CAPABILITY_AI_CLIENT_CLAUDE_CODE,
-    CAPABILITY_AI_CLIENT_STATE, CAPABILITY_AI_CLIENT_WORK_PHASE, CAPABILITY_AI_USAGE,
-    CAPABILITY_APP_LAYER, CAPABILITY_BATTERY, CAPABILITY_CONFIG_RPC, CAPABILITY_HOST_ACTION,
-    CAPABILITY_KEY_STATS, CAPABILITY_LAYER_STATE, CAPABILITY_THEME, CAPABILITY_TIME_SYNC,
-    COMBO_ITEM_LEN, COMBO_MAX_KEYS, COMBO_MAX_SLOTS, COMBO_NAME_LEN, FEATURE_AI_CLIENT,
-    FEATURE_SYSTEM, PACKET_SIZE, REPORT_SIZE,
+    CAPABILITY_AI_CLIENT_DISPLAY_SLOT, CAPABILITY_AI_CLIENT_STATE, CAPABILITY_AI_CLIENT_WORK_PHASE,
+    CAPABILITY_AI_USAGE, CAPABILITY_APP_LAYER, CAPABILITY_BATTERY, CAPABILITY_CONFIG_RPC,
+    CAPABILITY_HOST_ACTION, CAPABILITY_KEY_STATS, CAPABILITY_LAYER_STATE, CAPABILITY_THEME,
+    CAPABILITY_TIME_SYNC, COMBO_ITEM_LEN, COMBO_MAX_KEYS, COMBO_MAX_SLOTS, COMBO_NAME_LEN,
+    FEATURE_AI_CLIENT, FEATURE_SYSTEM, PACKET_SIZE, REPORT_SIZE,
 };
 pub use runner::{
     uplink_device_key, DeviceBatterySource, DeviceBatteryStatus, DeviceLayerState, RunEvent,

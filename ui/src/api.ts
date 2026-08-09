@@ -2,6 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { listen, UnlistenFn } from "@tauri-apps/api/event";
 import type {
   AppConfig,
+  AiDisplaySlots,
+  AiDisplayTarget,
   AiClientStateSnapshot,
   CodexBrokerStatus,
   CodexLaunchResult,
@@ -52,6 +54,11 @@ export const getCodexIntegrationStatus = () =>
   invoke<CodexBrokerStatus>("get_codex_integration_status");
 export const getAiClientState = () =>
   invoke<AiClientStateSnapshot>("get_ai_client_state");
+export const getAiDisplaySlots = () => invoke<AiDisplaySlots>("get_ai_display_slots");
+export const pinAiDisplaySlot = (slot: number, target: AiDisplayTarget) =>
+  invoke<void>("pin_ai_display_slot", { slot, target });
+export const setAiDisplaySlotAuto = (slot: number) =>
+  invoke<void>("set_ai_display_slot_auto", { slot });
 export const startCodexIntegration = () =>
   invoke<CodexBrokerStatus>("start_codex_integration");
 export const launchCodexCli = (launcher: CodexLauncherConfig) =>

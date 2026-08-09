@@ -2,7 +2,7 @@
 
 ## 1. 文書の位置付け
 
-- 状態: Host実装・自動テスト完了、実機受け入れ未実施
+- 状態: Host実装・自動テスト完了。実機受け入れは3秒以内resume以外を確認済み
 - 対象: Keylink StudioのCodex Broker、Codex activity、共通AIセッション選択
 - 後続: 複数ScreenKeyへ異なるセッションを割り当てる機能
 
@@ -210,14 +210,17 @@ thread ID全体は診断ログで確認できるようにするが、ScreenKey�
 
 ## 9. Host Link／Firmware境界
 
-本仕様の実装ではHost Link packetとFirmwareを変更しない。
+本仕様の複数Codex対応ではHost Link packetとFirmwareを変更しない。
 
 - `AI_CLIENT_STATE`のpayloadは現行のままとする。
 - `client_type = CODEX`も変更しない。
 - session ID、thread ID、connection ID、候補数、選択順をFirmwareへ送らない。
 - 1つのScreenKeyには、共通セレクタで選択中の1候補だけを送る。
 
-複数ScreenKeyへ異なる候補を同時表示する機能では、後続仕様として表示先slotを追加する。
+複数ScreenKeyへ異なる候補を同時表示するHost側slot管理は
+[複数ScreenKey表示設計](ai-display-slot-multiscreen-host-design.md)で実装した。Keylink Studioの
+この変更自体はFirmwareを変更していないが、別workspaceのbit 13対応Firmwareと組み合わせた2画面の
+個別表示は2026-08-09に実機確認した。
 
 ## 10. ログ
 
@@ -338,11 +341,12 @@ Host実装は§6～§12を反映した。Brokerは最大8接続、Codex Session 
 その間の同一thread再接続ではsnapshotとrevisionを維持する。
 
 §12のBroker、Session Registry、共通セレクタ受け入れ条件はRust自動テストへ追加した。
-Host Link packet、Firmware、`display_slot`には変更を加えていない。
+この複数Codex変更自体はHost Link packetとFirmwareを変更していない。後続のKeylink Studio側
+複数ScreenKey対応では`display_slot`を末尾に追加する8-byte payloadをbit 13でgateする。Firmwareは未変更である。
 
-§13の実機受け入れは未実施である。特にKeylink Studioから2つのCodex CLIを起動した状態での
-実ScreenKey切替、非選択eventの非奪取、片側CLI終了、3秒以内resume、approval／inputの
-thread間分離は、実機で確認するまで完了扱いにしない。
+§13の実機受け入れでは、Keylink Studioから2つのCodex CLIを起動した状態での実ScreenKey切替、
+非選択eventの非奪取、片側CLI終了、approval／inputのthread間分離を確認済みである。3秒以内resume時の
+表示とrevision維持は、レアケースとして未実施のまま残す。
 
 ### 2026-08-09 レビュー指摘の是正
 
@@ -366,7 +370,7 @@ CodexとClaude Codeの候補には共通の単調増加登録順を付け、同�
 追加した自動テストは、同一接続の2thread approval相関、方向間のJSON-RPC ID衝突、相関済み未知
 threadの登録、接続局所error、実WebSocketの8接続受理と9件目`409 Conflict`、connection ID別の
 message metadata、3秒猶予中のtick、保護中32sessionでの追加拒否、同tickのCodex／Claude登録順を
-対象にする。実機受け入れは引き続き未実施である。
+対象にする。実機受け入れは3秒以内resumeを除き確認済みである。
 
 同日の再レビューで判明した候補再有効化の順序問題も是正した。候補列は毎回、全クライアント型を
 通した不変の`registration_order`だけで再構築する。したがって、一時的に候補外となったClaude Code

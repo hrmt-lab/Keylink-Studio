@@ -116,6 +116,11 @@ export interface AiClientConfig {
   codex: CodexClientConfig;
   codex_launcher: CodexLauncherConfig;
   claude_launcher: ClaudeLauncherConfig;
+  display: AiClientDisplayConfig;
+}
+
+export interface AiClientDisplayConfig {
+  slot_count: number;
 }
 
 export type CodexBrokerPhase =
@@ -177,6 +182,33 @@ export interface AiClientStateSnapshot {
   activity_state: AiActivityState;
   work_phase: AiWorkPhase;
   revision: number;
+}
+
+export type AiDisplayTarget =
+  | { kind: "codex"; thread_id: string }
+  | { kind: "claude"; launch_id: string; session_id: string };
+
+export type AiDisplaySlotMode =
+  | { mode: "auto" }
+  | { mode: "pinned"; target: AiDisplayTarget };
+
+export interface AiDisplaySlot {
+  slot: number;
+  mode: AiDisplaySlotMode;
+  target: AiDisplayTarget | null;
+  snapshot: AiClientStateSnapshot;
+}
+
+export interface AiDisplaySlots {
+  slots: AiDisplaySlot[];
+  candidates: AiDisplayCandidate[];
+  slot_capable_device_count: number;
+}
+
+export interface AiDisplayCandidate {
+  target: AiDisplayTarget;
+  label: string;
+  snapshot: AiClientStateSnapshot;
 }
 
 export type HostActionKind =

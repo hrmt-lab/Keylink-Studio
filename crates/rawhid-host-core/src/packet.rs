@@ -22,6 +22,8 @@ pub const CAPABILITY_CONFIG_RPC: u32 = 1 << 9;
 pub const CAPABILITY_AI_CLIENT_STATE: u32 = 1 << 10;
 pub const CAPABILITY_AI_CLIENT_WORK_PHASE: u32 = 1 << 11;
 pub const CAPABILITY_AI_CLIENT_CLAUDE_CODE: u32 = 1 << 12;
+/// Supports the 8-byte AI client state payload with a display slot byte.
+pub const CAPABILITY_AI_CLIENT_DISPLAY_SLOT: u32 = 1 << 13;
 pub const FEATURE_SYSTEM: u8 = 0x00;
 pub const FEATURE_AI_CLIENT: u8 = 0x0A;
 
@@ -1316,6 +1318,8 @@ pub struct AiClientStatePacket {
     pub activity_state: AiActivityState,
     pub work_phase: AiWorkPhase,
     pub revision: u16,
+    /// Logical ScreenKey destination. Legacy packets always use slot zero.
+    pub display_slot: u8,
 }
 
 impl AiClientStatePacket {
@@ -1326,6 +1330,26 @@ impl AiClientStatePacket {
         activity_state: AiActivityState,
         work_phase: AiWorkPhase,
         revision: u16,
+    ) -> Result<Self, PacketError> {
+        Self::new_for_slot(
+            client_type,
+            client_variant,
+            session_active,
+            activity_state,
+            work_phase,
+            revision,
+            0,
+        )
+    }
+
+    pub fn new_for_slot(
+        client_type: AiClientType,
+        client_variant: u8,
+        session_active: bool,
+        activity_state: AiActivityState,
+        work_phase: AiWorkPhase,
+        revision: u16,
+        display_slot: u8,
     ) -> Result<Self, PacketError> {
         let valid_combination = if session_active {
             activity_state != AiActivityState::None
@@ -1344,6 +1368,9 @@ impl AiClientStatePacket {
                 work_phase: work_phase as u8,
             });
         }
+        if display_slot > 7 {
+            return Err(PacketError::InvalidAiClientDisplaySlot(display_slot));
+        }
         Ok(Self {
             client_type,
             client_variant,
@@ -1351,6 +1378,7 @@ impl AiClientStatePacket {
             activity_state,
             work_phase,
             revision,
+            display_slot,
         })
     }
 
@@ -1392,6 +1420,15 @@ impl AiClientStatePacket {
         self.encode_payload_with_work_phase(seq, true)
     }
 
+    /// Slot-aware payload. The existing first seven bytes are preserved and
+    /// the logical destination is appended at byte seven.
+    pub fn encode_display_slot_payload(self, seq: u8) -> [u8; PACKET_SIZE] {
+        let mut bytes = self.encode_payload_with_work_phase(seq, true);
+        bytes[PAYLOAD_OFFSET + 7] = self.display_slot;
+        bytes[8] = 8;
+        bytes
+    }
+
     fn encode_report_with_work_phase(self, seq: u8, include_work_phase: bool) -> [u8; REPORT_SIZE] {
         let mut report = [0u8; REPORT_SIZE];
         report[1..].copy_from_slice(&self.encode_payload_with_work_phase(seq, include_work_phase));
@@ -1404,6 +1441,12 @@ impl AiClientStatePacket {
 
     pub fn encode_work_phase_report(self, seq: u8) -> [u8; REPORT_SIZE] {
         self.encode_report_with_work_phase(seq, true)
+    }
+
+    pub fn encode_display_slot_report(self, seq: u8) -> [u8; REPORT_SIZE] {
+        let mut report = [0u8; REPORT_SIZE];
+        report[1..].copy_from_slice(&self.encode_display_slot_payload(seq));
+        report
     }
 }
 
@@ -2032,6 +2075,8 @@ pub enum PacketError {
         "invalid AI client activity/work phase combination: activity_state={activity_state:#04x}, work_phase={work_phase:#04x}"
     )]
     InvalidAiClientWorkPhase { activity_state: u8, work_phase: u8 },
+    #[error("invalid AI client display slot {0}; expected 0-7")]
+    InvalidAiClientDisplaySlot(u8),
     #[error("packet type {0:#04x} is not decoded as a generic packet")]
     DecodeUnsupportedType(u8),
     #[error("invalid battery entry count {0}; expected 1-4")]
@@ -2335,6 +2380,41 @@ mod tests {
 
         let payload = packet.encode_payload(1);
         assert_eq!(payload[PAYLOAD_OFFSET], 0x02);
+    }
+
+    #[test]
+    fn ai_client_state_slot_payload_appends_destination_without_changing_legacy_layout() {
+        let packet = AiClientStatePacket::new_for_slot(
+            AiClientType::Codex,
+            AiClientVariant::Cli as u8,
+            true,
+            AiActivityState::Working,
+            AiWorkPhase::Executing,
+            0x1234,
+            3,
+        )
+        .unwrap();
+
+        let legacy = packet.encode_work_phase_payload(10);
+        let slot_aware = packet.encode_display_slot_payload(10);
+        assert_eq!(
+            &slot_aware[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 7],
+            &legacy[PAYLOAD_OFFSET..PAYLOAD_OFFSET + 7]
+        );
+        assert_eq!(slot_aware[8], 8);
+        assert_eq!(slot_aware[PAYLOAD_OFFSET + 7], 3);
+        assert!(matches!(
+            AiClientStatePacket::new_for_slot(
+                AiClientType::Codex,
+                AiClientVariant::Cli as u8,
+                false,
+                AiActivityState::None,
+                AiWorkPhase::Unspecified,
+                0,
+                8,
+            ),
+            Err(PacketError::InvalidAiClientDisplaySlot(8))
+        ));
     }
 
     #[test]

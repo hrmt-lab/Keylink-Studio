@@ -378,7 +378,7 @@ Firmware側は`zmk-rawhid-app`を`1a2ee78`、`zmk-config-screenkeytest`を`7b24e
 次候補へ進む。非選択sessionのeventは表示を奪わず、選択中session終了時だけ次へ自動移動する。
 Firmware packet変更はなく、ScreenKey keymapから既存`&host_action <ID> 0`を送る。Settingsから複数の
 Claude Codeを追加起動でき、各起動のReceiver／token／plugin／`launch_id`を分離する。現行Codex Brokerは
-現在追跡中の1 threadだけを候補にする。自動テストはPASS、実機確認は未実施。詳細は
+現在追跡中の1 threadだけを候補にする。自動テストはPASS、当時の実機確認は未実施。詳細は
 [`ai-session-display-switching.md`](ai-session-display-switching.md)を参照する。
 
 その後、単一ScreenKeyのキー押下でCodex／Claude Codeを循環する実機確認を完了した。
@@ -538,11 +538,15 @@ Host Linkはbit 11 `CAP_AI_CLIENT_WORK_PHASE`でgateし、旧Firmwareへは従�
 - Codex／Claude Codeの候補を初回有効登録順の共通列として保持し、複数Codexと複数Claude Codeを
   `cycle_ai_session`で循環できる。非選択eventは内部状態だけ更新し、現在表示を奪わない。
 - SettingsのCodex起動操作は接続中でも追加起動でき、現在の接続数を最大8件として表示する。
-- Host Link packet、Firmware、ScreenKey Rendererには変更を加えていない。
+- Codex複数session機能そのものではHost Link packet、Firmware、ScreenKey Rendererには変更を加えていない。
 - Broker、Registry、共通セレクタの受け入れ条件を自動テスト化し、Host core 251件、Tauri 34件、
   UI production buildが成功した。
 - 2026-08-09の再レビューで、再有効化した候補が末尾へ移る問題とApp Server error response後の
   request相関残留を修正した。候補は常に全クライアント共通の初回登録順へ戻り、失敗した
   thread操作の相関は接続継続中でも解放される。
-- Keylink Studioから2つのCodex CLIを実際に起動し、実ScreenKeyで切り替える確認は未実施である。
-  実機確認が完了するまで、本項は「Host実装・自動テスト完了」の扱いとする。
+- Keylink Studioから2つのCodex CLIを実際に起動し、実ScreenKeyで切り替える確認、非選択eventの非奪取、
+  片側切断、approval/inputのthread間分離は完了した。3秒以内resume時の表示とrevision維持は未実施である。
+- 複数ScreenKeyへの異なるsession割当は、Keylink Studioで最大8論理slotを実装済みである。別workspaceの
+  capability bit 13対応Firmwareを搭載した2画面keyboardで、slot別表示、状態分離、Auto/Pinned、slot別cycle、
+  slot数縮退を2026-08-09に確認した。詳細は
+  [`ai-display-slot-multiscreen-host-design.md`](ai-display-slot-multiscreen-host-design.md)を参照する。

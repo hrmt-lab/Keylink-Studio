@@ -15,7 +15,8 @@ use crate::{
     packet::{
         AiClientStatePacket, AiUsagePacket, ComboInfo, ComboItem, ConfigRequest, ConfigResponse,
         ConfigStatus, DeviceHello, EncoderBinding, EncoderGetBindings, EncoderGetInfo, Packet,
-        TimeSyncPacket, UplinkPacket, CAPABILITY_AI_CLIENT_CLAUDE_CODE, CAPABILITY_AI_CLIENT_STATE,
+        TimeSyncPacket, UplinkPacket, CAPABILITY_AI_CLIENT_CLAUDE_CODE,
+        CAPABILITY_AI_CLIENT_DISPLAY_SLOT, CAPABILITY_AI_CLIENT_STATE,
         CAPABILITY_AI_CLIENT_WORK_PHASE, CAPABILITY_CONFIG_RPC, PACKET_SIZE, REPORT_SIZE,
     },
 };
@@ -510,12 +511,17 @@ impl<T: HidTransport> HidDeviceManager<T> {
         let seq = self.next_seq();
         let legacy_report = state.encode_report(seq);
         let work_phase_report = state.encode_work_phase_report(seq);
+        let display_slot_report = state.encode_display_slot_report(seq);
         let mut sent = 0usize;
         let previous_len = self.verified.len();
         let mut retained = Vec::with_capacity(self.verified.len());
 
         for device in self.verified.drain(..) {
+            let supports_display_slot = device.capabilities
+                & (CAPABILITY_AI_CLIENT_DISPLAY_SLOT | CAPABILITY_AI_CLIENT_WORK_PHASE)
+                == (CAPABILITY_AI_CLIENT_DISPLAY_SLOT | CAPABILITY_AI_CLIENT_WORK_PHASE);
             if device.capabilities & CAPABILITY_AI_CLIENT_STATE == 0
+                || (state.display_slot != 0 && !supports_display_slot)
                 || (state.client_type == crate::packet::AiClientType::ClaudeCode
                     && device.capabilities & CAPABILITY_AI_CLIENT_CLAUDE_CODE == 0)
                 || (work_phase_only && device.capabilities & CAPABILITY_AI_CLIENT_WORK_PHASE == 0)
@@ -523,7 +529,9 @@ impl<T: HidTransport> HidDeviceManager<T> {
                 retained.push(device);
                 continue;
             }
-            let report = if device.capabilities & CAPABILITY_AI_CLIENT_WORK_PHASE != 0 {
+            let report = if supports_display_slot {
+                &display_slot_report
+            } else if device.capabilities & CAPABILITY_AI_CLIENT_WORK_PHASE != 0 {
                 &work_phase_report
             } else {
                 &legacy_report
@@ -1297,6 +1305,45 @@ mod tests {
         assert_eq!(writes.len(), 1);
         assert_eq!(writes[0].0, "detailed");
         assert_eq!(writes[0].1[9], 7);
+    }
+
+    #[test]
+    fn ai_client_state_sends_slot_payload_only_to_slot_capable_devices() {
+        let legacy_caps = CAPABILITY_AI_CLIENT_STATE | CAPABILITY_AI_CLIENT_WORK_PHASE;
+        let slot_caps = legacy_caps | CAPABILITY_AI_CLIENT_DISPLAY_SLOT;
+        let legacy = device_with_capabilities("legacy", legacy_caps);
+        let slot = device_with_capabilities("slot", slot_caps);
+        let transport = MockTransport {
+            candidates: RefCell::new(vec![legacy, slot]),
+            ..MockTransport::default()
+        };
+        transport
+            .hello_paths
+            .borrow_mut()
+            .extend(["legacy".to_string(), "slot".to_string()]);
+        transport.hello_capabilities.borrow_mut().extend([
+            ("legacy".to_string(), legacy_caps),
+            ("slot".to_string(), slot_caps),
+        ]);
+        let mut manager = HidDeviceManager::new(HidConfig::default(), transport);
+        manager.probe().unwrap();
+        let state = AiClientStatePacket::new_for_slot(
+            crate::packet::AiClientType::Codex,
+            crate::packet::AiClientVariant::Cli as u8,
+            true,
+            crate::packet::AiActivityState::Working,
+            crate::packet::AiWorkPhase::Executing,
+            13,
+            2,
+        )
+        .unwrap();
+
+        assert_eq!(manager.send_ai_client_state(state, false).unwrap(), 1);
+        let writes = manager.transport.writes.borrow();
+        assert_eq!(writes.len(), 1);
+        assert_eq!(writes[0].0, "slot");
+        assert_eq!(writes[0].1[9], 8);
+        assert_eq!(writes[0].1[20], 2);
     }
 
     #[test]

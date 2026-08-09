@@ -33,6 +33,7 @@ use rawhid_host_core::{
         AiActivityState, AiClientStatePacket, AiClientType, AiClientVariant, AiWorkPhase,
         ComboBinding, ComboInfo, ComboItem, ConfigStatus, EncoderBinding, EncoderBindingFlags,
         EncoderBindingSource, EncoderGetBindings, EncoderGetInfo, UplinkPacket,
+        CAPABILITY_AI_CLIENT_DISPLAY_SLOT,
     },
     runner::{uplink_device_key, RunEvent, Runner},
     stats::{KeyStatsSummary, SharedKeyStatsStore, StatsPeriod},
@@ -69,13 +70,14 @@ pub struct MonitorExtras {
     pub key_stats: SharedKeyStatsStore,
     pub codex_activity: Arc<CodexActivityRuntime>,
     pub claude_integration: Arc<Mutex<Option<ClaudeIntegration>>>,
-    pub ai_display_selection: Arc<Mutex<AiDisplaySelection>>,
+    pub ai_display_slots: Arc<Mutex<AiDisplaySelection>>,
 }
 
 #[derive(Default)]
 struct AiClientStateSendTracker {
     last_device_generation: Option<u64>,
     last_sent_at: Option<Instant>,
+    last_slot_epoch: Option<u64>,
 }
 
 const AI_CLIENT_STATE_RESEND_INTERVAL: Duration = Duration::from_secs(5);
@@ -413,7 +415,7 @@ pub fn get_codex_integration_status(state: State<AppState>) -> CodexBrokerStatus
 #[tauri::command]
 pub fn get_ai_client_state(state: State<AppState>) -> AiClientStateSnapshot {
     state
-        .ai_display_selection
+        .ai_display_slots
         .lock()
         .expect("AI display selection lock poisoned")
         .selected_snapshot()
@@ -425,6 +427,107 @@ pub fn get_ai_client_state(state: State<AppState>) -> AiClientStateSnapshot {
             work_phase: AiWorkPhase::Unspecified,
             revision: 0,
         })
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AiDisplaySlotDto {
+    pub slot: u8,
+    pub mode: crate::state::AiDisplaySlotMode,
+    pub target: Option<AiDisplayTarget>,
+    pub snapshot: AiClientStateSnapshot,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AiDisplaySlotsDto {
+    pub slots: Vec<AiDisplaySlotDto>,
+    pub candidates: Vec<AiDisplayCandidateDto>,
+    pub slot_capable_device_count: usize,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AiDisplayCandidateDto {
+    pub target: AiDisplayTarget,
+    pub label: String,
+    pub snapshot: AiClientStateSnapshot,
+}
+
+fn inactive_ai_snapshot() -> AiClientStateSnapshot {
+    AiClientStateSnapshot {
+        client_type: AiClientType::Codex,
+        client_variant: AiClientVariant::Cli,
+        session_active: false,
+        activity_state: AiActivityState::None,
+        work_phase: AiWorkPhase::Unspecified,
+        revision: 0,
+    }
+}
+
+#[tauri::command]
+pub fn get_ai_display_slots(state: State<AppState>) -> AiDisplaySlotsDto {
+    let slots = state
+        .ai_display_slots
+        .lock()
+        .expect("AI display slots lock poisoned");
+    let slot_capable_device_count = state
+        .status
+        .lock()
+        .expect("monitor status lock poisoned")
+        .host_link_devices
+        .iter()
+        .filter(|device| {
+            device.capabilities
+                & (CAPABILITY_AI_CLIENT_DISPLAY_SLOT
+                    | rawhid_host_core::packet::CAPABILITY_AI_CLIENT_WORK_PHASE)
+                == (CAPABILITY_AI_CLIENT_DISPLAY_SLOT
+                    | rawhid_host_core::packet::CAPABILITY_AI_CLIENT_WORK_PHASE)
+        })
+        .count();
+    AiDisplaySlotsDto {
+        slots: slots
+            .slots()
+            .iter()
+            .map(|entry| AiDisplaySlotDto {
+                slot: entry.slot,
+                mode: entry.mode.clone(),
+                target: entry.assigned.clone(),
+                snapshot: slots
+                    .slot_snapshot(entry.slot)
+                    .unwrap_or_else(inactive_ai_snapshot),
+            })
+            .collect(),
+        candidates: slots
+            .all_candidates()
+            .iter()
+            .map(|candidate| AiDisplayCandidateDto {
+                target: candidate.target.clone(),
+                label: candidate.target.label(),
+                snapshot: candidate.snapshot,
+            })
+            .collect(),
+        slot_capable_device_count,
+    }
+}
+
+#[tauri::command]
+pub fn pin_ai_display_slot(
+    slot: u8,
+    target: AiDisplayTarget,
+    state: State<AppState>,
+) -> Result<(), String> {
+    state
+        .ai_display_slots
+        .lock()
+        .expect("AI display slots lock poisoned")
+        .pin(slot, target)
+}
+
+#[tauri::command]
+pub fn set_ai_display_slot_auto(slot: u8, state: State<AppState>) -> Result<(), String> {
+    state
+        .ai_display_slots
+        .lock()
+        .expect("AI display slots lock poisoned")
+        .set_auto(slot)
 }
 
 #[tauri::command]
@@ -3922,7 +4025,7 @@ pub fn start_host_link_worker(
         key_stats: Arc::clone(&state.key_stats),
         codex_activity: Arc::clone(&state.codex_activity),
         claude_integration: Arc::clone(&state.claude_integration),
-        ai_display_selection: Arc::clone(&state.ai_display_selection),
+        ai_display_slots: Arc::clone(&state.ai_display_slots),
     };
 
     let (tx, rx) = mpsc::channel();
@@ -4321,11 +4424,25 @@ fn sync_ai_client_state<T>(
 where
     T: AiClientStateTransport,
 {
+    sync_ai_client_state_slot(transport, 0, snapshot, changes, tracker, now)
+}
+
+fn sync_ai_client_state_slot<T>(
+    transport: &mut T,
+    display_slot: u8,
+    snapshot: AiClientStateSnapshot,
+    changes: impl IntoIterator<Item = AiClientStateChange>,
+    tracker: &mut AiClientStateSendTracker,
+    now: Instant,
+) -> Result<(), String>
+where
+    T: AiClientStateTransport,
+{
     let device_generation = transport.device_generation();
     let mut sent_change = false;
 
     for change in changes {
-        let packet = ai_client_state_packet(change.state)?;
+        let packet = ai_client_state_packet_for_slot(change.state, display_slot)?;
         if !transport.has_ai_client_state_device(packet.client_type) {
             tracker.last_device_generation = None;
             tracker.last_sent_at = None;
@@ -4345,7 +4462,10 @@ where
         && (tracker.last_device_generation != Some(device_generation) || periodic_due)
         && transport.has_ai_client_state_device(snapshot.client_type)
     {
-        transport.send_ai_client_state(ai_client_state_packet(snapshot)?, false)?;
+        transport.send_ai_client_state(
+            ai_client_state_packet_for_slot(snapshot, display_slot)?,
+            false,
+        )?;
         sent_change = true;
     }
 
@@ -4361,14 +4481,18 @@ where
     Ok(())
 }
 
-fn ai_client_state_packet(state: AiClientStateSnapshot) -> Result<AiClientStatePacket, String> {
-    AiClientStatePacket::new(
+fn ai_client_state_packet_for_slot(
+    state: AiClientStateSnapshot,
+    display_slot: u8,
+) -> Result<AiClientStatePacket, String> {
+    AiClientStatePacket::new_for_slot(
         state.client_type,
         state.client_variant as u8,
         state.session_active,
         state.activity_state,
         state.work_phase,
         state.revision,
+        display_slot,
     )
     .map_err(|error| error.to_string())
 }
@@ -4385,6 +4509,11 @@ fn apply_monitor_config(
     actions_cfg: &mut ActionsConfig,
 ) -> Result<(), String> {
     *actions_cfg = next_config.actions.clone();
+    extras
+        .ai_display_slots
+        .lock()
+        .expect("AI display slots lock poisoned")
+        .set_slot_count(next_config.ai_client.display.slot_count);
     if let Ok(mut store) = extras.key_stats.lock() {
         store.set_flush_interval(Duration::from_secs(
             next_config.stats.flush_interval_sec.max(1),
@@ -4757,7 +4886,7 @@ fn run_monitor_loop(
 
     let mut interval = Duration::from_millis(config.polling.interval_ms.max(1));
     let mut uplink_interval = Duration::from_millis(config.polling.uplink_interval_ms.max(5));
-    let mut ai_client_state_send = AiClientStateSendTracker::default();
+    let mut ai_client_state_send = BTreeMap::<u8, AiClientStateSendTracker>::new();
     let mut last_ai_selection_epoch = 0;
 
     loop {
@@ -4884,13 +5013,13 @@ fn run_monitor_loop(
         let codex_changes = drain_codex_state_changes(&extras.codex_activity);
         let (claude_snapshots, claude_changes) =
             drain_claude_state_changes(&extras.claude_integration, now);
-        let (ai_snapshot, ai_changes, selected_codex_thread) = {
-            let mut selection = extras.ai_display_selection.lock().unwrap();
+        let (ai_snapshot, ai_changes, selected_codex_thread, retired_slots, extra_slots) = {
+            let mut selection = extras.ai_display_slots.lock().unwrap();
             let (snapshot, changes) = selected_ai_output(
                 codex_snapshots,
-                codex_changes,
+                codex_changes.clone(),
                 claude_snapshots,
-                claude_changes,
+                claude_changes.clone(),
                 &mut selection,
                 &mut last_ai_selection_epoch,
             );
@@ -4898,7 +5027,52 @@ fn run_monitor_loop(
                 Some(AiDisplayTarget::Codex { thread_id }) => Some(thread_id.clone()),
                 _ => None,
             };
-            (snapshot, changes, selected_codex_thread)
+            let retired_slots = selection.take_retired_slots();
+            let extra_slots: Vec<(u8, AiClientStateSnapshot, Vec<AiClientStateChange>, u64)> =
+                selection
+                    .slots()
+                    .iter()
+                    .filter(|entry| entry.slot != 0)
+                    .map(|entry| {
+                        let snapshot = selection
+                            .slot_snapshot(entry.slot)
+                            .unwrap_or_else(inactive_ai_snapshot);
+                        let changes = match entry.assigned.as_ref() {
+                            Some(AiDisplayTarget::Codex { thread_id }) => codex_changes
+                                .iter()
+                                .filter(|change| change.thread_id == *thread_id)
+                                .map(|change| AiClientStateChange {
+                                    state: change.state,
+                                    reason: change.reason,
+                                })
+                                .collect(),
+                            Some(AiDisplayTarget::Claude {
+                                launch_id,
+                                session_id,
+                            }) => claude_changes
+                                .iter()
+                                .filter(|change| {
+                                    change.state.launch_id == *launch_id
+                                        && change.state.session_id == *session_id
+                                })
+                                .map(|change| AiClientStateChange {
+                                    state: claude_as_ai_snapshot(Some(change.state.clone())),
+                                    reason:
+                                        rawhid_host_core::AiClientStateChangeReason::SessionStarted,
+                                })
+                                .collect(),
+                            None => Vec::new(),
+                        };
+                        (entry.slot, snapshot, changes, entry.epoch)
+                    })
+                    .collect();
+            (
+                snapshot,
+                changes,
+                selected_codex_thread,
+                retired_slots,
+                extra_slots,
+            )
         };
         extras
             .codex_activity
@@ -4907,7 +5081,7 @@ fn run_monitor_loop(
             &mut runner,
             ai_snapshot,
             ai_changes,
-            &mut ai_client_state_send,
+            ai_client_state_send.entry(0).or_default(),
             now,
         ) {
             let msg = format!("AI client state send error: {error}");
@@ -4918,6 +5092,51 @@ fn run_monitor_loop(
                 emit_status(&app, &s);
             }
             let _ = app.emit("log-added", entry);
+        }
+        for slot in retired_slots {
+            if let Err(error) = sync_ai_client_state_slot(
+                &mut runner,
+                slot,
+                inactive_ai_snapshot(),
+                [AiClientStateChange {
+                    state: inactive_ai_snapshot(),
+                    reason: rawhid_host_core::AiClientStateChangeReason::SessionEnded,
+                }],
+                ai_client_state_send.entry(slot).or_default(),
+                now,
+            ) {
+                tracing::warn!(slot, "AI display slot clear error: {error}");
+            }
+            ai_client_state_send.remove(&slot);
+        }
+        for (slot, snapshot, changes, epoch) in extra_slots {
+            let tracker = ai_client_state_send.entry(slot).or_default();
+            let assignment_changed = tracker.last_slot_epoch != Some(epoch);
+            if assignment_changed && changes.is_empty() {
+                // A slot assignment may have happened without a state transition.
+                // Sending its full snapshot immediately avoids waiting for heartbeat.
+                if let Err(error) = sync_ai_client_state_slot(
+                    &mut runner,
+                    slot,
+                    snapshot,
+                    [AiClientStateChange {
+                        state: snapshot,
+                        reason: rawhid_host_core::AiClientStateChangeReason::SessionStarted,
+                    }],
+                    tracker,
+                    now,
+                ) {
+                    tracing::warn!(slot, "AI display slot send error: {error}");
+                } else {
+                    tracker.last_slot_epoch = Some(epoch);
+                }
+            } else if let Err(error) =
+                sync_ai_client_state_slot(&mut runner, slot, snapshot, changes, tracker, now)
+            {
+                tracing::warn!(slot, "AI display slot send error: {error}");
+            } else {
+                tracker.last_slot_epoch = Some(epoch);
+            }
         }
 
         // Wait for the next control-loop tick, draining uplink every uplink_interval_ms.

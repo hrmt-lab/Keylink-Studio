@@ -133,7 +133,7 @@ BLE HOG では scan ごとの `HOST_HELLO` 応答が一時的に揺れること�
 - HELLO 検証中に届いた uplink packet は読み飛ばさず保持し、検証後に通常経路へ流します。
 - read error が出た device は write error と同様に verified list から外します。
 - uplink は best-effort です。Config RPC 応答待機中に受信した uplink は一時キューへ退避し、監視中は応答処理後に通常経路へ戻します。監視停止中のuplinkは読み取って破棄し、後からホストアクションなどを実行しません。読み取り上限を超えるバーストは失われる可能性があります。
-- `HOST_ACTION` の実行は config `[actions]` の許可リスト制 (既定 disabled)。バインディングは device 単位 (`actions.devices."uid:..."`、`layer_switch.devices` と同じキー) で、未定義 id・未設定 device はログのみ。`value` byte を path やコマンドとして解釈しません。同一 seq の連続受信は 1 回として扱います。`cycle_ai_session`はCodex／Claude Codeの有効な表示候補を循環選択し、選択変更を次のAI Client State送信で即時反映します。詳細は[共通セッション切替仕様](ai-session-display-switching.md)を参照してください。
+- `HOST_ACTION` の実行は config `[actions]` の許可リスト制 (既定 disabled)。バインディングは device 単位 (`actions.devices."uid:..."`、`layer_switch.devices` と同じキー) で、未定義 id・未設定 device はログのみ。`value` byte を path やコマンドとして解釈しません。同一 seq の連続受信は 1 回として扱います。`cycle_ai_session`はCodex／Claude Codeの有効な表示候補を循環選択し、選択変更を次のAI Client State送信で即時反映します。`value` は論理表示 slot (`0..=7`) として扱い、`0` は従来どおり先頭slotです。詳細は[共通セッション切替仕様](ai-session-display-switching.md)および[複数ScreenKey表示設計](ai-display-slot-multiscreen-host-design.md)を参照してください。
 - `LAYER_STATE` は表示専用です。runner の managed layer 状態には影響せず、`APP_LAYER` としてエコーバックしません。
 - `KEY_STATS` は `[stats]` 有効時に日別バケットでローカルファイル (`<data_dir>/stats/uid_*.json`) へ永続化します。書き込みは `flush_interval_sec` 間隔 + 監視停止時です。
 - `KEY_PRESS` はキーテスターのリアルタイム表示専用です。累積カウントは保持せず、`KEY_STATS` とは独立しています。

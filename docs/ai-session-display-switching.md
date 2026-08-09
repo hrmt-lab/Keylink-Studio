@@ -1,0 +1,92 @@
+# Codex／Claude Code共通 ScreenKeyセッション切替仕様
+
+## 1. 目的
+
+1つのScreenKeyで、Keylink Studioが現在観測しているCodex／Claude Codeのセッションを、キー押下ごとに順送りして表示する。
+クライアント種別は切替条件にせず、同じ表示候補として扱う。
+
+## 2. 用語
+
+- 表示候補: ScreenKeyへ表示できる有効なAIセッション
+- 選択中候補: 現在ScreenKeyへ送信する1件
+- 共通セレクタ: CodexとClaude Codeの表示候補をまとめ、選択を保持するHost側コンポーネント
+- selection epoch: 選択変更を検出してfull state送信を強制するHost内部値。Host Link packetには載せない
+
+## 3. 表示候補
+
+候補順はクライアント種別でグループ化せず、Codex／Claude Codeを通した初回有効登録順とする。
+Codexは`thread_id`、Claude Codeは`(launch_id, session_id)`を識別子とする。同じ`thread_id`を
+別接続がresumeした場合は候補を重複させず所有権を移す。同じClaude Code `session_id`でも
+別起動なら別候補である。
+
+Codex Session Registryは最大32件のthreadを保持できる。Claude Codeも複数起動・複数sessionを
+候補にできる。上限到達時は、選択中、実行中、approval待ち、input待ちを保護して安全な最古候補を
+退避する。
+
+終了済み、retired、`session_active = false`のsessionは候補に含めない。
+
+## 4. 選択規則
+
+- 候補が初めて現れた場合は先頭を選択する
+- キーを1回押すごとに候補順の次へ進み、末尾の次は先頭へ戻る
+- 候補が1件なら選択は変わらない
+- 非選択候補の状態変化だけでは選択を変更しない
+- 新しい候補が追加されても、現在の選択が有効なら維持する
+- 選択中候補が終了したら、終了前の位置に続く有効候補を選ぶ
+- 候補が0件になったらセッションなしを送る
+
+選択変更時は、activity、revision、client typeが直前と同じでも、選択後のsnapshotをfull stateとして即時送信する。
+5秒heartbeatとUSB再接続後の再送も、選択中候補の最新snapshotを使う。
+
+## 5. 状態更新
+
+CodexとClaude Codeのeventは、どちらが選択中でも常に取り込む。非選択候補のeventは内部snapshotだけ更新し、Host Link出力へは流さない。
+その候補へ切り替えた時点で最新snapshotを送る。
+
+`COMPLETED`はクライアント種別や現在の選択に関係なく、完了eventから30秒後にHost内部で`AVAILABLE`へ遷移する。
+したがって、完了表示中に別sessionへ切り替え、30秒を超えてから戻しても、期限切れの緑枠を再表示しない。
+この期限は新しいTurn開始、session終了、wrapper終了で解除する。
+
+ScreenKeyへ送る`client_type`は選択候補に従う。
+
+- Codex: `0x01 CODEX`
+- Claude Code: `0x02 CLAUDE_CODE`
+
+Firmwareは受信した`client_type`でロゴを選び、activity stateは既存の共通表示規約を使う。会話本文、session ID、選択順、selection epochは送らない。
+
+## 6. キー入力
+
+既存`HOST_ACTION`へ組み込みaction `cycle_ai_session`を追加する。Actions画面で任意のaction IDへ割り当て、Firmware keymapでは同じIDを`&host_action <ID> 0`へ設定する。`value=0`は従来互換のslot 0であり、複数論理表示slotを使う場合は`value=1..7`で対象slotを指定できる。
+
+`HOST_ACTION` uplink packet形式とFirmware Coreの変更は不要である。複数slotのdownlink表示はHost Link capability bit 13を用いるため、詳細は[複数ScreenKey表示設計](ai-display-slot-multiscreen-host-design.md)を参照する。アクション許可リストと「監視中のみ実行」の既存制約をそのまま適用する。
+
+候補がない場合は`no_active_ai_sessions`としてログへ記録し、表示状態を変更しない。
+
+## 7. Claude Code複数起動
+
+SettingsからClaude Codeを追加起動できる。起動ごとにReceiver、token、plugin directory、`launch_id`を分離する。
+停止操作はKeylink Studioが起動したClaude Code連携をまとめてshutdownし、各plugin directoryをcleanupする。
+
+CodexもSettingsから追加起動できる。1つのApp Serverを共有し、各CLI接続のWebSocket、転送task、
+`connection_id`を分離する。UIには現在のCodex CLI接続数を表示し、最大8接続とする。
+
+## 8. 非対象
+
+- ScreenKeyからapproval／inputへ回答する機能
+- Firmwareへsession IDや選択状態を保存する機能
+- 同一Codex threadを複数CLIから同時操作する完全同期
+- 1画面へ複数sessionを同時描画する機能
+
+Codex側の接続、所有権、切断猶予、Registry上限は
+[Codex複数セッション対応仕様](codex-multisession-design.md)を参照する。
+
+## 9. 受け入れ条件
+
+- 複数Codexと複数Claude Codeを初回有効登録順に循環できる
+- Claude Code同士も登録順に循環できる
+- 非選択候補のeventで表示が奪われない
+- 選択中候補の終了時に次の候補へ移る
+- 候補追加時に現在の選択を維持する
+- 選択変更時にclient typeを含むfull stateが送られる
+- 候補0件／1件で安全に動作する
+- Host core、Tauri、UI buildの既存回帰がない

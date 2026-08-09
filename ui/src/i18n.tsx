@@ -129,6 +129,7 @@ const T = {
     "actions.kind.start_monitoring": "監視を開始",
     "actions.kind.stop_monitoring": "監視を停止",
     "actions.kind.refresh_ai_usage": "AI 使用量を更新",
+    "actions.kind.cycle_ai_session": "AIの表示セッションを切り替える",
     "actions.kind.launch": "アプリを起動",
     "actions.kind.open_folder": "フォルダを開く",
     "actions.firmware_hint":
@@ -691,6 +692,7 @@ const T = {
     "settings.codex.copy_failed": "接続コマンドをコピーできませんでした",
     "settings.codex.version": "Codex CLI {version}",
     "settings.codex.version_unknown": "Codex CLI はまだ検証されていません",
+    "settings.codex.connected_clients": "接続中の Codex CLI: {count} / {max}",
     "settings.codex.phase.stopped": "停止中",
     "settings.codex.phase.starting": "起動中",
     "settings.codex.phase.waiting_for_client": "クライアント接続待ち",
@@ -826,6 +828,7 @@ const T = {
     "actions.kind.start_monitoring": "Start monitoring",
     "actions.kind.stop_monitoring": "Stop monitoring",
     "actions.kind.refresh_ai_usage": "Refresh AI usage",
+    "actions.kind.cycle_ai_session": "Switch displayed AI session",
     "actions.kind.launch": "Launch app",
     "actions.kind.open_folder": "Open folder",
     "actions.firmware_hint":
@@ -1388,6 +1391,7 @@ const T = {
     "settings.codex.copy_failed": "Could not copy the connection command",
     "settings.codex.version": "Codex CLI {version}",
     "settings.codex.version_unknown": "Codex CLI has not been verified yet",
+    "settings.codex.connected_clients": "Connected Codex CLI: {count} / {max}",
     "settings.codex.phase.stopped": "Stopped",
     "settings.codex.phase.starting": "Starting",
     "settings.codex.phase.waiting_for_client": "Waiting for client",

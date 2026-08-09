@@ -314,18 +314,21 @@ Windows Terminal経由で起動したClaude CodeをKeylink Studioの子孫プロ
 
 ## 11. 表示セッションの選択
 
-開発中の一時機能として、ScreenKey押下ごとに表示対象を次のsessionへ切り替える。
+表示選択はClaude Code専用のSession Registryではなく、Codex／Claude Code共通セレクタが担当する。
+ScreenKeyのキーへ`HOST_ACTION`の`cycle_ai_session`を割り当て、押下ごとにCodex 1件と
+Claude Code全sessionを横断して次の候補へ切り替える。
 
-- 並び順は登録順を基本とし、同順位では`session_id`で安定化する
-- 現在のsessionが終了したら次の有効sessionを選ぶ
+- 並び順は現在のCodex、続いてClaude Codeの登録順
+- 現在のsessionが終了したら終了前の位置に続く有効sessionを選ぶ
+- 非選択sessionの新しいeventや新規候補の追加では表示対象を自動変更しない
 - sessionがなければセッションなしを送る
 - 5秒heartbeatは選択中sessionのsnapshotを送る
-- 切り替え判定はsnapshotだけでなく
-  `(selection_epoch, selected_session_id, snapshot)`の変化で行う
-- 選択変更時は状態変化がなくてもfull送信する
+- Host内部のselection epochが変わったら、状態変化がなくてもfull送信する
+- Claude Codeの`COMPLETED`は非選択中も30秒期限を進め、期限後は`AVAILABLE`のsnapshotを保持する
 
 wire packetには`session_id`がない。同一内容の2セッション間では画面が変化しないが、
 Host内部の選択と以後のheartbeat／状態変化の送信元は切り替わる。検証UI／ログで現在の選択を確認する。
+詳細は[Codex／Claude Code共通 ScreenKeyセッション切替仕様](ai-session-display-switching.md)を参照する。
 
 ### 11.1 revision
 
@@ -333,7 +336,7 @@ Firmwareは到着順latest-winsで、同一revisionでもpayloadが変われば�
 したがって選択切り替えの正しさをrevisionの偶然の不一致へ依存させない。
 
 - revisionは各sessionのReducerが独立所有する
-- `selection_epoch`はHost内の送信トリガでありpacketへ載せない
+- selection epochはHost内の送信トリガでありpacketへ載せない
 - 同一revision・異なるpayloadもfull送信する
 - 同一revision・同一payloadで表示が変わらないのは正常とする
 
@@ -633,7 +636,8 @@ WSL正本の`zmk-rawhid-app`へ`CLAUDE_CODE = 0x02`とcapability bit 12を追加
 一方、失敗したcommandをClaude Codeが同一Turn内で自動修正・再試行した1例では、2回目の許可画面中に
 青い実行表示となった。この失敗後再試行だけは既知の境界事例として残す。
 
-自動検証はHost core 230件、Tauri 23件、UI production buildがPASSした。Firmware側は5本の
+自動検証はClaude Codeの完了期限修正後にHost core 236件、Tauri 27件、UI production build、
+別target directoryでのworkspace全binary buildがPASSした。Firmware側は5本の
 AI Client／Rendererテストとfresh buildがPASSし、UF2は510,976 B、SHA-256は
 `402188bba5bd46a40377966e5ee115cd8c1043735f156b141bacfc378c1ba49a`である。
 Firmwareは`zmk-rawhid-app`の`1a2ee78 feat: add Claude Code AI client type and capability bit`と、
@@ -643,6 +647,18 @@ Firmwareは`zmk-rawhid-app`の`1a2ee78 feat: add Claude Code AI client type and 
 Keylink Studio側は`28f8e18`、`58e3c57`、`5c157ac`を含むClaude Code featureを
 `cfc15ae merge: integrate Claude Code ScreenKey support`で`develop`へ統合した。
 統合commitと`679ce0c docs: record Claude Code develop integration`は`origin/develop`へpush済みである。
+
+### 14.14 2026-08-08 キー押下による表示session切り替え
+
+Claude Code専用として先行実装した選択処理を、Codex／Claude Code共通の`AiDisplaySelection`へ整理し直した。
+候補は現在のCodex 1件とClaude Codeの全有効sessionである。両クライアントのeventは常時取り込み、非選択sessionの
+状態変化はHost Link出力から除外する。選択変更時は状態内容が同じでも選択中snapshotをfull送信し、選択中sessionが
+終了した場合だけ次の有効候補へ進む。
+
+入力は既存`HOST_ACTION`の新しい組み込みaction `cycle_ai_session`とし、Host Link packetやFirmware Coreは
+変更しない。Actions UIで任意のaction IDへ割り当て、ScreenKey keymapの`&host_action <ID> 0`から呼び出す。
+SettingsからClaude Codeを複数起動できるようにし、起動ごとにReceiver、token、plugin directory、`launch_id`を
+分離する。停止操作は全起動をまとめてshutdownし、各plugin directoryをcleanupする。
 
 ## 15. 実装順序
 
@@ -661,13 +677,19 @@ Keylink Studio側は`28f8e18`、`58e3c57`、`5c157ac`を含むClaude Code featur
   stale後の次prompt回復、`/clear`、`/exit`、停止→再起動を確認済み。
 - `AskUserQuestion`による入力待ちはClaude Codeロゴと黄色枠点滅になり、選択後に完了表示へ戻ることを確認済み。
 - command失敗後の自動再試行で2回目の許可待ちだけ青くなった1例は既知の境界事例。通常の連続許可は正常。
+- Codex／Claude Code共通候補の循環選択、複数Claude Code session、非選択sessionの出力抑制は自動テスト済み。
+  キー押下を含む単一ScreenKey実機確認も完了した。
+- 実機確認で、Claude Codeの完了表示中にCodexへ切り替え、30秒後にClaude Codeへ戻すと緑枠が再表示される問題を確認した。
+  Claude Code ReducerにもCodexと同じ30秒期限を追加し、非選択中も`AVAILABLE`へ更新するよう修正した。Firmware変更は不要。
+- `HOST_ACTION`が稀に届かない問題はFirmware側のRawHID送信修正後に大幅に改善し、現行実機範囲では許容する。
 - 2台以上の同時Claude session表示、receiver overflowの実機注入、OS再起動直後／実AV負荷は未確認であり、
   初期対応の完了条件には含めない。
 
 ## 17. 次の作業
 
-3リポジトリのcommitをreviewし、明示指示後にpush／統合する。失敗後自動再試行時の2回目の
-permission表示は、必要に応じてraw hookを再採取してClaude Code側のevent欠落かHost reducer側かを切り分ける。
+Codexと2つのClaude Code sessionを起動し、ScreenKeyの`HOST_ACTION` keyを押すたびに表示対象が循環すること、
+非選択sessionのeventで表示が戻らないこと、選択中session終了時に次へ移ることを実機確認する。
+失敗後自動再試行時の2回目のpermission表示は、必要に応じてraw hookを再採取して切り分ける。
 
 ## 18. 非対象
 
@@ -675,7 +697,6 @@ permission表示は、必要に応じてraw hookを再採取してClaude Code側
 - Keylink Studio外から起動したsessionの自動発見
 - ScreenKeyからClaude Codeのpermission／inputへ回答する機能
 - 複数sessionの同時表示
-- 一時切り替え操作の正式な設定契約化
 - Claude Codeの回答本文解析
 - Firmware変更をHost実装と同一タスクで完了扱いにすること
 

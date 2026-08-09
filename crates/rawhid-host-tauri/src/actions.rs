@@ -12,6 +12,9 @@ use crate::state::MonitorStatus;
 
 pub enum ActionOutcome {
     Continue,
+    AiSessionSelected {
+        label: String,
+    },
     /// Automatic monitoring should stop while the Host Link worker remains
     /// available for discovery and keymap Config RPC.
     StopRequested,
@@ -20,7 +23,7 @@ pub enum ActionOutcome {
 pub fn execute(
     app: &AppHandle,
     binding: &ActionBinding,
-    _value: u8,
+    value: u8,
     extras: &MonitorExtras,
     status: &Arc<Mutex<MonitorStatus>>,
 ) -> Result<ActionOutcome, String> {
@@ -68,6 +71,17 @@ pub fn execute(
                 baseline,
             );
             Ok(ActionOutcome::Continue)
+        }
+        HostActionKind::CycleAiSession => {
+            let selected = extras
+                .ai_display_slots
+                .lock()
+                .unwrap()
+                .cycle_slot(value)
+                .ok_or_else(|| "no_active_ai_sessions".to_string())?;
+            Ok(ActionOutcome::AiSessionSelected {
+                label: selected.label(),
+            })
         }
         HostActionKind::Launch => {
             let path = binding

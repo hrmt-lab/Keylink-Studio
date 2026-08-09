@@ -7,7 +7,8 @@
 - 偽CodexによるPowerShellハーネス全体テスト: 合格
 - 通常のWindows PowerShellからの実Codex E2E: 合格
 - Broker方式の実環境成立判定: 成立
-- Gate B、本体機能、仕様書§8～§10に記載した本体状態管理: 未実装
+- Gate B、本体機能、仕様書§8～§10に記載した本体状態管理: 実装済み
+- Codex複数セッション事前互換性ゲート: 合格（2026-08-08）
 
 Codex CLI 0.144.6では、区間別認証を行うBroker経由でrequest／response／notificationと
 応答必須server requestを透過転送できることが確認できた。
@@ -78,4 +79,17 @@ raw stdout／stderr、生成Schema、実行runは`target/`配下に置き、Git�
 ## 最終判定
 
 Broker方式を採用可能と判定する。Broker透過転送の追加実行は不要である。
-次工程はGate Bであり、Brokerハーネスの再修正・再試験やKeylink Studio本体機能の先行実装は行わない。
+この時点の次工程はGate Bであり、Brokerハーネスの再修正・再試験より先にGate Bを行う方針とした。
+
+## 2026-08-08 複数セッション事前互換性ゲート
+
+Codex CLI `0.147.0`の1つのApp Serverへ、2つのCLI相当WebSocket clientを同時接続した。
+各clientで`initialize`、別々の`thread/start`、同時`turn/start`を実行し、両接続で同じ
+JSON-RPC ID `1`, `2`, `3`を使用してもresponseが接続ごとに対応することを確認した。
+
+client Aでは`requestUserInput`を、client Bではcommand execution approvalを発生させ、
+それぞれ元の接続だけがserver requestへ応答した。client Aを切断した後もclient BのTurnは完了した。
+この結果から、単一App Server共有方式の事前互換性ゲートを合格とし、複数App Server方式は採用しない。
+
+既存preflightであるCodex CLI version検査とexperimental schema SHA-256検査は維持している。
+検証用token、raw message本文、一時App Server processは作業ツリーへ保存していない。

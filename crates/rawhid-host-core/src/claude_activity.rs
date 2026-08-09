@@ -8,10 +8,12 @@ use serde_json::Value;
 
 use crate::{
     claude_hook_event::{ClaudeHookEvent, ClaudeObserverEvent},
+    next_ai_session_registration_order,
     packet::{AiActivityState, AiWorkPhase},
 };
 
 pub const CLAUDE_DETAIL_STALE_TIMEOUT: Duration = Duration::from_secs(120);
+const CLAUDE_COMPLETED_DISPLAY_DURATION: Duration = Duration::from_secs(30);
 const CLAUDE_TOOL_TOMBSTONE_TTL: Duration = Duration::from_secs(120);
 const MAX_TOOL_TOMBSTONES: usize = 256;
 
@@ -26,6 +28,7 @@ pub enum ClaudeStateChangeReason {
     WaitingInput,
     InputResolved,
     TurnCompleted,
+    CompletedExpired,
     TurnFailed,
     DetailStale,
     Desynchronized,
@@ -37,6 +40,7 @@ pub enum ClaudeStateChangeReason {
 pub struct ClaudeSessionSnapshot {
     pub launch_id: String,
     pub session_id: String,
+    pub registration_order: u64,
     pub session_active: bool,
     pub activity_state: AiActivityState,
     pub work_phase: AiWorkPhase,
@@ -173,11 +177,11 @@ pub struct ClaudeSessionReducer {
     active_items: HashMap<String, AiWorkPhase>,
     tool_tombstones: VecDeque<(String, Instant)>,
     last_relevant_event: Option<Instant>,
+    completed_deadline: Option<Instant>,
 }
 
-/// Owns all Claude Code sessions observed by Keylink Studio. The registry is
-/// deliberately independent from the Codex reducer: firmware currently has no
-/// Claude identity, so Host Link selection is performed by the application.
+/// Owns all Claude Code sessions observed by Keylink Studio in stable
+/// registration order. Cross-client display selection belongs to the host app.
 pub struct ClaudeSessionRegistry {
     sessions: HashMap<(String, String), ClaudeSessionReducer>,
     order: Vec<(String, String)>,
@@ -233,9 +237,6 @@ impl ClaudeSessionRegistry {
                 }
                 let reducer = self.sessions.get_mut(&key).expect("inserted above");
                 let changes = reducer.apply(event, now)?;
-                if !changes.is_empty() {
-                    self.touch(&key);
-                }
                 Ok(changes)
             }
         }
@@ -256,18 +257,6 @@ impl ClaudeSessionRegistry {
             .collect()
     }
 
-    /// Returns the most recently active session. Retired sessions never become
-    /// a display candidate merely because a delayed event arrived.
-    pub fn selected_snapshot(&self) -> Option<ClaudeSessionSnapshot> {
-        self.order.iter().rev().find_map(|key| {
-            self.sessions
-                .get(key)
-                .map(ClaudeSessionReducer::snapshot)
-                .filter(|snapshot| snapshot.session_active)
-                .cloned()
-        })
-    }
-
     pub fn snapshots(&self) -> Vec<ClaudeSessionSnapshot> {
         self.order
             .iter()
@@ -281,13 +270,6 @@ impl ClaudeSessionRegistry {
         self.next_revision = self.next_revision.wrapping_add(1);
         revision
     }
-
-    fn touch(&mut self, key: &(String, String)) {
-        if let Some(index) = self.order.iter().position(|candidate| candidate == key) {
-            let key = self.order.remove(index);
-            self.order.push(key);
-        }
-    }
 }
 
 impl ClaudeSessionReducer {
@@ -297,6 +279,7 @@ impl ClaudeSessionReducer {
             snapshot: ClaudeSessionSnapshot {
                 launch_id: launch_id.into(),
                 session_id: session_id.into(),
+                registration_order: next_ai_session_registration_order(),
                 session_active: false,
                 activity_state: AiActivityState::None,
                 work_phase: AiWorkPhase::Unspecified,
@@ -310,6 +293,7 @@ impl ClaudeSessionReducer {
             active_items: HashMap::new(),
             tool_tombstones: VecDeque::new(),
             last_relevant_event: None,
+            completed_deadline: None,
         }
     }
 
@@ -337,6 +321,21 @@ impl ClaudeSessionReducer {
 
     pub fn tick(&mut self, now: Instant) -> Vec<ClaudeStateChange> {
         self.prune_tombstones(now);
+        if self
+            .completed_deadline
+            .is_some_and(|deadline| now >= deadline)
+        {
+            self.completed_deadline = None;
+            if self.snapshot.session_active
+                && self.snapshot.activity_state == AiActivityState::Completed
+            {
+                return vec![self.emit(
+                    AiActivityState::Available,
+                    AiWorkPhase::Unspecified,
+                    ClaudeStateChangeReason::CompletedExpired,
+                )];
+            }
+        }
         if !self.snapshot.session_active || !self.turn_active {
             return Vec::new();
         }
@@ -402,6 +401,7 @@ impl ClaudeSessionReducer {
                 self.retired = false;
                 self.snapshot.desynchronized = false;
                 self.last_relevant_event = Some(now);
+                self.completed_deadline = None;
                 Ok(vec![self.emit(
                     AiActivityState::Available,
                     AiWorkPhase::Unspecified,
@@ -416,6 +416,7 @@ impl ClaudeSessionReducer {
                 self.requests.clear();
                 self.active_items.clear();
                 self.last_relevant_event = Some(now);
+                self.completed_deadline = None;
                 Ok(vec![self.emit(
                     AiActivityState::Working,
                     AiWorkPhase::Thinking,
@@ -500,11 +501,13 @@ impl ClaudeSessionReducer {
                     return Ok(Vec::new());
                 }
                 let (activity, reason) = if event == ClaudeCanonicalEvent::TurnComplete {
+                    self.completed_deadline = Some(now + CLAUDE_COMPLETED_DISPLAY_DURATION);
                     (
                         AiActivityState::Completed,
                         ClaudeStateChangeReason::TurnCompleted,
                     )
                 } else {
+                    self.completed_deadline = None;
                     (AiActivityState::Error, ClaudeStateChangeReason::TurnFailed)
                 };
                 self.finish_turn(now);
@@ -529,6 +532,7 @@ impl ClaudeSessionReducer {
         self.requests.clear();
         self.active_items.clear();
         self.last_relevant_event = None;
+        self.completed_deadline = None;
         if !self.snapshot.session_active {
             return Vec::new();
         }
@@ -666,10 +670,23 @@ mod tests {
     }
 
     fn hook(name: &str, body: Value) -> ClaudeObserverEvent {
+        hook_for_session("session-1", name, body)
+    }
+
+    fn hook_for_session(session_id: &str, name: &str, body: Value) -> ClaudeObserverEvent {
+        hook_for_launch_session("launch-1", session_id, name, body)
+    }
+
+    fn hook_for_launch_session(
+        launch_id: &str,
+        session_id: &str,
+        name: &str,
+        body: Value,
+    ) -> ClaudeObserverEvent {
         ClaudeObserverEvent::Hook(ClaudeHookEvent {
-            launch_id: "launch-1".to_string(),
+            launch_id: launch_id.to_string(),
             hook_event_name: name.to_string(),
-            session_id: Some("session-1".to_string()),
+            session_id: Some(session_id.to_string()),
             body,
         })
     }
@@ -735,6 +752,62 @@ mod tests {
         assert_eq!(changes[0].state.activity_state, AiActivityState::Working);
         assert_eq!(changes[0].state.work_phase, AiWorkPhase::Unspecified);
         assert!(changes[0].state.session_active);
+    }
+
+    #[test]
+    fn completed_expires_after_display_duration() {
+        let now = Instant::now();
+        let mut reducer = reducer();
+        start_session(&mut reducer, now);
+        reducer
+            .apply(hook("UserPromptSubmit", serde_json::json!({})), now)
+            .unwrap();
+        let completed = reducer
+            .apply(hook("Stop", serde_json::json!({})), now)
+            .unwrap();
+        assert_eq!(
+            completed[0].state.activity_state,
+            AiActivityState::Completed
+        );
+        assert!(reducer
+            .tick(now + CLAUDE_COMPLETED_DISPLAY_DURATION - Duration::from_millis(1))
+            .is_empty());
+
+        let expired = reducer.tick(now + CLAUDE_COMPLETED_DISPLAY_DURATION);
+        assert_eq!(expired.len(), 1);
+        assert_eq!(expired[0].reason, ClaudeStateChangeReason::CompletedExpired);
+        assert_eq!(expired[0].state.activity_state, AiActivityState::Available);
+        assert_eq!(
+            expired[0].state.revision,
+            completed[0].state.revision.wrapping_add(1)
+        );
+        assert!(reducer
+            .tick(now + CLAUDE_COMPLETED_DISPLAY_DURATION + Duration::from_secs(1))
+            .is_empty());
+    }
+
+    #[test]
+    fn starting_a_new_turn_cancels_completed_expiration() {
+        let now = Instant::now();
+        let mut reducer = reducer();
+        start_session(&mut reducer, now);
+        reducer
+            .apply(hook("UserPromptSubmit", serde_json::json!({})), now)
+            .unwrap();
+        reducer
+            .apply(hook("Stop", serde_json::json!({})), now)
+            .unwrap();
+        let working = reducer
+            .apply(
+                hook("UserPromptSubmit", serde_json::json!({})),
+                now + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(working[0].state.activity_state, AiActivityState::Working);
+        assert!(reducer
+            .tick(now + CLAUDE_COMPLETED_DISPLAY_DURATION)
+            .is_empty());
+        assert_eq!(reducer.snapshot().activity_state, AiActivityState::Working);
     }
 
     #[test]
@@ -934,23 +1007,69 @@ mod tests {
     }
 
     #[test]
-    fn registry_retires_a_launch_and_selects_the_latest_active_session() {
+    fn registry_keeps_sessions_in_stable_registration_order() {
         let now = Instant::now();
         let mut registry = ClaudeSessionRegistry::new();
         registry
             .apply(hook("SessionStart", serde_json::json!({})), now)
             .unwrap();
-        let second = ClaudeObserverEvent::Hook(ClaudeHookEvent {
-            launch_id: "launch-1".to_string(),
-            hook_event_name: "SessionStart".to_string(),
-            session_id: Some("session-2".to_string()),
-            body: serde_json::json!({}),
-        });
+        let second = hook_for_session("session-2", "SessionStart", serde_json::json!({}));
         registry.apply(second, now).unwrap();
-        assert_eq!(
-            registry.selected_snapshot().unwrap().session_id,
-            "session-2"
-        );
+        registry
+            .apply(
+                hook_for_session("session-1", "UserPromptSubmit", serde_json::json!({})),
+                now,
+            )
+            .unwrap();
+        let sessions = registry.snapshots();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].session_id, "session-1");
+        assert_eq!(sessions[1].session_id, "session-2");
+    }
+
+    #[test]
+    fn registry_expires_completed_sessions_while_they_are_not_displayed() {
+        let now = Instant::now();
+        let mut registry = ClaudeSessionRegistry::new();
+        registry
+            .apply(hook("SessionStart", serde_json::json!({})), now)
+            .unwrap();
+        registry
+            .apply(
+                hook_for_session("session-2", "SessionStart", serde_json::json!({})),
+                now,
+            )
+            .unwrap();
+        registry
+            .apply(hook("UserPromptSubmit", serde_json::json!({})), now)
+            .unwrap();
+        registry
+            .apply(hook("Stop", serde_json::json!({})), now)
+            .unwrap();
+
+        let changes = registry.tick(now + CLAUDE_COMPLETED_DISPLAY_DURATION);
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].state.session_id, "session-1");
+        assert_eq!(changes[0].reason, ClaudeStateChangeReason::CompletedExpired);
+        assert_eq!(changes[0].state.activity_state, AiActivityState::Available);
+        let snapshots = registry.snapshots();
+        assert_eq!(snapshots[0].activity_state, AiActivityState::Available);
+        assert_eq!(snapshots[1].activity_state, AiActivityState::Available);
+    }
+
+    #[test]
+    fn registry_retires_all_sessions_for_a_launch() {
+        let now = Instant::now();
+        let mut registry = ClaudeSessionRegistry::new();
+        registry
+            .apply(hook("SessionStart", serde_json::json!({})), now)
+            .unwrap();
+        registry
+            .apply(
+                hook_for_session("session-2", "SessionStart", serde_json::json!({})),
+                now,
+            )
+            .unwrap();
         let changes = registry
             .apply(
                 ClaudeObserverEvent::WrapperExited(ClaudeWrapperExited {
@@ -961,7 +1080,42 @@ mod tests {
             )
             .unwrap();
         assert_eq!(changes.len(), 2);
-        assert!(registry.selected_snapshot().is_none());
+        assert!(registry
+            .snapshots()
+            .iter()
+            .all(|snapshot| !snapshot.session_active));
+    }
+
+    #[test]
+    fn registry_keeps_independent_launches_as_distinct_sessions() {
+        let now = Instant::now();
+        let mut registry = ClaudeSessionRegistry::new();
+        registry
+            .apply(
+                hook_for_launch_session(
+                    "launch-1",
+                    "session-1",
+                    "SessionStart",
+                    serde_json::json!({}),
+                ),
+                now,
+            )
+            .unwrap();
+        registry
+            .apply(
+                hook_for_launch_session(
+                    "launch-2",
+                    "session-2",
+                    "SessionStart",
+                    serde_json::json!({}),
+                ),
+                now,
+            )
+            .unwrap();
+        let sessions = registry.snapshots();
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].launch_id, "launch-1");
+        assert_eq!(sessions[1].launch_id, "launch-2");
     }
 
     #[test]

@@ -40,7 +40,7 @@ Host Link v1 は 32 byte packet と packet type ごとの個別 layout を使う
 | `APP_LAYER` | v2 `APP_LAYER` packet 送信と rule 管理 | `APP_LAYER` packet 受信、`APP_LAYER` capability | device ごとの UID 設定がある場合のみ送信 |
 | `TIME_SYNC` | v2 `TIME_SYNC` packet 送信 | `TIME_SYNC` packet 受信、`TIME_SYNC` capability | 毎秒送信はしない |
 | `AI_USAGE` | background worker の snapshot を v2 `AI_USAGE` packet で送信 | `AI_USAGE` packet 受信、`AI_USAGE` capability | raw credentials や API response は送信しない |
-| `AI_CLIENT_STATE` | Codex は `client_type=0x01`、Claude Code は `client_type=0x02` で状態を送信 | `AI_CLIENT_STATE` capability。Claude Code 表示には `AI_CLIENT_CLAUDE_CODE` capability も必要 | Claude Code capability のない既存 device へ `0x02` は送信しない |
+| `AI_CLIENT_STATE` | Codex は `client_type=0x01`、Claude Code は `client_type=0x02` で状態を送信。slot対応deviceには8-byte payloadで論理`display_slot`を送信 | `AI_CLIENT_STATE` capability。Claude Code 表示には `AI_CLIENT_CLAUDE_CODE`、複数slot表示には `AI_CLIENT_DISPLAY_SLOT` capability も必要 | bit 13なしの既存deviceにはslot 0だけを従来6/7-byte形式で送信 |
 | `BATTERY_STATUS` | v2 uplink 受信と UI / tray 表示 | `BATTERY_STATUS` uplink 送信 | `source=0` は central/self、`1..=3` は peripheral |
 | `HOST_ACTION` | allowlist に基づく PC 側 action 実行 | `HOST_ACTION` uplink 送信、`HOST_ACTION` capability | header `seq` で duplicate を抑制 |
 | `KEY_STATS` | 押下回数差分の保存と表示 | `KEY_STATS` uplink 送信、`KEY_STATS` capability | 記録するのは position と回数のみ |
@@ -55,3 +55,5 @@ Host Link v1 は 32 byte packet と packet type ごとの個別 layout を使う
 - `DEVICE_HELLO` v2 は `capabilities` と `device_uid_hash` を返します。v1 の `protocol_min` / `protocol_max` はありません。
 - `device_uid_hash = 0` は host 側で `None` に正規化します。
 - Config RPCは`ENCODER` / `COMBO` featureをHost／Firmwareとも実装済みです。ComboはKeymap Viewerの共通保存／破棄／`.keymapに戻す`と`.keymap.json` Export／Restoreへ統合済みです。tap danceなど52 byte payloadを超えるデータの分割方式は将来拡張です。
+- Codex CLI `0.147.0`では、1つのApp Serverに2つのCLI相当clientを接続する互換性ゲートに合格しています。Hostは最大8接続、最大32 threadを内部管理します。実ScreenKeyでの複数Codex切替・非選択event非奪取・片側切断・approval/input分離は確認済みです。3秒以内resume時の表示とrevision維持だけは未実施です。
+- Keylink Studioは最大8個の論理表示slotを管理し、slotごとにAutoまたは固定sessionを設定できます。Host Linkの8-byte slot payloadはbit 13でgateされます。bit 13対応Firmwareを搭載した2画面keyboardで、2026-08-09に個別表示、slot間分離、slot別cycle、固定／自動割当、slot数縮退を実機確認しました。bit 13なしの既存Firmwareはslot 0の従来表示を維持します。

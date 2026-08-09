@@ -162,6 +162,23 @@ header `seq` は duplicate 抑制に使います。
 | `4 + 3i` | 1 | `position[i]` | key position |
 | `5 + 3i .. 6 + 3i` | 2 | `delta[i]` | u16 LE, non-zero |
 
+### AI_CLIENT_STATE (downlink)
+
+AI client state is carried by `STATE_UPDATE` with `feature = 0x0A`
+(`AI_CLIENT`). The original 6-byte payload and the 7-byte
+work-phase extension remain byte-for-byte unchanged.
+
+| Payload length | Required capability | Fields |
+| ---: | --- | --- |
+| 6 | bit 10 `AI_CLIENT_STATE` | `client_type`, `client_variant`, `session_active`, `activity_state`, `revision` (u16 LE) |
+| 7 | bits 10 + 11 `AI_CLIENT_WORK_PHASE` | 6-byte fields followed by `work_phase` |
+| 8 | bits 10 + 11 + 13 `AI_CLIENT_DISPLAY_SLOT` | 7-byte fields followed by `display_slot` (`0..=7`) |
+
+`display_slot` is a logical destination selected by Keylink Studio. It is not a
+screen ID, thread ID, or session ID. Devices without bit 13 receive only slot
+zero in the legacy 6/7-byte form. A host may broadcast the same logical slot
+state to multiple connected keyboards.
+
 ### LAYER_STATE
 
 `payload_len = 8`
@@ -200,6 +217,7 @@ header `seq` は duplicate 抑制に使います。
 | 10 | `AI_CLIENT_STATE` | AI client state downlink |
 | 11 | `AI_CLIENT_WORK_PHASE` | 7-byte AI client state payload with work phase |
 | 12 | `AI_CLIENT_CLAUDE_CODE` | `client_type=0x02 CLAUDE_CODE` renderer support; bit 10 is also required |
+| 13 | `AI_CLIENT_DISPLAY_SLOT` | 8-byte `AI_CLIENT_STATE` payload with a logical `display_slot`; bits 10 and 11 are also required |
 
 AI client type は `0x01 CODEX`、`0x02 CLAUDE_CODE` とします。Host は Claude Code state を、bit 10 と bit 12 の両方を広告した device にだけ送信します。bit 12 を広告しない既存 device へ未知の client type は送信しません。
 

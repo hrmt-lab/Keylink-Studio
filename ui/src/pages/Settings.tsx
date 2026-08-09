@@ -3,6 +3,7 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { Save, RefreshCcw, Check, X, Plus, Copy, Play, Square, Terminal, FolderOpen } from "lucide-react";
 import {
   getCodexIntegrationStatus,
+  getAiDisplaySlots,
   getLaunchAtLogin,
   launchClaudeCode,
   launchCodexCli,
@@ -12,6 +13,8 @@ import {
   startCodexIntegration,
   stopCodexIntegration,
   stopClaudeCode,
+  pinAiDisplaySlot,
+  setAiDisplaySlotAuto,
 } from "../api";
 import { Toggle } from "../components/Toggle";
 import { ErrorNotice, PageHeader, PrimaryButton, SecondaryButton, SectionCard, SettingRow } from "../components/Ui";
@@ -26,7 +29,7 @@ import {
   addCustomAccent,
   removeCustomAccent,
 } from "../lib/theme";
-import type { AppConfig, CodexBrokerStatus, MonitorStatus, WslDistribution } from "../types";
+import type { AiDisplaySlots, AiDisplayTarget, AppConfig, CodexBrokerStatus, MonitorStatus, WslDistribution } from "../types";
 
 interface Props {
   config: AppConfig;
@@ -358,7 +361,11 @@ function CodexIntegration({
   const editable = phase === "stopped" || phase === "error";
   const running = !editable;
   const launchable =
-    phase === "stopped" || phase === "error" || phase === "waiting_for_client";
+    phase === "stopped" ||
+    phase === "error" ||
+    phase === "waiting_for_client" ||
+    phase === "connected" ||
+    phase === "reconnecting";
   const capableDevices = status.host_link_devices.filter(
     (device) => (device.capabilities & (1 << 10)) !== 0,
   ).length;
@@ -503,6 +510,12 @@ function CodexIntegration({
             <div>
               <p className="text-sm font-medium text-ink">{t(`settings.codex.phase.${phase}`)}</p>
               <p className="mt-0.5 text-xs text-faint">{broker?.codex_version ? t("settings.codex.version", { version: broker.codex_version }) : t("settings.codex.version_unknown")}</p>
+              <p className="mt-0.5 text-xs text-faint">
+                {t("settings.codex.connected_clients", {
+                  count: broker?.connected_client_count ?? 0,
+                  max: broker?.max_client_count ?? 8,
+                })}
+              </p>
             </div>
           </div>
           {running ? (
@@ -599,7 +612,7 @@ function CodexIntegration({
         <div className="flex flex-wrap items-center gap-3">
           <PrimaryButton
             onClick={() => void launchCli()}
-            disabled={busy || launchBusy || codexConfigDirty || !launchable || broker?.client_connected === true}
+            disabled={busy || launchBusy || codexConfigDirty || !launchable || (broker?.connected_client_count ?? 0) >= (broker?.max_client_count ?? 8)}
             loading={launchBusy}
             icon={<Terminal size={15} />}
           >
@@ -613,6 +626,7 @@ function CodexIntegration({
         <span className={`text-sm font-medium ${capableDevices > 0 ? "text-ink" : "text-amber-700"}`}>{t("settings.codex.device_count", { count: capableDevices })}</span>
       </SettingRow>
       {capableDevices === 0 && <p className="border-t border-background px-5 py-3 text-xs text-amber-700">{t("settings.codex.no_devices")}</p>}
+      <AiDisplaySlotsSettings draft={draft} setDraft={setDraft} />
       {broker?.cli_connection_command && <div className="border-t border-background px-5 py-4">
         <p className="text-sm font-medium text-ink">{t("settings.codex.command")}</p>
         <p className="mt-1 text-xs text-faint">{t("settings.codex.command.desc")}</p>
@@ -628,6 +642,107 @@ function CodexIntegration({
         />
       )}
     </SectionCard>
+  );
+}
+
+function AiDisplaySlotsSettings({
+  draft,
+  setDraft,
+}: {
+  draft: AppConfig;
+  setDraft: React.Dispatch<React.SetStateAction<AppConfig>>;
+}) {
+  const [display, setDisplay] = useState<AiDisplaySlots | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const refresh = () => {
+    void getAiDisplaySlots()
+      .then((next) => {
+        setDisplay(next);
+        setError(null);
+      })
+      .catch((reason) => setError(String(reason)));
+  };
+  useEffect(() => {
+    refresh();
+    const timer = window.setInterval(refresh, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+  const setSlotCount = (slot_count: number) => {
+    setDraft((current) => ({
+      ...current,
+      ai_client: {
+        ...current.ai_client,
+        display: { ...current.ai_client.display, slot_count },
+      },
+    }));
+  };
+  const selectTarget = async (slot: number, encoded: string) => {
+    if (!display) return;
+    if (encoded === "auto") {
+      await setAiDisplaySlotAuto(slot);
+    } else {
+      const target = display.candidates[Number(encoded)]?.target;
+      if (target) await pinAiDisplaySlot(slot, target as AiDisplayTarget);
+    }
+    refresh();
+  };
+  return (
+    <div className="border-t border-background px-5 py-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <p className="text-sm font-medium text-ink">ScreenKey表示slot</p>
+          <p className="mt-1 text-xs text-faint">各slotへ別のAIセッションを割り当てます。割り当てはこの起動中だけ保持されます。</p>
+        </div>
+        <label className="flex items-center gap-2 text-xs text-muted">
+          slot数
+          <input
+            className="input !w-16 text-right font-mono"
+            type="number"
+            min={1}
+            max={8}
+            value={draft.ai_client.display.slot_count}
+            onChange={(event) => setSlotCount(Math.max(1, Math.min(8, Number(event.target.value) || 1)))}
+          />
+        </label>
+      </div>
+      {display && display.slot_capable_device_count === 0 && (
+        <p className="mt-3 text-xs text-amber-700">接続中Firmwareは複数slot未対応です。slot 0以外は将来のFirmware対応後に表示されます。</p>
+      )}
+      {error && <p className="mt-3 text-xs text-red-600">{error}</p>}
+      <div className="mt-3 space-y-2">
+        {display?.slots.map((entry) => {
+          const pinnedTarget = entry.mode.mode === "pinned" ? entry.mode.target : null;
+          return <div key={entry.slot} className="flex flex-wrap items-center justify-between gap-2 rounded-xl bg-plate px-3 py-2 ring-1 ring-border">
+            <div>
+              <p className="text-xs font-medium text-ink">ScreenKey {entry.slot + 1}</p>
+              <p className="text-xs text-faint">{entry.target ? `${entry.snapshot.client_type} / ${entry.snapshot.activity_state}` : "未割り当て"}</p>
+            </div>
+            <select
+              className="input !w-56 max-w-full text-xs"
+              value={
+                pinnedTarget === null
+                  ? "auto"
+                  : String(
+                      display.candidates.findIndex(
+                        (candidate) => JSON.stringify(candidate.target) === JSON.stringify(pinnedTarget),
+                      ),
+                    )
+              }
+              onChange={(event) => void selectTarget(entry.slot, event.target.value)}
+            >
+              <option value="auto">自動割り当て</option>
+              {pinnedTarget !== null &&
+                !display.candidates.some(
+                  (candidate) => JSON.stringify(candidate.target) === JSON.stringify(pinnedTarget),
+                ) && <option value="-1" disabled>固定先は現在利用できません</option>}
+              {display.candidates.map((candidate, index) => (
+                <option key={`${candidate.target.kind}-${index}`} value={index}>{candidate.label}</option>
+              ))}
+            </select>
+          </div>;
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -687,25 +802,28 @@ function ClaudeCodeIntegration({
     <SectionCard title="Claude Code連携（ScreenKey）">
       <div className="px-5 py-4">
         <p className="text-xs text-faint">
-          Claude CodeをWindows Terminalで起動し、状態をScreenKeyへ送信します。Firmware対応前は既存のCodex表示として送信します。
+          Claude CodeをWindows Terminalで起動し、状態をScreenKeyへ送信します。複数起動した場合は、HOST_ACTIONを割り当てたキーでCodexを含む表示セッションを切り替えられます。
         </p>
       </div>
       {error && <div className="border-t border-background px-5 py-3"><ErrorNotice message="Claude Code連携を開始できません" details={error} /></div>}
       <SettingRow label="Claude Code実行ファイル" description="空欄ならPATH上の claude を使用します。" align="start">
-        <input className="input w-72 max-w-full font-mono text-xs" value={launcher.executable_path ?? ""} disabled={running} onChange={(event) => update({ executable_path: event.target.value.trim() || null })} placeholder="claude" />
+        <input className="input w-72 max-w-full font-mono text-xs" value={launcher.executable_path ?? ""} disabled={busy} onChange={(event) => update({ executable_path: event.target.value.trim() || null })} placeholder="claude" />
       </SettingRow>
       <SettingRow label="プロジェクト" description="Claude Codeを起動するWindowsのプロジェクトフォルダです。" align="start">
         <div className="flex w-96 max-w-full items-center gap-2">
-          <input className="input min-w-0 flex-1 font-mono text-xs" value={launcher.project_directory ?? ""} disabled={running} onChange={(event) => update({ project_directory: event.target.value || null })} placeholder="C:\\path\\to\\project" />
-          <SecondaryButton onClick={() => void browse()} disabled={running} icon={<FolderOpen size={14} />}>参照</SecondaryButton>
+          <input className="input min-w-0 flex-1 font-mono text-xs" value={launcher.project_directory ?? ""} disabled={busy} onChange={(event) => update({ project_directory: event.target.value || null })} placeholder="C:\\path\\to\\project" />
+          <SecondaryButton onClick={() => void browse()} disabled={busy} icon={<FolderOpen size={14} />}>参照</SecondaryButton>
         </div>
       </SettingRow>
       <div className="border-t border-background px-5 py-4">
-        {running ? (
-          <SecondaryButton onClick={() => void stop()} disabled={busy} loading={busy} icon={<Square size={14} />}>Claude Code連携を停止</SecondaryButton>
-        ) : (
-          <PrimaryButton onClick={() => void launch()} disabled={busy} loading={busy} icon={<Terminal size={15} />}>Claude Codeを起動</PrimaryButton>
-        )}
+        <div className="flex flex-wrap gap-2">
+          <PrimaryButton onClick={() => void launch()} disabled={busy} loading={busy} icon={<Terminal size={15} />}>
+            {running ? "Claude Codeを追加起動" : "Claude Codeを起動"}
+          </PrimaryButton>
+          {running && (
+            <SecondaryButton onClick={() => void stop()} disabled={busy} loading={busy} icon={<Square size={14} />}>すべてのClaude Code連携を停止</SecondaryButton>
+          )}
+        </div>
       </div>
     </SectionCard>
   );

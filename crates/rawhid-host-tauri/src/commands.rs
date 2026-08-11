@@ -4159,12 +4159,7 @@ pub(crate) fn spawn_ai_refresh_watcher(
             .as_ref()
             .map(|runtime| runtime.statuses(stale_after_sec))
             .unwrap_or_default();
-        let snapshot = {
-            let mut s = status.lock().unwrap();
-            s.ai_usage = statuses;
-            s.clone()
-        };
-        emit_status(&app, &snapshot);
+        update_status(&app, &status, |s| s.ai_usage = statuses);
     });
 }
 
@@ -4209,9 +4204,42 @@ fn rebuild_runner(
     ))
 }
 
+/// Mutate the shared monitor status and publish the result.
+///
+/// The status lock must be released before publishing. `TrayIcon::set_tooltip`
+/// blocks until the main thread runs it, and the main thread takes this same
+/// lock from IPC commands such as `get_status` and `get_ai_display_slots`, so
+/// publishing while holding the guard deadlocks the two against each other.
+/// Locking is kept inside this helper so no caller can reintroduce that.
+fn update_status<F>(app: &AppHandle, status: &Arc<std::sync::Mutex<MonitorStatus>>, mutate: F)
+where
+    F: FnOnce(&mut MonitorStatus),
+{
+    update_status_if(app, status, |s| {
+        mutate(s);
+        true
+    });
+}
+
+/// [`update_status`] that publishes only when `mutate` reports a real change.
+fn update_status_if<F>(app: &AppHandle, status: &Arc<std::sync::Mutex<MonitorStatus>>, mutate: F)
+where
+    F: FnOnce(&mut MonitorStatus) -> bool,
+{
+    let snapshot = {
+        let mut s = status.lock().unwrap();
+        mutate(&mut s).then(|| s.clone())
+    };
+    if let Some(snapshot) = snapshot {
+        emit_status(app, &snapshot);
+    }
+}
+
 /// Emit the status snapshot to the UI and refresh the tray tooltip together so
 /// the tray always reflects the latest device/battery state.
-pub(crate) fn emit_status(app: &AppHandle, status: &MonitorStatus) {
+///
+/// Never call this while holding the status lock; go through [`update_status`].
+fn emit_status(app: &AppHandle, status: &MonitorStatus) {
     let _ = app.emit("status-update", status);
     update_tray_tooltip(app, status);
 }
@@ -4524,17 +4552,18 @@ fn apply_monitor_config(
     *interval = Duration::from_millis(next_config.polling.interval_ms.max(1));
     *uplink_interval = Duration::from_millis(next_config.polling.uplink_interval_ms.max(5));
 
-    let mut s = status.lock().unwrap();
-    s.current_layer = None;
-    s.current_rule = None;
-    s.connected_devices = 0;
-    s.connected_device_names = Vec::new();
-    s.host_link_devices = Vec::new();
-    s.device_battery = Vec::new();
-    s.device_layers = Vec::new();
-    s.ai_usage = runner.ai_usage_statuses();
-    s.last_error = None;
-    emit_status(app, &s);
+    let ai_usage = runner.ai_usage_statuses();
+    update_status(app, status, |s| {
+        s.current_layer = None;
+        s.current_rule = None;
+        s.connected_devices = 0;
+        s.connected_device_names = Vec::new();
+        s.host_link_devices = Vec::new();
+        s.device_battery = Vec::new();
+        s.device_layers = Vec::new();
+        s.ai_usage = ai_usage;
+        s.last_error = None;
+    });
 
     Ok(())
 }
@@ -4557,13 +4586,13 @@ fn process_command(
         MonitorCommand::Shutdown => true,
         MonitorCommand::SetAutomationEnabled(enabled, reply) => {
             *automation_enabled = enabled;
-            let mut s = status.lock().unwrap();
-            s.running = enabled;
-            if !enabled {
-                s.current_layer = None;
-                s.current_rule = None;
-            }
-            emit_status(app, &s);
+            update_status(app, status, |s| {
+                s.running = enabled;
+                if !enabled {
+                    s.current_layer = None;
+                    s.current_rule = None;
+                }
+            });
             let _ = reply.send(Ok(()));
             false
         }
@@ -4591,11 +4620,11 @@ fn process_command(
                     log_counter,
                 ) {
                     *automation_enabled = false;
-                    let mut s = status.lock().unwrap();
-                    s.running = false;
-                    s.current_layer = None;
-                    s.current_rule = None;
-                    emit_status(app, &s);
+                    update_status(app, status, |s| {
+                        s.running = false;
+                        s.current_layer = None;
+                        s.current_rule = None;
+                    });
                 }
             } else {
                 runner.discard_uplink_only();
@@ -4620,11 +4649,7 @@ fn process_command(
                 actions_cfg,
             ) {
                 let msg = format!("HID init error: {}", e);
-                {
-                    let mut s = status.lock().unwrap();
-                    s.last_error = Some(msg.clone());
-                    emit_status(app, &s);
-                }
+                update_status(app, status, |s| s.last_error = Some(msg.clone()));
                 let entry = add_log(log_entries, log_counter, "error", &msg);
                 let _ = app.emit("log-added", entry);
             }
@@ -4828,12 +4853,10 @@ fn run_monitor_loop(
                 if !init_error_logged {
                     let msg = format!("HID init error: {error}");
                     let entry = add_log(&log_entries, &log_counter, "error", &msg);
-                    {
-                        let mut s = status.lock().unwrap();
+                    update_status(&app, &status, |s| {
                         s.running = automation_enabled;
                         s.last_error = Some(msg);
-                        emit_status(&app, &s);
-                    }
+                    });
                     let _ = app.emit("log-added", entry);
                     init_error_logged = true;
                 }
@@ -4869,12 +4892,10 @@ fn run_monitor_loop(
     let mut actions_cfg = config.actions.clone();
     runner.set_key_stats_store(Arc::clone(&extras.key_stats));
 
-    {
-        let mut s = status.lock().unwrap();
+    update_status(&app, &status, |s| {
         s.running = automation_enabled;
         s.last_error = None;
-        emit_status(&app, &s);
-    }
+    });
 
     let entry = add_log(
         &log_entries,
@@ -4925,24 +4946,22 @@ fn run_monitor_loop(
         if automation_enabled {
             match runner.tick() {
                 Ok(RunEvent::SetLayer { layer, rule_name }) => {
-                    {
-                        let mut s = status.lock().unwrap();
+                    update_status(&app, &status, |s| {
                         s.current_layer = Some(layer);
                         s.current_rule = Some(rule_name.clone());
-                        apply_runner_view(&mut s, &runner);
+                        apply_runner_view(s, &runner);
                         s.last_error = None;
-                        emit_status(&app, &s);
-                    }
+                    });
                     let msg = format!("Switched to layer {} (rule: {})", layer, rule_name);
                     let entry = add_log(&log_entries, &log_counter, "info", &msg);
                     let _ = app.emit("log-added", entry);
                 }
                 Ok(RunEvent::Clear) => {
-                    let mut s = status.lock().unwrap();
-                    s.current_layer = None;
-                    s.current_rule = None;
-                    apply_runner_view(&mut s, &runner);
-                    emit_status(&app, &s);
+                    update_status(&app, &status, |s| {
+                        s.current_layer = None;
+                        s.current_rule = None;
+                        apply_runner_view(s, &runner);
+                    });
                 }
                 Ok(RunEvent::Unchanged) => {
                     let devices = runner.verified_device_count();
@@ -4950,24 +4969,22 @@ fn run_monitor_loop(
                     let ai_usage = runner.ai_usage_statuses();
                     let device_battery = runner.battery_statuses();
                     let device_layers = runner.layer_states();
-                    let mut s = status.lock().unwrap();
-                    if s.connected_devices != devices
-                        || s.ai_usage != ai_usage
-                        || s.host_link_devices != host_link_devices
-                        || s.device_battery != device_battery
-                        || s.device_layers != device_layers
-                    {
-                        apply_runner_view(&mut s, &runner);
-                        emit_status(&app, &s);
-                    }
+                    update_status_if(&app, &status, |s| {
+                        if s.connected_devices == devices
+                            && s.ai_usage == ai_usage
+                            && s.host_link_devices == host_link_devices
+                            && s.device_battery == device_battery
+                            && s.device_layers == device_layers
+                        {
+                            return false;
+                        }
+                        apply_runner_view(s, &runner);
+                        true
+                    });
                 }
                 Err(e) => {
                     let msg = format!("Error: {}", e);
-                    {
-                        let mut s = status.lock().unwrap();
-                        s.last_error = Some(msg.clone());
-                        emit_status(&app, &s);
-                    }
+                    update_status(&app, &status, |s| s.last_error = Some(msg.clone()));
                     let entry = add_log(&log_entries, &log_counter, "error", &msg);
                     let _ = app.emit("log-added", entry);
                 }
@@ -4983,27 +5000,27 @@ fn run_monitor_loop(
                 &log_counter,
             ) {
                 automation_enabled = false;
-                let mut s = status.lock().unwrap();
-                s.running = false;
-                s.current_layer = None;
-                s.current_rule = None;
-                emit_status(&app, &s);
+                update_status(&app, &status, |s| {
+                    s.running = false;
+                    s.current_layer = None;
+                    s.current_rule = None;
+                });
             }
         } else {
             match runner.tick_transport_only() {
                 Ok(()) => {
-                    let mut s = status.lock().unwrap();
-                    apply_runner_view(&mut s, &runner);
-                    s.running = false;
-                    s.device_battery.clear();
-                    s.device_layers.clear();
-                    s.last_error = None;
-                    emit_status(&app, &s);
+                    update_status(&app, &status, |s| {
+                        apply_runner_view(s, &runner);
+                        s.running = false;
+                        s.device_battery.clear();
+                        s.device_layers.clear();
+                        s.last_error = None;
+                    });
                 }
                 Err(error) => {
-                    let mut s = status.lock().unwrap();
-                    s.last_error = Some(format!("Error: {error}"));
-                    emit_status(&app, &s);
+                    update_status(&app, &status, |s| {
+                        s.last_error = Some(format!("Error: {error}"))
+                    });
                 }
             }
         }
@@ -5086,11 +5103,7 @@ fn run_monitor_loop(
         ) {
             let msg = format!("AI client state send error: {error}");
             let entry = add_log(&log_entries, &log_counter, "error", &msg);
-            {
-                let mut s = status.lock().unwrap();
-                s.last_error = Some(msg);
-                emit_status(&app, &s);
-            }
+            update_status(&app, &status, |s| s.last_error = Some(msg));
             let _ = app.emit("log-added", entry);
         }
         for slot in retired_slots {
@@ -5185,11 +5198,11 @@ fn run_monitor_loop(
                     &log_counter,
                 ) {
                     automation_enabled = false;
-                    let mut s = status.lock().unwrap();
-                    s.running = false;
-                    s.current_layer = None;
-                    s.current_rule = None;
-                    emit_status(&app, &s);
+                    update_status(&app, &status, |s| {
+                        s.running = false;
+                        s.current_layer = None;
+                        s.current_rule = None;
+                    });
                     break 'wait;
                 }
             } else {
@@ -5205,8 +5218,7 @@ fn run_monitor_loop(
         store.flush_all();
     }
 
-    {
-        let mut s = status.lock().unwrap();
+    update_status(&app, &status, |s| {
         s.running = false;
         s.connected_devices = 0;
         s.connected_device_names = Vec::new();
@@ -5215,8 +5227,7 @@ fn run_monitor_loop(
         s.current_rule = None;
         s.device_battery = Vec::new();
         s.device_layers = Vec::new();
-        emit_status(&app, &s);
-    }
+    });
 
     let entry = add_log(
         &log_entries,

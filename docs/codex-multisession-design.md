@@ -155,8 +155,21 @@ Codex CLI versionとexperimental schema hashの既存preflightは維持する。
 ### 7.3 thread切替
 
 同じ接続が別threadをstart、resume、forkしても、以前のthreadを直ちに終了しない。
-以前のthreadは同じ接続が観測した候補として残り、最後のsnapshotを保持する。
-そのため、1つのCLIで複数threadを行き来した場合もセッション切替候補にできる。
+以前のthreadは同じ接続が観測したsessionとしてRegistryへ残り、最後のsnapshotを保持する。
+
+ただし表示候補へは、接続ごとに1件だけを載せる。各接続はフォーカスthreadを1件持ち、
+次のeventでフォーカスを更新する。
+
+- `SessionStarted`
+- `SessionForked`
+- 所有threadに対する`TurnStarted`
+
+`/side`は`thread/resume`を出さずに親threadへ戻ることがあるため、所有threadの`TurnStarted`も
+フォーカス確定の根拠とする。所有権が別接続へ移ったthreadは、旧接続のフォーカスとして扱わない。
+
+この規則により、1つのCLIが起動時threadと作業中threadを同時に保持していても、
+同じCLIをScreenKeyへ二重に表示しない。1つのCLIで行き来した過去threadは
+セッション切替候補には現れない。
 
 非表示threadでも次を継続する。
 
@@ -172,6 +185,7 @@ Codex CLI versionとexperimental schema hashの既存preflightは維持する。
 - 猶予中に同じ`thread_id`が別接続からresumeされた場合、snapshotとrevisionを維持して所有権を移す。
 - 3秒以内に所有接続が戻らなければ、その接続だけが所有していたthreadを候補から削除する。
 - 他の接続が所有するthreadは削除しない。
+- 非gracefulな切断では、その接続のフォーカスも破棄する。
 - Broker停止、App Server停止、連携全体errorでは全Codexセッションを終了する。
 
 ### 7.5 上限
@@ -180,6 +194,7 @@ Codex CLI versionとexperimental schema hashの既存preflightは維持する。
 - 上限到達時は、選択中ではなく、working／approval待ち／input待ちでもない最古の候補を退役させる。
 - 安全に退役できる候補がなければ、新しい候補を追加せず警告を記録する。
 - 時間経過だけを理由に有効な候補を削除しない。
+- 退役でフォーカスthreadを失った接続は、次のstart、fork、turnまで表示候補を持たない。
 
 ## 8. 共通表示候補
 
@@ -192,6 +207,7 @@ Claude { launch_id, session_id }
 
 Codex／Claude Codeを同じ候補列へ登録し、クライアント種別ではグループ化しない。
 並び順は、その候補がKeylink Studioへ最初に有効登録された順とする。
+Codex候補は接続ごとに1件とし、7.3のフォーカスthreadだけを登録する。
 
 - 現在の選択が有効なら、候補追加時も維持する。
 - 選択中候補が終了した場合は、終了前の位置に続く候補を選ぶ。

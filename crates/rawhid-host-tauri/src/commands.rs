@@ -4367,7 +4367,7 @@ fn selected_ai_output(
     candidates.extend(
         codex_snapshots
             .iter()
-            .filter(|snapshot| snapshot.state.session_active)
+            .filter(|snapshot| snapshot.state.session_active && snapshot.focused)
             .map(|snapshot| AiDisplayCandidate {
                 target: AiDisplayTarget::Codex {
                     thread_id: snapshot.thread_id.clone(),
@@ -5464,6 +5464,7 @@ mod tests {
             owner_connection_id: "connection-1".to_string(),
             state: ai_state(activity_state, revision),
             registration_order: u64::from(revision),
+            focused: true,
         }
     }
 

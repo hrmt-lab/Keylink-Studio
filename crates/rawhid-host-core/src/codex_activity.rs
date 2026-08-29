@@ -62,6 +62,7 @@ pub struct CodexSessionSnapshot {
     pub owner_connection_id: String,
     pub registration_order: u64,
     pub state: AiClientStateSnapshot,
+    pub focused: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -908,6 +909,10 @@ pub struct CodexSessionRegistry {
     order: Vec<String>,
     next_revision: u16,
     selected_thread_id: Option<String>,
+    /// Per-connection focused thread: the one Codex thread that connection's
+    /// display candidate should represent, even though older threads on the
+    /// same connection keep their reducers running in `sessions`.
+    focused: HashMap<String, String>,
 }
 
 impl Default for CodexSessionRegistry {
@@ -923,6 +928,7 @@ impl CodexSessionRegistry {
             order: Vec::new(),
             next_revision: initial_revision(),
             selected_thread_id: None,
+            focused: HashMap::new(),
         }
     }
 
@@ -930,14 +936,20 @@ impl CodexSessionRegistry {
         self.order
             .iter()
             .filter_map(|thread_id| {
-                self.sessions
-                    .get(thread_id)
-                    .map(|entry| CodexSessionSnapshot {
+                self.sessions.get(thread_id).map(|entry| {
+                    // A thread is focused only if it is still the thread its
+                    // *current* owner last started/forked/turned on; if
+                    // ownership moved on, the previous owner's focus is stale
+                    // and simply no longer matches here.
+                    let focused = self.focused.get(&entry.owner_connection_id) == Some(thread_id);
+                    CodexSessionSnapshot {
                         thread_id: thread_id.clone(),
                         owner_connection_id: entry.owner_connection_id.clone(),
                         registration_order: entry.registration_order,
                         state: entry.reducer.snapshot(),
-                    })
+                        focused,
+                    }
+                })
             })
             .collect()
     }
@@ -994,6 +1006,20 @@ impl CodexSessionRegistry {
             tracing::warn!(thread_id, connection_id, "ignored non-owner Codex event");
             return Vec::new();
         }
+        match &event {
+            // A fresh start/fork is unambiguously the connection's active
+            // thread. `TurnStarted` also refocuses: Codex's `/side` can
+            // return control to the parent thread without ever issuing a
+            // `thread/resume`, so a turn on an owned thread is the only
+            // signal we get that focus moved back.
+            AiClientEvent::SessionStarted { .. }
+            | AiClientEvent::SessionForked { .. }
+            | AiClientEvent::TurnStarted { .. } => {
+                self.focused
+                    .insert(connection_id.to_string(), thread_id.clone());
+            }
+            _ => {}
+        }
         entry
             .reducer
             .apply(event, now)
@@ -1049,11 +1075,16 @@ impl CodexSessionRegistry {
                 self.sessions.remove(thread_id);
             }
             self.order.retain(|thread_id| !owned.contains(thread_id));
+            // A non-graceful disconnect ends this connection outright; leaving
+            // its focus behind would let a later reused connection_id inherit
+            // a stale focus pointer.
+            self.focused.remove(connection_id);
         }
         changes
     }
 
     fn end_all(&mut self, now: Instant) -> Vec<CodexStateChange> {
+        self.focused.clear();
         let keys = self.order.clone();
         let mut changes = Vec::new();
         for thread_id in keys {
@@ -2383,6 +2414,135 @@ mod tests {
         assert_eq!(snapshots.len(), 2);
         assert_eq!(snapshots[0].thread_id, THREAD_A);
         assert_eq!(snapshots[1].thread_id, THREAD_B);
+        // Both entries survive for state tracking, but only the connection's
+        // most recently started thread should be a ScreenKey display candidate.
+        assert!(!snapshots[0].focused);
+        assert!(snapshots[1].focused);
+    }
+
+    #[test]
+    fn turn_started_on_owned_thread_refocuses_it() {
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+        for thread_id in [THREAD_A, THREAD_B] {
+            registry.apply(
+                "connection-a",
+                AiClientEvent::SessionStarted {
+                    thread_id: thread_id.to_string(),
+                },
+                now,
+            );
+        }
+
+        // `/side` can return to the parent thread without a `thread/resume`,
+        // so a turn on the older, owned thread must move focus back to it.
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_A.to_string(),
+                turn_id: TURN_A.to_string(),
+            },
+            now,
+        );
+
+        let snapshots = registry.snapshots();
+        assert_eq!(snapshots.len(), 2);
+        assert!(
+            snapshots
+                .iter()
+                .find(|snapshot| snapshot.thread_id == THREAD_A)
+                .unwrap()
+                .focused
+        );
+        assert!(
+            !snapshots
+                .iter()
+                .find(|snapshot| snapshot.thread_id == THREAD_B)
+                .unwrap()
+                .focused
+        );
+    }
+
+    #[test]
+    fn separate_connections_each_keep_their_own_focused_thread() {
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-b",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_B.to_string(),
+            },
+            now,
+        );
+
+        // Two independent CLI connections should both remain visible.
+        let snapshots = registry.snapshots();
+        assert_eq!(snapshots.len(), 2);
+        assert!(snapshots.iter().all(|snapshot| snapshot.focused));
+    }
+
+    #[test]
+    fn ownership_transfer_moves_focus_to_the_new_owner() {
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        );
+        // connection-b adopts thread A (e.g. after a resume from a new process).
+        registry.apply(
+            "connection-b",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        );
+
+        let snapshots = registry.snapshots();
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].owner_connection_id, "connection-b");
+        assert!(snapshots[0].focused);
+
+        // connection-a no longer owns anything, so it has no valid focus left.
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_A.to_string(),
+                turn_id: TURN_A.to_string(),
+            },
+            now,
+        );
+        let snapshots = registry.snapshots();
+        assert_eq!(snapshots[0].owner_connection_id, "connection-b");
+        assert!(snapshots[0].focused);
+    }
+
+    #[test]
+    fn non_graceful_disconnect_clears_the_connections_focus() {
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        );
+        assert!(registry.focused.contains_key("connection-a"));
+
+        registry.disconnect("connection-a", false, now);
+
+        assert!(!registry.focused.contains_key("connection-a"));
     }
 
     #[test]

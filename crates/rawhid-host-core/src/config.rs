@@ -96,6 +96,8 @@ impl Default for ClaudeLauncherConfig {
 pub struct CodexClientConfig {
     /// Absolute path override. When omitted, `codex` is resolved from PATH.
     pub executable_path: Option<String>,
+    /// Require an exact verified Codex CLI version/schema pair before startup.
+    pub version_check_enabled: bool,
     pub app_server_port: u16,
     pub broker_port: u16,
 }
@@ -104,6 +106,7 @@ impl Default for CodexClientConfig {
     fn default() -> Self {
         Self {
             executable_path: None,
+            version_check_enabled: false,
             app_server_port: 4500,
             broker_port: 4501,
         }
@@ -600,6 +603,7 @@ start_monitoring_on_launch = false
 
 [ai_client.codex]
 # executable_path = "C:\\path\\to\\codex.exe"
+version_check_enabled = false
 app_server_port = 4500
 broker_port = 4501
 
@@ -771,6 +775,7 @@ mod tests {
         assert_eq!(config.time.periodic_sync_sec, 60);
         assert!(!config.ai_usage.enabled);
         assert!(config.ai_usage.codex.enabled);
+        assert!(!config.ai_client.codex.version_check_enabled);
         assert_eq!(
             config.ai_client.codex_launcher.environment,
             CodexLaunchEnvironment::Windows
@@ -793,6 +798,22 @@ broker_port = 4501
             config.ai_client.codex_launcher,
             CodexLauncherConfig::default()
         );
+        assert!(!config.ai_client.codex.version_check_enabled);
+    }
+
+    #[test]
+    fn codex_version_check_can_be_enabled_explicitly() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[ai_client.codex]
+version_check_enabled = true
+"#,
+        )
+        .unwrap();
+
+        assert!(config.ai_client.codex.version_check_enabled);
+        let encoded = toml::to_string(&config).unwrap();
+        assert!(encoded.contains("version_check_enabled = true"));
     }
 
     #[test]

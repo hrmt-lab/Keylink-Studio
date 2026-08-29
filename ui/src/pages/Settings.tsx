@@ -538,6 +538,14 @@ function CodexIntegration({
       <SettingRow label={t("settings.codex.executable")} description={t("settings.codex.executable.desc")} align="start">
         <input className="input w-64 max-w-full font-mono text-xs" value={codex.executable_path ?? ""} disabled={!editable} onChange={(event) => updateCodex({ executable_path: event.target.value.trim() || null })} placeholder={t("settings.codex.path_placeholder")} />
       </SettingRow>
+      <SettingRow label={t("settings.codex.version_check")} description={t("settings.codex.version_check.desc")}>
+        <Toggle
+          checked={codex.version_check_enabled}
+          onChange={(checked) => updateCodex({ version_check_enabled: checked })}
+          disabled={!editable}
+          label={t("settings.codex.version_check")}
+        />
+      </SettingRow>
       <SettingRow label={t("settings.codex.app_server_port")} description={t("settings.codex.app_server_port.desc")}>
         <input className="input !w-28 text-right font-mono" type="number" min={1024} max={65535} disabled={!editable} value={codex.app_server_port} onChange={(event) => updateCodex({ app_server_port: Math.max(1024, Math.min(65535, Number(event.target.value))) })} />
       </SettingRow>

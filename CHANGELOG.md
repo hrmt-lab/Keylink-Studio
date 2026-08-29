@@ -10,6 +10,8 @@ Keylink Studio の主な変更点をこのファイルに記録します。
 
 ### Changed
 
+- Codex連携にCLIバージョンチェックのON／OFFを追加。既定のOFFでは未知versionでも検証済みApp Server schemaと一致すれば起動し、未知schemaは引き続き拒否する。ONでは従来どおりversion／schemaの正しい組み合わせだけを受理する。
+- Codex連携の互換性ゲートをCodex CLI `0.150.1`へ更新。experimental App Server schemaのversion/hashペアを検証し、検証済みの`0.149.1`、`0.149.0`、`0.147.0`、WSL用`0.146.0`も継続して受理する。
 - Comboフォームに`キャンセル`を追加し、未適用入力だけを安全に戻せるようにした。Export完了とRestore対象なしは確認ダイアログと同じ形式で表示し、Restore確認では通常キー・エンコーダ・Comboを別々に集計する。
 
 ## [1.1.2] - 2026-06-28

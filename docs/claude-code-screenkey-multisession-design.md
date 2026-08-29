@@ -634,7 +634,11 @@ WSL正本の`zmk-rawhid-app`へ`CLAUDE_CODE = 0x02`とcapability bit 12を追加
 書き込み済みScreenKeyとKeylink Studio新ビルドで、Claude Codeロゴ、青い実行中、黄色の許可待ち、
 黄色枠点滅の入力待ち、緑の完了、`/exit`、連携停止を確認した。通常の連続許可は2回とも黄色になった。
 一方、失敗したcommandをClaude Codeが同一Turn内で自動修正・再試行した1例では、2回目の許可画面中に
-青い実行表示となった。この失敗後再試行だけは既知の境界事例として残す。
+青い実行表示となった。2026-08-11の一時診断ログで、未解決approval中の`PreToolUse`を
+`ToolStart`が無条件に`WORKING`へ上書きしていたことを確認した。Reducerは未解決requestを優先するよう修正し、
+遅延した補助`Notification(permission_prompt)`も完了済みapprovalを再登録しないようにした。修正版の実測では
+`PermissionRequest`に`tool_use_id`／`request_id`が含まれなかったため、直前に開始したactive toolへ匿名approvalを
+関連付け、対応する`PostToolUse`／`PostToolUseFailure`で解消するよう追加修正した。
 
 自動検証はClaude Codeの完了期限修正後にHost core 236件、Tauri 27件、UI production build、
 別target directoryでのworkspace全binary buildがPASSした。Firmware側は5本の
@@ -676,7 +680,11 @@ SettingsからClaude Codeを複数起動できるようにし、起動ごとにR
 - Settings起動、observer／Session Registry、正式Claude Codeロゴ、manual permission、Esc stale化、
   stale後の次prompt回復、`/clear`、`/exit`、停止→再起動を確認済み。
 - `AskUserQuestion`による入力待ちはClaude Codeロゴと黄色枠点滅になり、選択後に完了表示へ戻ることを確認済み。
-- command失敗後の自動再試行で2回目の許可待ちだけ青くなった1例は既知の境界事例。通常の連続許可は正常。
+- command失敗後の自動再試行で2回目の許可待ちだけ青くなる問題は、実ログでHost Reducerの上書きと特定し修正済み。
+  実ログを再現した回帰テストとIDなし`PermissionRequest`の相関テストはPASSしている。
+  2026-08-11、修正版アプリとScreenKeyで最終再確認し、2回連続するIDなし`PermissionRequest`がどちらも黄色枠点滅、
+  各`PostToolUse`後が`WORKING / THINKING`、`Stop`後が緑の完了表示になることを確認した。
+  遅延した補助`Notification(permission_prompt)`は状態を変更せず、receiver overflow／受信エラーも発生しなかった。
 - Codex／Claude Code共通候補の循環選択、複数Claude Code session、非選択sessionの出力抑制は自動テスト済み。
   キー押下を含む単一ScreenKey実機確認も完了した。
 - 実機確認で、Claude Codeの完了表示中にCodexへ切り替え、30秒後にClaude Codeへ戻すと緑枠が再表示される問題を確認した。
@@ -689,7 +697,6 @@ SettingsからClaude Codeを複数起動できるようにし、起動ごとにR
 
 Codexと2つのClaude Code sessionを起動し、ScreenKeyの`HOST_ACTION` keyを押すたびに表示対象が循環すること、
 非選択sessionのeventで表示が戻らないこと、選択中session終了時に次へ移ることを実機確認する。
-失敗後自動再試行時の2回目のpermission表示は、必要に応じてraw hookを再採取して切り分ける。
 
 ## 18. 非対象
 

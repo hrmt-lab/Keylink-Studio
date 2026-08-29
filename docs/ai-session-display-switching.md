@@ -43,8 +43,8 @@ Codex Session Registryは最大32件のthreadを保持できる。Claude Codeも
 CodexとClaude Codeのeventは、どちらが選択中でも常に取り込む。非選択候補のeventは内部snapshotだけ更新し、Host Link出力へは流さない。
 その候補へ切り替えた時点で最新snapshotを送る。
 
-`COMPLETED`はクライアント種別や現在の選択に関係なく、完了eventから30秒後にHost内部で`AVAILABLE`へ遷移する。
-したがって、完了表示中に別sessionへ切り替え、30秒を超えてから戻しても、期限切れの緑枠を再表示しない。
+`COMPLETED`はクライアント種別や現在の選択に関係なく、完了eventから15秒後にHost内部で`AVAILABLE`へ遷移する。
+したがって、完了表示中に別sessionへ切り替え、15秒を超えてから戻しても、期限切れの緑枠を再表示しない。
 この期限は新しいTurn開始、session終了、wrapper終了で解除する。
 
 ScreenKeyへ送る`client_type`は選択候補に従う。

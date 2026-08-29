@@ -273,9 +273,10 @@ Keylink StudioはWSL、Codex CLI、Windows Terminalのインストールや`.wsl
 > [!WARNING]
 > WSLを選んだ場合、Keylink Studioは同じWSLディストリビューション内でApp Serverを起動し、
 > TUI、App Server、cwd、command実行環境を一致させます。
-> 起動前に選択runtime側CodexのversionとApp Server schemaを検証します。基準外のCodexでは安全のため
-> 起動しません。2026-08-08時点の現行基準は`codex-cli 0.147.0`です。検証済みの
-> `codex-cli 0.146.0`も、対応するschema hashとの正しい組み合わせに限り継続対応します。
+> `Codex CLIバージョンチェック`は既定でOFFです。OFFではCLI versionを制限せず、起動前に生成した
+> App Server schemaが検証済みschemaと一致する場合だけ起動します。ONではversion／schemaの正しい組み合わせも要求します。
+> OFFでもschema確認は省略されず、未知schemaやschema生成失敗では安全のため起動しません。
+> 2026-08-29時点の現行基準は`codex-cli 0.150.1`です。検証済みの`0.149.1`、`0.149.0`、`0.147.0`、`0.146.0`も継続対応します。
 > 詳細と確認項目は
 > `docs/codex-launcher-wsl-runtime-plan.md`を参照してください。
 
@@ -295,8 +296,9 @@ Claude Code連携中は、Host Linkで正式なClaude Code identityを送信し�
 > 経由せず緑の完了表示になることがあります。Esc後に終了eventが届かない場合は、120秒後に青い
 > 「作業中・詳細不明」表示へ変わります。これは終了を推測しないための安全な表示であり、次のpromptまたは
 > 明示的な終了eventで通常表示へ回復します。
-> 緑の完了表示は完了eventから30秒間です。表示対象を別のCodex／Claude Codeセッションへ切り替えている間も
-> この時間は進むため、30秒後に元のセッションへ戻しても期限切れの緑枠は再表示されません。
+> 緑の完了表示は通常、完了eventから15秒間です。表示対象を別のCodex／Claude Codeセッションへ切り替えている間も
+> この時間は進むため、15秒後に元のセッションへ戻しても期限切れの緑枠は再表示されません。
+> Hostとの通信が途切れた場合は、Firmware側の30秒fallbackで緑枠を消します。
 
 ### 基本設定
 

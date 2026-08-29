@@ -13,7 +13,7 @@ use crate::{
 };
 
 pub const CLAUDE_DETAIL_STALE_TIMEOUT: Duration = Duration::from_secs(120);
-const CLAUDE_COMPLETED_DISPLAY_DURATION: Duration = Duration::from_secs(30);
+const CLAUDE_COMPLETED_DISPLAY_DURATION: Duration = Duration::from_secs(15);
 const CLAUDE_TOOL_TOMBSTONE_TTL: Duration = Duration::from_secs(120);
 const MAX_TOOL_TOMBSTONES: usize = 256;
 
@@ -148,17 +148,10 @@ impl ClaudeEventAdapter {
             "ElicitationResult" => Ok(Some(ClaudeCanonicalEvent::RequestResolve {
                 key: request_key(&hook.body, RequestKind::Input),
             })),
-            "Notification" => match notification_type(&hook.body) {
-                Some("permission_prompt") => Ok(Some(ClaudeCanonicalEvent::RequestStart {
-                    key: request_key(&hook.body, RequestKind::Approval),
-                    kind: RequestKind::Approval,
-                })),
-                Some("elicitation_dialog") => Ok(Some(ClaudeCanonicalEvent::RequestStart {
-                    key: request_key(&hook.body, RequestKind::Input),
-                    kind: RequestKind::Input,
-                })),
-                _ => Ok(None),
-            },
+            // PermissionRequest and Elicitation are the authoritative waiting-state
+            // signals. Their related notifications are delayed supplementary events;
+            // treating them as new requests can reopen an approval after PostToolUse.
+            "Notification" => Ok(None),
             "Stop" => Ok(Some(ClaudeCanonicalEvent::TurnComplete)),
             "StopFailure" => Ok(Some(ClaudeCanonicalEvent::TurnFailure)),
             "SessionEnd" => Ok(Some(ClaudeCanonicalEvent::SessionEnd)),
@@ -175,6 +168,7 @@ pub struct ClaudeSessionReducer {
     turn_active: bool,
     requests: HashMap<String, RequestKind>,
     active_items: HashMap<String, AiWorkPhase>,
+    active_item_order: VecDeque<String>,
     tool_tombstones: VecDeque<(String, Instant)>,
     last_relevant_event: Option<Instant>,
     completed_deadline: Option<Instant>,
@@ -291,6 +285,7 @@ impl ClaudeSessionReducer {
             turn_active: false,
             requests: HashMap::new(),
             active_items: HashMap::new(),
+            active_item_order: VecDeque::new(),
             tool_tombstones: VecDeque::new(),
             last_relevant_event: None,
             completed_deadline: None,
@@ -415,6 +410,7 @@ impl ClaudeSessionReducer {
                 self.turn_active = true;
                 self.requests.clear();
                 self.active_items.clear();
+                self.active_item_order.clear();
                 self.last_relevant_event = Some(now);
                 self.completed_deadline = None;
                 Ok(vec![self.emit(
@@ -430,14 +426,18 @@ impl ClaudeSessionReducer {
                 }
                 self.turn_active = true;
                 self.last_relevant_event = Some(now);
-                if self.active_items.insert(tool_use_id, phase) == Some(phase)
+                let repeated_phase =
+                    self.active_items.insert(tool_use_id.clone(), phase) == Some(phase);
+                self.active_item_order.retain(|key| key != &tool_use_id);
+                self.active_item_order.push_back(tool_use_id);
+                if repeated_phase
                     && self.snapshot.activity_state == AiActivityState::Working
                     && self.snapshot.work_phase == phase
                 {
                     return Ok(Vec::new());
                 }
                 Ok(vec![self.emit(
-                    AiActivityState::Working,
+                    self.waiting_or_working(),
                     self.active_phase(),
                     ClaudeStateChangeReason::ToolStarted,
                 )])
@@ -453,6 +453,7 @@ impl ClaudeSessionReducer {
                 }
                 self.insert_tombstone(tool_use_id.clone(), now);
                 let was_active = self.active_items.remove(&tool_use_id).is_some();
+                self.active_item_order.retain(|key| key != &tool_use_id);
                 self.requests.remove(&tool_use_id);
                 if !was_active {
                     return Ok(Vec::new());
@@ -469,6 +470,7 @@ impl ClaudeSessionReducer {
                 }
                 self.turn_active = true;
                 self.last_relevant_event = Some(now);
+                let key = self.correlate_anonymous_approval(key);
                 if self.requests.insert(key, kind).is_some() {
                     return Ok(Vec::new());
                 }
@@ -487,6 +489,7 @@ impl ClaudeSessionReducer {
                     return Ok(Vec::new());
                 }
                 self.last_relevant_event = Some(now);
+                let key = self.correlate_anonymous_approval(key);
                 if self.requests.remove(&key).is_none() {
                     return Ok(Vec::new());
                 }
@@ -531,6 +534,7 @@ impl ClaudeSessionReducer {
         self.turn_active = false;
         self.requests.clear();
         self.active_items.clear();
+        self.active_item_order.clear();
         self.last_relevant_event = None;
         self.completed_deadline = None;
         if !self.snapshot.session_active {
@@ -547,7 +551,19 @@ impl ClaudeSessionReducer {
         self.turn_active = false;
         self.requests.clear();
         self.active_items.clear();
+        self.active_item_order.clear();
         self.last_relevant_event = None;
+    }
+
+    fn correlate_anonymous_approval(&self, key: String) -> String {
+        if key != "approval:unknown" {
+            return key;
+        }
+        self.active_item_order
+            .back()
+            .filter(|tool_use_id| self.active_items.contains_key(*tool_use_id))
+            .cloned()
+            .unwrap_or(key)
     }
 
     fn waiting_or_working(&self) -> AiActivityState {
@@ -631,12 +647,6 @@ fn required_string(body: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
-}
-
-fn notification_type(body: &Value) -> Option<&str> {
-    body.get("notification_type")
-        .or_else(|| body.get("notification"))
-        .and_then(Value::as_str)
 }
 
 fn request_key(body: &Value, kind: RequestKind) -> String {
@@ -756,6 +766,7 @@ mod tests {
 
     #[test]
     fn completed_expires_after_display_duration() {
+        assert_eq!(CLAUDE_COMPLETED_DISPLAY_DURATION, Duration::from_secs(15));
         let now = Instant::now();
         let mut reducer = reducer();
         start_session(&mut reducer, now);
@@ -857,6 +868,170 @@ mod tests {
         );
         assert_eq!(reducer.snapshot().activity_state, AiActivityState::Working);
         assert_eq!(reducer.snapshot().work_phase, AiWorkPhase::Unspecified);
+    }
+
+    #[test]
+    fn permission_without_request_id_is_correlated_with_the_latest_tool() {
+        let now = Instant::now();
+        let mut reducer = reducer();
+        start_session(&mut reducer, now);
+        reducer
+            .apply(hook("UserPromptSubmit", serde_json::json!({})), now)
+            .unwrap();
+        reducer
+            .apply(
+                hook(
+                    "PreToolUse",
+                    serde_json::json!({"tool_use_id": "tool-a", "tool_name": "Write"}),
+                ),
+                now,
+            )
+            .unwrap();
+
+        let waiting = reducer
+            .apply(hook("PermissionRequest", serde_json::json!({})), now)
+            .unwrap();
+        assert_eq!(waiting.len(), 1);
+        assert_eq!(
+            waiting[0].state.activity_state,
+            AiActivityState::WaitingApproval
+        );
+
+        let completed = reducer
+            .apply(
+                hook("PostToolUse", serde_json::json!({"tool_use_id": "tool-a"})),
+                now + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].state.activity_state, AiActivityState::Working);
+        assert_eq!(completed[0].state.work_phase, AiWorkPhase::Thinking);
+    }
+
+    #[test]
+    fn pending_approval_has_priority_over_later_tool_activity() {
+        let now = Instant::now();
+        let mut reducer = reducer();
+        start_session(&mut reducer, now);
+        reducer
+            .apply(hook("UserPromptSubmit", serde_json::json!({})), now)
+            .unwrap();
+        reducer
+            .apply(
+                hook(
+                    "PreToolUse",
+                    serde_json::json!({"tool_use_id": "approval-tool", "tool_name": "Bash"}),
+                ),
+                now,
+            )
+            .unwrap();
+        reducer
+            .apply(
+                hook(
+                    "PermissionRequest",
+                    serde_json::json!({"tool_use_id": "approval-tool"}),
+                ),
+                now,
+            )
+            .unwrap();
+
+        let started = reducer
+            .apply(
+                hook(
+                    "PreToolUse",
+                    serde_json::json!({"tool_use_id": "search-tool", "tool_name": "WebSearch"}),
+                ),
+                now + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_eq!(started.len(), 1);
+        assert_eq!(
+            started[0].state.activity_state,
+            AiActivityState::WaitingApproval
+        );
+        assert_eq!(started[0].state.work_phase, AiWorkPhase::Unspecified);
+
+        let search_completed = reducer
+            .apply(
+                hook(
+                    "PostToolUse",
+                    serde_json::json!({"tool_use_id": "search-tool"}),
+                ),
+                now + Duration::from_secs(2),
+            )
+            .unwrap();
+        assert_eq!(
+            search_completed[0].state.activity_state,
+            AiActivityState::WaitingApproval
+        );
+
+        let approval_completed = reducer
+            .apply(
+                hook(
+                    "PostToolUse",
+                    serde_json::json!({"tool_use_id": "approval-tool"}),
+                ),
+                now + Duration::from_secs(3),
+            )
+            .unwrap();
+        assert_eq!(
+            approval_completed[0].state.activity_state,
+            AiActivityState::Working
+        );
+        assert_eq!(
+            approval_completed[0].state.work_phase,
+            AiWorkPhase::Thinking
+        );
+    }
+
+    #[test]
+    fn delayed_permission_notification_does_not_reopen_completed_approval() {
+        let now = Instant::now();
+        let mut reducer = reducer();
+        start_session(&mut reducer, now);
+        reducer
+            .apply(hook("UserPromptSubmit", serde_json::json!({})), now)
+            .unwrap();
+        reducer
+            .apply(
+                hook(
+                    "PreToolUse",
+                    serde_json::json!({"tool_use_id": "tool-a", "tool_name": "Bash"}),
+                ),
+                now,
+            )
+            .unwrap();
+        reducer
+            .apply(
+                hook(
+                    "PermissionRequest",
+                    serde_json::json!({"tool_use_id": "tool-a"}),
+                ),
+                now,
+            )
+            .unwrap();
+        reducer
+            .apply(
+                hook("PostToolUse", serde_json::json!({"tool_use_id": "tool-a"})),
+                now + Duration::from_secs(1),
+            )
+            .unwrap();
+
+        let delayed = reducer
+            .apply(
+                hook(
+                    "Notification",
+                    serde_json::json!({
+                        "notification_type": "permission_prompt",
+                        "tool_use_id": "tool-a"
+                    }),
+                ),
+                now + Duration::from_secs(6),
+            )
+            .unwrap();
+        assert!(delayed.is_empty());
+        assert_eq!(reducer.snapshot().activity_state, AiActivityState::Working);
+        assert_eq!(reducer.snapshot().work_phase, AiWorkPhase::Thinking);
     }
 
     #[test]

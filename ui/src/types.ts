@@ -93,6 +93,7 @@ export interface AppBehaviorConfig {
 
 export interface CodexClientConfig {
   executable_path: string | null;
+  version_check_enabled: boolean;
   app_server_port: number;
   broker_port: number;
 }

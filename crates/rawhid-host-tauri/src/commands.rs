@@ -804,6 +804,7 @@ fn codex_broker_config(config: &AppConfig) -> Result<CodexBrokerConfig, String> 
     Ok(CodexBrokerConfig {
         codex_executable: configured.executable_path.as_deref().map(PathBuf::from),
         runtime,
+        version_check_enabled: configured.version_check_enabled,
         app_server_port: configured.app_server_port,
         broker_port: configured.broker_port,
         ..CodexBrokerConfig::default()
@@ -5373,6 +5374,16 @@ mod tests {
         let mut without_launcher = updated;
         without_launcher.ai_client.codex_launcher = original.ai_client.codex_launcher.clone();
         assert_eq!(without_launcher, original);
+    }
+
+    #[test]
+    fn codex_broker_config_carries_version_check_setting() {
+        let mut config = AppConfig::default();
+        config.ai_client.codex.version_check_enabled = true;
+
+        let broker = codex_broker_config(&config).unwrap();
+
+        assert!(broker.version_check_enabled);
     }
 
     #[derive(Default)]

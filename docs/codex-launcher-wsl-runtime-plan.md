@@ -23,6 +23,61 @@ Keylink Studioが使用するThread／Turn／item、approval、input、`serverRe
 互換性ゲートはWindows側0.147.0を現行基準とし、検証済みのWSL側0.146.0もversionとschema hashの正しい組み合わせに限り受理する。
 versionだけ、または別versionのschema hashだけが一致する組み合わせは引き続き拒否する。
 
+## 2026-08-29: Codex CLI 0.150.1対応
+
+Codex CLI `0.150.1`からexperimental App Server schemaを再生成した。SHA-256は
+`E9BAD0A20736E7D3ABA18C0F04BEF59856FB212AE21049FE17D786682203CFAE`である。
+Keylink Studioが使用する初期化、Thread／Turn、item、approval／input、`serverRequest/resolved`の
+methodを確認し、Broker／Adapterの既存処理を維持した。
+
+互換性ゲートは0.150.1を現行基準とし、検証済み旧版の0.149.1、0.149.0、0.147.0、WSL側0.146.0も
+正しいversion／schema hashペアに限り受理する。未知schemaは引き続き拒否する。
+
+Keylink Studioの実Brokerと0.150.1 App Serverを使い、version／schema preflight、capability-token認証、
+`initialize`／`initialized`、`thread/start`、通常Turnの`turn/completed(completed)`を確認した。
+入力要求とcommand approvalはschema上のmethod維持を確認し、0.150.1での実要求は未実施とする。
+停止後は検証用listenerと一時token directoryが解放された。
+
+## 2026-08-26: Codex CLI 0.149.1対応
+
+Codex CLI `0.149.1`からexperimental App Server schemaを再生成した。SHA-256は
+`4F4A8D8F53F971B97F818639F58C8D26BB68BFCDFA2D2F20572CB97E6761AB91`で、0.149.0と同一だった。
+Keylink Studioが使用する初期化、Thread／Turn、item、approval／input、server requestの構造に差分がないため、
+Broker／Adapter変更は不要と判定した。
+
+互換性ゲートは0.149.1を現行基準とし、検証済み旧版の0.149.0、0.147.0、WSL側0.146.0も
+正しいversion／schema hashペアに限り受理する。未知versionと不一致のschema hashは引き続き拒否する。
+
+Keylink Studioの実Brokerと0.149.1 App Serverを使い、version／schema preflight、capability-token認証、
+`initialize`／`initialized`、`thread/start`、Plan Turnの`item/tool/requestUserInput`と応答、Default Turnの
+`item/commandExecution/requestApproval`と応答、`turn/completed(completed)`を確認した。
+停止後は検証用listener `4560`／`4561`と一時token directoryが解放された。
+
+頻繁なCLI更新でschemaが同一でもversion文字列だけを理由に起動不能となる問題を避けるため、
+`ai_client.codex.version_check_enabled`を追加した。既定値の`false`ではWindows／WSLともversionを起動可否に使わず、
+生成schemaのhashが検証済みhash集合に含まれる場合だけ起動する。`true`では従来どおりexact version／hashペアを要求する。
+どちらのモードでも`codex --version`の実行、schema生成、schema hash確認は行い、未知schemaはfail closedとする。
+一時ラッパーで既知schemaのCLIを未知version `codex-cli 0.149.2`として報告させ、OFFではpreflight、認証、
+`initialize`、`thread/start`、入力要求、command approval、Turn完了まで成功し、ONではpreflightで拒否されることを確認した。
+
+## 2026-08-22: Codex CLI 0.149.0対応
+
+Codex CLI `0.149.0`からexperimental App Server schemaを再生成した。SHA-256は
+`4F4A8D8F53F971B97F818639F58C8D26BB68BFCDFA2D2F20572CB97E6761AB91`である。
+0.147.0との比較ではschema fileの削除はなく、Project／Queue／診断／Bedrock関連APIなどが追加された。
+`thread/start`には任意の`projectId`、一部itemには任意field、approval responseには新しいenumが追加されたが、
+Keylink Studioが相関に使う`initialize`、Thread／Turn／item、approval／input、`serverRequest/resolved`の
+methodと必須fieldは維持されているため、Broker／Adapter変更は不要と判定した。
+
+互換性ゲートは0.149.0を現行基準とし、検証済み旧版の0.147.0とWSL側0.146.0も正しいversion／schema hashペアに限り受理する。
+未検証の0.148.0、未知version、versionと別versionのschema hashを組み合わせた場合は引き続き拒否する。
+
+Keylink Studioの実Brokerと0.149.0 App Serverを使い、version／schema preflight、capability-token認証、
+`initialize`／`initialized`、`thread/start`、Plan Turnの`item/tool/requestUserInput`と応答、Default Turnの
+`item/commandExecution/requestApproval`と応答、`turn/completed(completed)`を確認した。
+停止後は検証用listener `4560`／`4561`と一時token directoryが解放された。検証では一時配置した0.149.0を使い、
+ユーザーのglobal Codex `0.147.0`、Keylink Studioの保存設定、認証情報を変更していない。
+
 ## 現象
 
 WSL2のmirrored networkingを有効にしてWSLを再起動した後、

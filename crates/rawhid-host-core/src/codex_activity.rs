@@ -17,7 +17,7 @@ use crate::{
 };
 
 const RECONNECT_GRACE: Duration = Duration::from_secs(3);
-const COMPLETED_DISPLAY_DURATION: Duration = Duration::from_secs(30);
+const COMPLETED_DISPLAY_DURATION: Duration = Duration::from_secs(15);
 const THINKING_STABILITY: Duration = Duration::from_millis(150);
 const EXECUTION_RETURN_STABILITY: Duration = Duration::from_millis(250);
 const MAX_PENDING_CHANGES: usize = 64;
@@ -1573,7 +1573,8 @@ mod tests {
     }
 
     #[test]
-    fn completed_state_expires_to_available_after_thirty_seconds() {
+    fn completed_state_expires_to_available_after_fifteen_seconds() {
+        assert_eq!(COMPLETED_DISPLAY_DURATION, Duration::from_secs(15));
         let now = Instant::now();
         let mut reducer = AiClientStateReducer::with_initial_revision(70);
         start_session(&mut reducer, now);

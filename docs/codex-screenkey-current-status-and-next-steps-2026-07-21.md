@@ -1,6 +1,6 @@
 # Codex Broker／ScreenKeyプロトタイプの現在地と次の作業
 
-- 最終更新日: 2026-08-08
+- 最終更新日: 2026-08-29
 - 用途: Codex Broker／ScreenKeyプロトタイプの実施結果、完了条件、次の開始地点を管理する進捗文書
 - 主な確認元:
   - `docs/keylink-studio-codex-screenkey-prototype-spec-reviewed-v10.md`
@@ -63,6 +63,32 @@ Broker経由のThread／Turn、入力待ち、承認待ち、停止→再開始�
 0.146.0から既存methodの削除はなく、Keylink Studioが使用するThread／Turn／item／approval／inputの
 相関fieldは維持されているため、0.147.0を現行基準として追加した。WSL側0.146.0も検証済みの
 version／schema hashペアとして継続対応する。
+
+2026-08-29、Codex CLI `0.150.1`からexperimental schemaを再生成し、SHA-256
+`E9BAD0A20736E7D3ABA18C0F04BEF59856FB212AE21049FE17D786682203CFAE`を確認した。
+Keylink Studioが使用するmethodをschema上で確認し、実Broker経由のpreflight／認証、`initialize`、`thread/start`、
+通常Turn完了、停止後のlistener／一時token directory解放に合格した。0.150.1での入力要求／command approval実要求は未実施である。
+0.150.1を現行基準とし、0.149.1以前の検証済み組み合わせも継続対応する。
+
+2026-08-26、Codex CLI `0.149.1`からexperimental schemaを再生成し、0.149.0と同じSHA-256
+`4F4A8D8F53F971B97F818639F58C8D26BB68BFCDFA2D2F20572CB97E6761AB91`を確認した。
+使用中のApp Server構造に差分はなく、0.149.1を現行基準、0.149.0を検証済み旧版として継続対応する。
+実Broker経由のpreflight／認証、`initialize`、`thread/start`、入力要求、command approval、Turn完了に合格し、
+停止後は検証用listenerと一時token directoryが解放された。Broker／Adapter、Host Link、Firmwareの変更は不要だった。
+
+同日、頻繁なCodex CLI更新でschemaが不変でも未知versionとして起動を拒否する運用負荷を下げるため、
+Codex連携設定へバージョンチェックのON／OFFを追加した。既定のOFFではversion制限だけを外し、検証済みschema hashとの
+一致は引き続き必須とする。ONではexact version／hashペアを要求する。Windows／WSLの両runtimeで同じ判定を使う。
+未知version `codex-cli 0.149.2`と既知schemaの組み合わせを一時ラッパーで再現し、OFFの実Broker lifecycle完走と
+ONのpreflight拒否を確認した。停止後は検証用listenerと一時token directoryが解放された。
+
+2026-08-22、公式最新版のCodex CLI `0.149.0`からexperimental schemaを再生成し、SHA-256
+`4F4A8D8F53F971B97F818639F58C8D26BB68BFCDFA2D2F20572CB97E6761AB91`を確認した。
+0.147.0からschema fileの削除はなく、Keylink Studioが相関に使うThread／Turn／item／approval／inputの
+methodと必須fieldは維持されている。0.149.0を現行基準とし、検証済み旧版の0.147.0とWSL側0.146.0も
+正しいversion／schema hashペアに限り継続対応する。未検証の0.148.0は受理しない。
+実Broker経由で`initialize`、`thread/start`、入力要求、command approval、Turn完了を確認し、停止後は
+検証用listenerと一時token directoryが解放された。Broker／Adapter、Host Link、Firmwareの変更は不要だった。
 
 複数デバイス、複数Renderer、LED-only、ScreenKey以外のTarget、BLE経路、
 非64-byte interfaceの実機除外確認、全実機Targetでの既存Feature回帰は
@@ -369,7 +395,13 @@ WSL正本の`zmk-rawhid-app`へClaude Code client typeとcapability bit 12、Scr
 Renderer切り替えを実装し、UF2を書き込んだ。正式Claude Code identityで、ロゴ、実行中、許可待ち、入力待ち、
 完了、`/exit`、連携停止を実機確認した。Claude Codeの完了期限修正後にHost core 236件、Tauri 27件、
 UI production build、workspace全binary buildもPASSした。
-失敗したcommandの同一Turn内自動再試行で、2回目の許可画面だけ青表示になった1例は既知の境界事例として残す。
+失敗したcommandの同一Turn内自動再試行で、2回目の許可画面だけ青表示になる問題は、2026-08-11の一時診断ログで
+未解決approval中の`PreToolUse`をHost Reducerが`WORKING`へ上書きしていたことを確認した。未解決requestを優先し、
+遅延した補助`Notification(permission_prompt)`でapprovalを再登録しない修正と回帰テストを追加した。
+修正版の実測で`PermissionRequest`に`tool_use_id`／`request_id`がないことも確認し、直前のactive toolへ匿名approvalを
+関連付けて対応するPost系eventで解消する追加修正と回帰テストを入れた。2026-08-11の最終実機確認では、2回連続する
+許可待ちがどちらも黄色枠点滅となり、各`PostToolUse`後に`WORKING / THINKING`へ戻り、`Stop`後に緑の完了表示となった。
+遅延Notificationによるapproval再登録とreceiver overflow／受信エラーも発生しなかった。
 Firmware側は`zmk-rawhid-app`を`1a2ee78`、`zmk-config-screenkeytest`を`7b24ec9`としてcommit済み。
 両commitはそれぞれの`origin/develop`へpush済み。
 

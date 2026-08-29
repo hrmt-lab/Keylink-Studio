@@ -6,10 +6,13 @@
 - Firmware側repositoryはWSL上を正本とし、Windows上の同名フォルダは参照専用として扱う
 - Firmware共通層の正本: `/home/onigiri/zmk-workspace/config/zmk-rawhid-app`
 - Windows側`C:\01.keyboards\OriginalKeyboards\02.SW\zmk-rawhid-app`は読み取りだけに使用し、変更しない
-- 現行互換性基準: `codex-cli 0.147.0`、experimental App Server schema SHA-256
-  `BABFD5C98CD978DD858B4762CDFBC9FBA941E1A0E4053DE0050E4082AE1F075A`
-- 検証済み旧組み合わせとして`codex-cli 0.146.0`と
+- 現行互換性基準: `codex-cli 0.150.1`、experimental App Server schema SHA-256
+  `E9BAD0A20736E7D3ABA18C0F04BEF59856FB212AE21049FE17D786682203CFAE`
+- 検証済み旧組み合わせとして同一schemaの`codex-cli 0.149.1`／`0.149.0`、`codex-cli 0.147.0`と
+  `BABFD5C98CD978DD858B4762CDFBC9FBA941E1A0E4053DE0050E4082AE1F075A`、`codex-cli 0.146.0`と
   `D3992FEC1398AFDBEC658DA2C720C6993FBF3C1CE4900785694D2196679EDDFC`も受理する
+- `version_check_enabled = false`を既定とし、未知versionでも上記の検証済みschema hashと一致すれば起動する。
+  `true`ではversion／schemaの正しい組み合わせを要求し、どちらのモードでも未知schemaは拒否する
 
 ## 1. 目的
 
@@ -271,7 +274,7 @@ packet type `STATE_UPDATE = 0xA0`、feature `AI_CLIENT = 0x0A`、op／flags `0x0
 - 上位状態変化はbit 10のみのdeviceとbit 11対応deviceの両方へ送る。
 - `work_phase`だけの変化はbit 11対応deviceだけへ送る。
 - 5秒heartbeatは各deviceが対応する形式で同じsnapshotを再送し、animation timerを再開始しない。
-- `COMPLETED`はHost側でも30秒後に`AVAILABLE`へ遷移し、base revisionをincrementする。
+- `COMPLETED`はHost側で15秒後に`AVAILABLE`へ遷移し、base revisionをincrementする。
   これにより期限切れ後のUSB再接続では`AVAILABLE`を再送し、緑枠を再表示しない。
 - Renderer側の30秒one-shotは、Host切断時にも表示を消せるfallbackとして維持する。
 

@@ -60,6 +60,7 @@ pub struct AiClientStateChange {
 pub struct CodexSessionSnapshot {
     pub thread_id: String,
     pub owner_connection_id: String,
+    pub terminal_target_id: String,
     pub registration_order: u64,
     pub state: AiClientStateSnapshot,
     pub focused: bool,
@@ -68,6 +69,7 @@ pub struct CodexSessionSnapshot {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct CodexStateChange {
     pub thread_id: String,
+    pub terminal_target_id: String,
     pub state: AiClientStateSnapshot,
     pub reason: AiClientStateChangeReason,
 }
@@ -552,7 +554,7 @@ pub struct CodexEventAdapter {
 impl CodexEventAdapter {
     fn adapt(&mut self, event: CodexBrokerEvent) -> Vec<AiClientEvent> {
         match event {
-            CodexBrokerEvent::ClientConnected { connection_id } => {
+            CodexBrokerEvent::ClientConnected { connection_id, .. } => {
                 self.connection_id = Some(connection_id);
                 self.announced_thread_id = None;
                 self.owned_thread_ids.clear();
@@ -565,6 +567,7 @@ impl CodexEventAdapter {
             CodexBrokerEvent::ClientDisconnected {
                 connection_id,
                 origin,
+                ..
             } if self.connection_id.as_deref() == Some(connection_id.as_str()) => {
                 self.connection_id = None;
                 self.announced_thread_id = None;
@@ -900,6 +903,7 @@ impl CodexEventAdapter {
 
 struct CodexSessionEntry {
     owner_connection_id: String,
+    terminal_target_id: String,
     registration_order: u64,
     reducer: AiClientStateReducer,
 }
@@ -913,6 +917,7 @@ pub struct CodexSessionRegistry {
     /// display candidate should represent, even though older threads on the
     /// same connection keep their reducers running in `sessions`.
     focused: HashMap<String, String>,
+    connection_targets: HashMap<String, String>,
 }
 
 impl Default for CodexSessionRegistry {
@@ -929,6 +934,7 @@ impl CodexSessionRegistry {
             next_revision: initial_revision(),
             selected_thread_id: None,
             focused: HashMap::new(),
+            connection_targets: HashMap::new(),
         }
     }
 
@@ -945,6 +951,7 @@ impl CodexSessionRegistry {
                     CodexSessionSnapshot {
                         thread_id: thread_id.clone(),
                         owner_connection_id: entry.owner_connection_id.clone(),
+                        terminal_target_id: entry.terminal_target_id.clone(),
                         registration_order: entry.registration_order,
                         state: entry.reducer.snapshot(),
                         focused,
@@ -956,6 +963,11 @@ impl CodexSessionRegistry {
 
     pub fn set_selected_thread(&mut self, thread_id: Option<String>) {
         self.selected_thread_id = thread_id;
+    }
+
+    fn register_connection(&mut self, connection_id: String, terminal_target_id: String) {
+        self.connection_targets
+            .insert(connection_id, terminal_target_id);
     }
 
     fn apply(
@@ -977,6 +989,11 @@ impl CodexSessionRegistry {
                     thread_id.clone(),
                     CodexSessionEntry {
                         owner_connection_id: connection_id.to_string(),
+                        terminal_target_id: self
+                            .connection_targets
+                            .get(connection_id)
+                            .cloned()
+                            .unwrap_or_default(),
                         registration_order: next_ai_session_registration_order(),
                         reducer: AiClientStateReducer::with_initial_revision(revision),
                     },
@@ -992,6 +1009,11 @@ impl CodexSessionRegistry {
                         "Codex thread ownership transferred"
                     );
                     entry.owner_connection_id = connection_id.to_string();
+                    entry.terminal_target_id = self
+                        .connection_targets
+                        .get(connection_id)
+                        .cloned()
+                        .unwrap_or_default();
                 }
             }
         }
@@ -1026,6 +1048,7 @@ impl CodexSessionRegistry {
             .into_iter()
             .map(|change| CodexStateChange {
                 thread_id: thread_id.clone(),
+                terminal_target_id: entry.terminal_target_id.clone(),
                 state: change.state,
                 reason: change.reason,
             })
@@ -1059,12 +1082,14 @@ impl CodexSessionRegistry {
                 } else {
                     AiClientEvent::SessionEnded
                 };
+                let terminal_target_id = entry.terminal_target_id.clone();
                 entry
                     .reducer
                     .apply(event, now)
                     .into_iter()
                     .map(move |change| CodexStateChange {
                         thread_id: thread_id.clone(),
+                        terminal_target_id: terminal_target_id.clone(),
                         state: change.state,
                         reason: change.reason,
                     })
@@ -1079,6 +1104,7 @@ impl CodexSessionRegistry {
             // its focus behind would let a later reused connection_id inherit
             // a stale focus pointer.
             self.focused.remove(connection_id);
+            self.connection_targets.remove(connection_id);
         }
         changes
     }
@@ -1098,6 +1124,7 @@ impl CodexSessionRegistry {
                     .into_iter()
                     .map(|change| CodexStateChange {
                         thread_id: thread_id.clone(),
+                        terminal_target_id: entry.terminal_target_id.clone(),
                         state: change.state,
                         reason: change.reason,
                     }),
@@ -1121,6 +1148,7 @@ impl CodexSessionRegistry {
                 }
                 changes.push(CodexStateChange {
                     thread_id: thread_id.clone(),
+                    terminal_target_id: entry.terminal_target_id.clone(),
                     state: change.state,
                     reason: change.reason,
                 });
@@ -1295,7 +1323,12 @@ fn run_activity_loop(
                     &selected_thread_id,
                 );
                 match event {
-                    CodexBrokerEvent::ClientConnected { connection_id } => {
+                    CodexBrokerEvent::ManagedClientConnected {
+                        connection_id,
+                        terminal_target_id,
+                    } => {
+                        registry
+                            .register_connection(connection_id.clone(), terminal_target_id.clone());
                         let mut adapter = CodexEventAdapter::default();
                         adapter.adapt(CodexBrokerEvent::ClientConnected {
                             connection_id: connection_id.clone(),
@@ -1305,6 +1338,7 @@ fn run_activity_loop(
                     CodexBrokerEvent::ClientDisconnected {
                         connection_id,
                         origin,
+                        ..
                     } => {
                         adapters.remove(&connection_id);
                         let changes_for_connection =

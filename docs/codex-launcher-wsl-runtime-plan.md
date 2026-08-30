@@ -23,6 +23,17 @@ Keylink Studioが使用するThread／Turn／item、approval、input、`serverRe
 互換性ゲートはWindows側0.147.0を現行基準とし、検証済みのWSL側0.146.0もversionとschema hashの正しい組み合わせに限り受理する。
 versionだけ、または別versionのschema hashだけが一致する組み合わせは引き続き拒否する。
 
+## 2026-08-30: Codex CLI 0.151.0対応
+
+Codex CLI `0.151.0`からexperimental App Server schemaを再生成した。SHA-256は
+`31AE67BEB2C94CC9509F6A71968600062DC8C6D7FE45437ED3A9129838F4D2D9`である。
+0.150.1との差分は新規API／任意field／enum値の追加と説明更新で、Keylink Studioが使用する
+初期化、Thread／Turn、item、approval／input、`serverRequest/resolved`の既存method／必須fieldに
+破壊的変更はない。Broker／Adapterの処理変更は不要と判断した。
+
+互換性ゲートは0.151.0を現行基準とし、検証済み旧版の0.150.1、0.149.1、0.149.0、0.147.0、
+WSL側0.146.0も正しいversion／schema hashペアに限り受理する。未知schemaは引き続き拒否する。
+
 ## 2026-08-29: Codex CLI 0.150.1対応
 
 Codex CLI `0.150.1`からexperimental App Server schemaを再生成した。SHA-256は

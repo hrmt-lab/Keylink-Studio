@@ -72,7 +72,8 @@ CodexもSettingsから追加起動できる。1つのApp Serverを共有し、�
 
 ## 8. 非対象
 
-- ScreenKeyからapproval／inputへ回答する機能
+- ScreenKeyからapproval／inputへ回答する機能。本仕様の実装範囲外であり、後続設計は
+  [ScreenKeyによるAIセッション前面化と順序ベース回答](screenkey-ai-interaction-design.md)を参照する
 - Firmwareへsession IDや選択状態を保存する機能
 - 同一Codex threadを複数CLIから同時操作する完全同期
 - 1画面へ複数sessionを同時描画する機能

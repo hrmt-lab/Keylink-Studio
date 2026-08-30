@@ -12,7 +12,7 @@ This repository contains only the PC-side application. Host Link features such a
 - PC actions from the keyboard. A key bound on the keyboard side can launch an app, open a folder, or stop monitoring on the PC. This is disabled by default to avoid accidental triggers, and nothing runs until you turn it on.
 - Time sync. Sends the PC's clock to the keyboard's display. Display format, 12/24-hour mode, and time zone are all configurable.
 - AI usage display. Sends Codex and Claude Code usage rates to the keyboard so you can check them at a glance. Also disabled by default.
-- Codex CLI launcher. Select a Windows or WSL project in Settings and open Codex CLI in a new Windows Terminal tab without a separate save step. Only the launcher settings are saved automatically when opening Codex.
+- Codex CLI launcher. Select a Windows or WSL project in Settings and open Codex CLI in a dedicated Windows Terminal window without a separate save step. Only the launcher settings are saved automatically when opening Codex.
 - Battery display. Shows battery level for supported keyboards on the Devices screen and in the system tray tooltip. If the same keyboard is visible over both USB and Bluetooth, it's shown as a single device rather than two.
 - Typing stats and a key tester. View a heatmap of how often each key is pressed, or watch key presses in real time.
 - ZMK Studio keymap viewing and editing. View and edit layers and key assignments from the GUI, including not just regular keys but layer-move behaviors, tap-hold, sticky keys, Bluetooth actions, and more.

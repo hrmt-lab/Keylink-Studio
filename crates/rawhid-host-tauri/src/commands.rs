@@ -547,6 +547,13 @@ pub async fn launch_codex_cli(
     launcher: CodexLauncherConfig,
     state: State<'_, AppState>,
 ) -> Result<CodexLaunchCommandResult, String> {
+    let project_for_title = match launcher.environment {
+        CodexLaunchEnvironment::Windows => launcher.windows_project_directory.as_deref(),
+        CodexLaunchEnvironment::Wsl => launcher.wsl_project_directory.as_deref(),
+    }
+    .ok_or_else(|| "Codex project directory is required".to_string())?;
+    let terminal_target_id = new_terminal_target_id("codex")?;
+    let display_name = terminal_display_name("Codex", project_for_title, &terminal_target_id);
     let manager = state.codex_broker.clone();
     match manager.status().phase {
         CodexBrokerPhase::Stopped
@@ -587,9 +594,15 @@ pub async fn launch_codex_cli(
             }
         }
         let connection = manager
-            .client_launch_info()
+            .client_launch_info(terminal_target_id.clone(), display_name.clone())
             .map_err(|error| error.to_string())?;
-        codex_launcher::launch(&launcher, &connection)
+        match codex_launcher::launch(&launcher, &connection) {
+            Ok(launched) => Ok(launched),
+            Err(error) => {
+                manager.cancel_managed_launch(connection.terminal_target_id);
+                Err(error)
+            }
+        }
     })
     .await
     .map_err(|error| error.to_string())??;
@@ -597,6 +610,8 @@ pub async fn launch_codex_cli(
     Ok(CodexLaunchCommandResult {
         environment: launched.environment,
         project_directory: launched.project_directory,
+        terminal_target_id: launched.terminal_target_id,
+        display_name: launched.display_name,
         config: response_config,
     })
 }
@@ -613,12 +628,13 @@ pub async fn launch_claude_code(
     let mut token = [0_u8; 32];
     fill_random(&mut token)
         .map_err(|error| format!("Claude Code連携用tokenを生成できません: {error}"))?;
-    let launch_id = format!(
-        "claude-{}-{}-{}",
-        std::process::id(),
-        chrono::Utc::now().timestamp_millis(),
-        hex::encode(&token[..4])
-    );
+    let terminal_target_id = new_terminal_target_id("claude")?;
+    let project_for_title = launcher
+        .project_directory
+        .as_deref()
+        .ok_or_else(|| "Claude Code project directory is required".to_string())?;
+    let display_name = terminal_display_name("Claude Code", project_for_title, &terminal_target_id);
+    let launch_id = format!("launch-{}", &terminal_target_id[7..]);
     let (receiver, events) = ClaudeObserverReceiver::bind(ClaudeObserverReceiverOptions::loopback(
         launch_id,
         hex::encode(token),
@@ -649,8 +665,16 @@ pub async fn launch_claude_code(
     let launcher_for_spawn = launcher.clone();
     let artifacts_for_spawn = artifacts.clone();
     let helper_for_spawn = helper_executable.clone();
+    let terminal_target_id_for_spawn = terminal_target_id.clone();
+    let display_name_for_spawn = display_name.clone();
     let launched = match tauri::async_runtime::spawn_blocking(move || {
-        claude_launcher::launch(&launcher_for_spawn, &artifacts_for_spawn, &helper_for_spawn)
+        claude_launcher::launch(
+            &launcher_for_spawn,
+            &artifacts_for_spawn,
+            &helper_for_spawn,
+            &terminal_target_id_for_spawn,
+            &display_name_for_spawn,
+        )
     })
     .await
     {
@@ -675,6 +699,10 @@ pub async fn launch_claude_code(
         events,
         last_counters: Default::default(),
         plugin_root,
+        terminal_target_id,
+        display_name,
+        timed_out_at: Some(Instant::now() + Duration::from_secs(30)),
+        remove_at: None,
     };
     let mut guard = state.claude_integration.lock().unwrap();
     let integration = guard.get_or_insert_with(|| ClaudeIntegration {
@@ -736,6 +764,31 @@ fn config_with_claude_launcher(mut config: AppConfig, launcher: ClaudeLauncherCo
     config
 }
 
+fn new_terminal_target_id(provider: &str) -> Result<String, String> {
+    let mut bytes = [0_u8; 16];
+    fill_random(&mut bytes)
+        .map_err(|error| format!("terminal target ID generation failed: {error}"))?;
+    Ok(format!("{provider}-{}", hex::encode(bytes)))
+}
+
+fn terminal_display_name(provider: &str, project: &str, terminal_target_id: &str) -> String {
+    let project = project
+        .trim_end_matches(['/', '\\'])
+        .rsplit(['/', '\\'])
+        .next()
+        .filter(|name| !name.is_empty())
+        .unwrap_or("project");
+    let suffix = terminal_target_id
+        .rsplit('-')
+        .next()
+        .unwrap_or_default()
+        .chars()
+        .take(8)
+        .collect::<String>()
+        .to_ascii_uppercase();
+    format!("{provider} · {project} · {suffix}")
+}
+
 fn claude_plugin_root(launch_id: &str) -> Result<PathBuf, String> {
     let data = ProjectDirs::from("", "", "Keylink Studio")
         .ok_or_else(|| "Keylink Studioのデータディレクトリを決定できません".to_string())?
@@ -761,6 +814,8 @@ fn claude_helper_executable() -> Result<PathBuf, String> {
 pub struct CodexLaunchCommandResult {
     pub environment: CodexLaunchEnvironment,
     pub project_directory: String,
+    pub terminal_target_id: String,
+    pub display_name: String,
     pub config: AppConfig,
 }
 
@@ -4330,10 +4385,14 @@ fn claude_as_ai_snapshot(snapshot: Option<ClaudeSessionSnapshot>) -> AiClientSta
 fn drain_claude_state_changes(
     integration: &Arc<Mutex<Option<ClaudeIntegration>>>,
     now: Instant,
-) -> (Vec<ClaudeSessionSnapshot>, Vec<ClaudeStateChange>) {
+) -> (
+    Vec<ClaudeSessionSnapshot>,
+    Vec<ClaudeStateChange>,
+    BTreeMap<String, String>,
+) {
     let mut guard = integration.lock().unwrap();
     let Some(integration) = guard.as_mut() else {
-        return (Vec::new(), Vec::new());
+        return (Vec::new(), Vec::new(), BTreeMap::new());
     };
     let mut claude_changes: Vec<ClaudeStateChange> = Vec::new();
     for launch in integration.launches.values_mut() {
@@ -4352,14 +4411,24 @@ fn drain_claude_state_changes(
         launch.last_counters = counters;
     }
     claude_changes.extend(integration.registry.tick(now));
-    (integration.registry.snapshots(), claude_changes)
+    let terminal_targets = integration
+        .launches
+        .iter()
+        .map(|(launch_id, launch)| (launch_id.clone(), launch.terminal_target_id.clone()))
+        .collect();
+    (
+        integration.registry.snapshots(),
+        claude_changes,
+        terminal_targets,
+    )
 }
 
-fn selected_ai_output(
+fn selected_ai_output_with_targets(
     codex_snapshots: Vec<CodexSessionSnapshot>,
     codex_changes: Vec<CodexStateChange>,
     claude_snapshots: Vec<ClaudeSessionSnapshot>,
     claude_changes: Vec<ClaudeStateChange>,
+    claude_terminal_targets: &BTreeMap<String, String>,
     selection: &mut AiDisplaySelection,
     last_selection_epoch: &mut u64,
 ) -> (AiClientStateSnapshot, Vec<AiClientStateChange>) {
@@ -4370,7 +4439,7 @@ fn selected_ai_output(
             .filter(|snapshot| snapshot.state.session_active && snapshot.focused)
             .map(|snapshot| AiDisplayCandidate {
                 target: AiDisplayTarget::Codex {
-                    thread_id: snapshot.thread_id.clone(),
+                    terminal_target_id: snapshot.terminal_target_id.clone(),
                 },
                 snapshot: snapshot.state,
                 registration_order: snapshot.registration_order,
@@ -4379,11 +4448,20 @@ fn selected_ai_output(
     candidates.extend(
         claude_snapshots
             .iter()
-            .filter(|snapshot| snapshot.session_active)
+            .filter(|snapshot| {
+                snapshot.session_active
+                    && !claude_snapshots.iter().any(|other| {
+                        other.session_active
+                            && other.launch_id == snapshot.launch_id
+                            && other.registration_order > snapshot.registration_order
+                    })
+            })
             .map(|snapshot| AiDisplayCandidate {
                 target: AiDisplayTarget::Claude {
-                    launch_id: snapshot.launch_id.clone(),
-                    session_id: snapshot.session_id.clone(),
+                    terminal_target_id: claude_terminal_targets
+                        .get(&snapshot.launch_id)
+                        .cloned()
+                        .unwrap_or_default(),
                 },
                 snapshot: claude_as_ai_snapshot(Some(snapshot.clone())),
                 registration_order: snapshot.registration_order,
@@ -4415,21 +4493,28 @@ fn selected_ai_output(
     }
 
     let changes = match selected_target {
-        Some(AiDisplayTarget::Codex { thread_id }) => codex_changes
+        Some(AiDisplayTarget::Codex { terminal_target_id }) => codex_changes
             .into_iter()
-            .filter(|change| change.thread_id == thread_id)
+            .filter(|change| change.terminal_target_id == terminal_target_id)
             .map(|change| AiClientStateChange {
                 state: change.state,
                 reason: change.reason,
             })
             .collect(),
-        Some(AiDisplayTarget::Claude {
-            launch_id,
-            session_id,
-        }) => claude_changes
+        Some(AiDisplayTarget::Claude { terminal_target_id }) => claude_changes
             .into_iter()
             .filter(|change| {
-                change.state.launch_id == launch_id && change.state.session_id == session_id
+                claude_terminal_targets.get(&change.state.launch_id) == Some(&terminal_target_id)
+                    && claude_snapshots.iter().any(|snapshot| {
+                        snapshot.session_active
+                            && snapshot.launch_id == change.state.launch_id
+                            && snapshot.session_id == change.state.session_id
+                            && !claude_snapshots.iter().any(|other| {
+                                other.session_active
+                                    && other.launch_id == snapshot.launch_id
+                                    && other.registration_order > snapshot.registration_order
+                            })
+                    })
             })
             .map(|change| AiClientStateChange {
                 state: claude_as_ai_snapshot(Some(change.state)),
@@ -4441,6 +4526,29 @@ fn selected_ai_output(
         None => Vec::new(),
     };
     (snapshot, changes)
+}
+
+fn selected_ai_output(
+    codex_snapshots: Vec<CodexSessionSnapshot>,
+    codex_changes: Vec<CodexStateChange>,
+    claude_snapshots: Vec<ClaudeSessionSnapshot>,
+    claude_changes: Vec<ClaudeStateChange>,
+    selection: &mut AiDisplaySelection,
+    last_selection_epoch: &mut u64,
+) -> (AiClientStateSnapshot, Vec<AiClientStateChange>) {
+    let terminal_targets = claude_snapshots
+        .iter()
+        .map(|snapshot| (snapshot.launch_id.clone(), snapshot.launch_id.clone()))
+        .collect();
+    selected_ai_output_with_targets(
+        codex_snapshots,
+        codex_changes,
+        claude_snapshots,
+        claude_changes,
+        &terminal_targets,
+        selection,
+        last_selection_epoch,
+    )
 }
 
 fn sync_ai_client_state<T>(
@@ -5029,20 +5137,26 @@ fn run_monitor_loop(
         let now = Instant::now();
         let codex_snapshots = extras.codex_activity.snapshots();
         let codex_changes = drain_codex_state_changes(&extras.codex_activity);
-        let (claude_snapshots, claude_changes) =
+        let (claude_snapshots, claude_changes, claude_terminal_targets) =
             drain_claude_state_changes(&extras.claude_integration, now);
         let (ai_snapshot, ai_changes, selected_codex_thread, retired_slots, extra_slots) = {
             let mut selection = extras.ai_display_slots.lock().unwrap();
-            let (snapshot, changes) = selected_ai_output(
-                codex_snapshots,
+            let (snapshot, changes) = selected_ai_output_with_targets(
+                codex_snapshots.clone(),
                 codex_changes.clone(),
                 claude_snapshots,
                 claude_changes.clone(),
+                &claude_terminal_targets,
                 &mut selection,
                 &mut last_ai_selection_epoch,
             );
             let selected_codex_thread = match selection.selected_target() {
-                Some(AiDisplayTarget::Codex { thread_id }) => Some(thread_id.clone()),
+                Some(AiDisplayTarget::Codex { terminal_target_id }) => codex_snapshots
+                    .iter()
+                    .find(|snapshot| {
+                        snapshot.focused && snapshot.terminal_target_id == *terminal_target_id
+                    })
+                    .map(|snapshot| snapshot.thread_id.clone()),
                 _ => None,
             };
             let retired_slots = selection.take_retired_slots();
@@ -5056,22 +5170,19 @@ fn run_monitor_loop(
                             .slot_snapshot(entry.slot)
                             .unwrap_or_else(inactive_ai_snapshot);
                         let changes = match entry.assigned.as_ref() {
-                            Some(AiDisplayTarget::Codex { thread_id }) => codex_changes
+                            Some(AiDisplayTarget::Codex { terminal_target_id }) => codex_changes
                                 .iter()
-                                .filter(|change| change.thread_id == *thread_id)
+                                .filter(|change| change.terminal_target_id == *terminal_target_id)
                                 .map(|change| AiClientStateChange {
                                     state: change.state,
                                     reason: change.reason,
                                 })
                                 .collect(),
-                            Some(AiDisplayTarget::Claude {
-                                launch_id,
-                                session_id,
-                            }) => claude_changes
+                            Some(AiDisplayTarget::Claude { terminal_target_id }) => claude_changes
                                 .iter()
                                 .filter(|change| {
-                                    change.state.launch_id == *launch_id
-                                        && change.state.session_id == *session_id
+                                    claude_terminal_targets.get(&change.state.launch_id)
+                                        == Some(terminal_target_id)
                                 })
                                 .map(|change| AiClientStateChange {
                                     state: claude_as_ai_snapshot(Some(change.state.clone())),
@@ -5462,6 +5573,7 @@ mod tests {
         CodexSessionSnapshot {
             thread_id: thread_id.to_string(),
             owner_connection_id: "connection-1".to_string(),
+            terminal_target_id: format!("codex-{thread_id}"),
             state: ai_state(activity_state, revision),
             registration_order: u64::from(revision),
             focused: true,
@@ -5506,7 +5618,7 @@ mod tests {
         let first = claude_session("session-1", AiActivityState::Available, 10);
         let second = claude_session("session-2", AiActivityState::Working, 20);
         let other_change = ClaudeStateChange {
-            state: claude_session("session-2", AiActivityState::Working, 20),
+            state: claude_session("session-1", AiActivityState::Working, 20),
             reason: ClaudeStateChangeReason::TurnStarted,
         };
         let mut selection = AiDisplaySelection::default();
@@ -5598,6 +5710,7 @@ mod tests {
             vec![first, second.clone()],
             vec![CodexStateChange {
                 thread_id: second.thread_id,
+                terminal_target_id: second.terminal_target_id,
                 state: ai_state(AiActivityState::Working, 3),
                 reason: rawhid_host_core::AiClientStateChangeReason::TurnStarted,
             }],

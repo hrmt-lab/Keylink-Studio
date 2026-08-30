@@ -111,7 +111,7 @@ Codex CLI versionとexperimental schema hashの既存preflightは維持する。
 ### 6.3 ランチャー
 
 - Broker／App Server起動中でも「Codexを開く」を追加実行できる。
-- 起動ごとに新しいTerminal tabとCodex CLI processを作る。
+- 起動ごとに128-bit乱数を含む一意のWindows Terminal window IDとCodex CLI processを作る。`wt.exe -w <id> new-tab`でその専用ウィンドウを指定し、接続専用 capability を渡す。
 - Broker token、port、対応runtimeは同じ連携インスタンスの値を利用する。
 - UIは接続数を表示し、単一の`client_connected`だけで追加起動を禁止しない。
 - 「Codex連携を停止」は全Codex CLI接続、Broker、App Serverをまとめて停止する。

@@ -1,8 +1,4 @@
-use std::{
-    ffi::OsString,
-    path::{Path, PathBuf},
-    process::Command,
-};
+use std::{ffi::OsString, path::Path, process::Command};
 
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use rawhid_host_core::{ClaudeLauncherConfig, ClaudePluginArtifacts};
@@ -12,12 +8,16 @@ use serde::Serialize;
 pub struct ClaudeLaunchResult {
     pub project_directory: String,
     pub plugin_directory: String,
+    pub terminal_target_id: String,
+    pub display_name: String,
 }
 
 pub fn launch(
     config: &ClaudeLauncherConfig,
     artifacts: &ClaudePluginArtifacts,
     helper_executable: &Path,
+    terminal_target_id: &str,
+    display_name: &str,
 ) -> Result<ClaudeLaunchResult, String> {
     validate(config)?;
     if !helper_executable.is_file() {
@@ -37,10 +37,12 @@ pub fn launch(
         quote_path(&artifacts.observer_path),
         quote_path(helper_executable),
     );
-    spawn_windows_terminal(&terminal_title(project), &script)?;
+    spawn_windows_terminal(terminal_target_id, display_name, &script)?;
     Ok(ClaudeLaunchResult {
         project_directory: project.to_string(),
         plugin_directory: artifacts.plugin_root.display().to_string(),
+        terminal_target_id: terminal_target_id.to_string(),
+        display_name: display_name.to_string(),
     })
 }
 
@@ -76,29 +78,33 @@ pub fn validate(config: &ClaudeLauncherConfig) -> Result<(), String> {
     Ok(())
 }
 
-fn spawn_windows_terminal(title: &str, script: &str) -> Result<(), String> {
+fn spawn_windows_terminal(
+    terminal_target_id: &str,
+    title: &str,
+    script: &str,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
         Command::new("wt.exe")
-            .args(windows_terminal_args(title, script))
+            .args(windows_terminal_args(terminal_target_id, title, script))
             .spawn()
             .map(|_| ())
             .map_err(|error| format!("Windows TerminalでClaude Codeを起動できません: {error}"))
     }
     #[cfg(not(windows))]
     {
-        let _ = (title, script);
+        let _ = (terminal_target_id, title, script);
         Err("Claude CodeランチャーはWindows版Keylink Studioでのみ利用できます".to_string())
     }
 }
 
-fn windows_terminal_args(title: &str, script: &str) -> Vec<OsString> {
+fn windows_terminal_args(terminal_target_id: &str, title: &str, script: &str) -> Vec<OsString> {
     vec![
         "-w".into(),
-        "0".into(),
+        terminal_target_id.into(),
         "new-tab".into(),
         "--title".into(),
-        format!("Claude Code: {title}").into(),
+        title.into(),
         "--suppressApplicationTitle".into(),
         "powershell.exe".into(),
         "-NoLogo".into(),
@@ -125,14 +131,6 @@ fn quote_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
 
-fn terminal_title(project: &str) -> String {
-    PathBuf::from(project)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("Claude Code")
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +138,7 @@ mod tests {
     #[test]
     fn terminal_uses_one_encoded_command() {
         let args = windows_terminal_args(
+            "claude-0123456789abcdef0123456789abcdef",
             "project",
             "& 'C:\\a b\\wrapper.ps1' -ClaudeExecutable 'claude'",
         );

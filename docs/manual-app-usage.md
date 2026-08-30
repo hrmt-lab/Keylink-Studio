@@ -250,9 +250,8 @@ BLE 編集中の注意:
 
 ### Codex CLIランチャー
 
-Codex連携では、接続コマンドを手動で貼り付ける代わりに、`Codexを開く`から
-Windows TerminalへCodex CLIのタブを追加できます。最後に使用したTerminalがあれば
-そこへ新しいタブを追加し、なければ新しいTerminalウィンドウを作成します。
+Codex連携では、`Codexを開く`からCodex CLI専用のWindows Terminalウィンドウを開きます。
+各起動には一意のWindow IDと接続専用 capability が発行され、手動の接続コマンドは不要です。
 Codexを終了してもタブとシェルは残ります。
 
 1. 実行環境として`Windows`または`WSL`を選択します。
@@ -261,8 +260,8 @@ Codexを終了してもタブとシェルは残ります。
    この操作で自動保存されるため、先に画面上部の`保存`を押す必要はありません。
 
 Brokerが停止中の場合は自動的に起動します。すでにCodex CLIが接続中の場合は、
-二重起動を避けるため新しいタブを開きません。従来の`CLI接続コマンド`は
-トラブルシュート用の手動接続方法として引き続き利用できます。
+接続上限には接続待ちの起動も含まれます。上限時はWindows Terminalを開かずに拒否します。
+接続待ちは30秒、切断後の再接続猶予は3秒で、結果状態は10秒間表示されます。
 ランチャー以外の編集中設定は、`Codexを開く`では保存されません。
 
 WSL2からWindows側のBrokerへ接続する場合は、`%UserProfile%\.wslconfig`の
@@ -276,7 +275,7 @@ Keylink StudioはWSL、Codex CLI、Windows Terminalのインストールや`.wsl
 > `Codex CLIバージョンチェック`は既定でOFFです。OFFではCLI versionを制限せず、起動前に生成した
 > App Server schemaが検証済みschemaと一致する場合だけ起動します。ONではversion／schemaの正しい組み合わせも要求します。
 > OFFでもschema確認は省略されず、未知schemaやschema生成失敗では安全のため起動しません。
-> 2026-08-29時点の現行基準は`codex-cli 0.150.1`です。検証済みの`0.149.1`、`0.149.0`、`0.147.0`、`0.146.0`も継続対応します。
+> 2026-08-30時点の現行基準は`codex-cli 0.151.0`です。検証済みの`0.150.1`、`0.149.1`、`0.149.0`、`0.147.0`、`0.146.0`も継続対応します。
 > 詳細と確認項目は
 > `docs/codex-launcher-wsl-runtime-plan.md`を参照してください。
 

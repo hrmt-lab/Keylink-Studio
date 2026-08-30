@@ -35,7 +35,7 @@ Keylink Studio
   ├─ Windows Host上の受信口を起動
   ├─ endpointとtokenを生成
   ├─ observer pluginを一時ディレクトリへ生成
-  └─ Windows Terminalの既存ウィンドウへClaude Codeを起動
+  └─ 起動ごとの専用Windows TerminalウィンドウへClaude Codeを起動
           │
           ├─ SessionStart
           │    └─ command hook → keylink-claude-hook.exe → HTTP POST
@@ -70,8 +70,8 @@ Codexの単一Brokerストリームを処理する共通ReducerへClaude固有�
 6. wrapperは起動時にendpoint、token、`launch_id`をメモリへ読み込む。
 7. Claude Code終了時、wrapperの`finally`から終了通知を送る。
 
-既存Codexランチャーと同様、Windows Terminalは`wt.exe -w 0 new-tab`を使う。
-新しいタブは既存Windows Terminalプロセスへ委譲されるため、Claude Codeプロセスを
+Windows Terminalは`wt.exe -w <terminal_target_id> new-tab`を使う。
+起動ごとに一意なウィンドウへ委譲されるため、Claude Codeプロセスを
 Keylink Studioの子孫としてJob Objectで追跡する設計にはしない。
 
 ### 4.2 pluginの内容

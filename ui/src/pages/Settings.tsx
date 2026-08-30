@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
-import { Save, RefreshCcw, Check, X, Plus, Copy, Play, Square, Terminal, FolderOpen } from "lucide-react";
+import { Save, RefreshCcw, Check, X, Plus, Play, Square, Terminal, FolderOpen } from "lucide-react";
 import {
   getCodexIntegrationStatus,
   getAiDisplaySlots,
@@ -335,7 +335,6 @@ function CodexIntegration({
   const [broker, setBroker] = useState<CodexBrokerStatus | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
-  const [copied, setCopied] = useState(false);
   const [stopConfirmOpen, setStopConfirmOpen] = useState(false);
   const [launchBusy, setLaunchBusy] = useState(false);
   const [launched, setLaunched] = useState(false);
@@ -435,16 +434,6 @@ function CodexIntegration({
   const confirmStop = () => {
     setStopConfirmOpen(false);
     void run("stop");
-  };
-  const copyCommand = async () => {
-    if (!broker?.cli_connection_command) return;
-    try {
-      await navigator.clipboard.writeText(broker.cli_connection_command);
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1600);
-    } catch {
-      setActionError(t("settings.codex.copy_failed"));
-    }
   };
   const browseProject = async () => {
     setActionError(null);
@@ -635,12 +624,15 @@ function CodexIntegration({
       </SettingRow>
       {capableDevices === 0 && <p className="border-t border-background px-5 py-3 text-xs text-amber-700">{t("settings.codex.no_devices")}</p>}
       <AiDisplaySlotsSettings draft={draft} setDraft={setDraft} />
-      {broker?.cli_connection_command && <div className="border-t border-background px-5 py-4">
-        <p className="text-sm font-medium text-ink">{t("settings.codex.command")}</p>
-        <p className="mt-1 text-xs text-faint">{t("settings.codex.command.desc")}</p>
-        <div className="mt-3 flex items-start gap-2 rounded-xl bg-plate p-3 ring-1 ring-border">
-          <code className="min-w-0 flex-1 break-all font-mono text-xs leading-5 text-muted">{broker.cli_connection_command}</code>
-          <button onClick={() => void copyCommand()} className="rounded-lg p-2 text-muted hover:bg-surface hover:text-ink" title={t("settings.codex.copy")}>{copied ? <Check size={15} className="text-accent-deep" /> : <Copy size={15} />}</button>
+      {(broker?.managed_launches.length ?? 0) > 0 && <div className="border-t border-background px-5 py-4">
+        <p className="text-sm font-medium text-ink">{t("settings.codex.launches")}</p>
+        <div className="mt-3 space-y-2">
+          {broker?.managed_launches.map((launch) => (
+            <div key={launch.terminal_target_id} className="flex items-center justify-between gap-3 rounded-xl bg-plate px-3 py-2 text-xs ring-1 ring-border">
+              <span className="min-w-0 truncate text-muted">{launch.display_name}</span>
+              <span className="shrink-0 font-medium text-ink">{t(`settings.codex.launch_state.${launch.state}`)}</span>
+            </div>
+          ))}
         </div>
       </div>}
       {stopConfirmOpen && (

@@ -64,6 +64,12 @@ Broker経由のThread／Turn、入力待ち、承認待ち、停止→再開始�
 相関fieldは維持されているため、0.147.0を現行基準として追加した。WSL側0.146.0も検証済みの
 version／schema hashペアとして継続対応する。
 
+2026-08-30、Codex CLI `0.151.0`からexperimental schemaを再生成し、SHA-256
+`31AE67BEB2C94CC9509F6A71968600062DC8C6D7FE45437ED3A9129838F4D2D9`を確認した。
+0.150.1との差分は追加的で、Keylink Studioが使用する初期化、Thread／Turn、item、approval／input、
+`serverRequest/resolved`の既存method／必須fieldに破壊的変更はない。0.151.0を現行基準とし、
+0.150.1以前の検証済み組み合わせも継続対応する。
+
 2026-08-29、Codex CLI `0.150.1`からexperimental schemaを再生成し、SHA-256
 `E9BAD0A20736E7D3ABA18C0F04BEF59856FB212AE21049FE17D786682203CFAE`を確認した。
 Keylink Studioが使用するmethodをschema上で確認し、実Broker経由のpreflight／認証、`initialize`、`thread/start`、

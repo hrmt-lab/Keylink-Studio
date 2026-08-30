@@ -87,22 +87,37 @@ pub struct AppState {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum AiDisplayTarget {
-    Codex {
-        thread_id: String,
-    },
-    Claude {
-        launch_id: String,
-        session_id: String,
-    },
+    Codex { terminal_target_id: String },
+    Claude { terminal_target_id: String },
 }
 
 impl AiDisplayTarget {
     pub fn label(&self) -> String {
         match self {
-            Self::Codex { thread_id } => {
-                format!("Codex {}", thread_id.chars().take(8).collect::<String>())
+            Self::Codex { terminal_target_id } => {
+                format!(
+                    "Codex {}",
+                    terminal_target_id
+                        .rsplit('-')
+                        .next()
+                        .unwrap_or_default()
+                        .chars()
+                        .take(8)
+                        .collect::<String>()
+                        .to_ascii_uppercase()
+                )
             }
-            Self::Claude { session_id, .. } => format!("Claude Code {session_id}"),
+            Self::Claude { terminal_target_id } => format!(
+                "Claude Code {}",
+                terminal_target_id
+                    .rsplit('-')
+                    .next()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(8)
+                    .collect::<String>()
+                    .to_ascii_uppercase()
+            ),
         }
     }
 }
@@ -381,6 +396,10 @@ pub struct ClaudeLaunchIntegration {
     pub events: ClaudeObserverEvents,
     pub last_counters: ClaudeObserverCounters,
     pub plugin_root: PathBuf,
+    pub terminal_target_id: String,
+    pub display_name: String,
+    pub timed_out_at: Option<Instant>,
+    pub remove_at: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -542,14 +561,13 @@ mod tests {
 
     fn claude(session_id: &str) -> AiDisplayTarget {
         AiDisplayTarget::Claude {
-            launch_id: "launch-1".to_string(),
-            session_id: session_id.to_string(),
+            terminal_target_id: format!("claude-{session_id}"),
         }
     }
 
     fn codex(thread_id: &str) -> AiDisplayTarget {
         AiDisplayTarget::Codex {
-            thread_id: thread_id.to_string(),
+            terminal_target_id: format!("codex-{thread_id}"),
         }
     }
 

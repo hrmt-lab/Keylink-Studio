@@ -37,11 +37,15 @@ use tokio_tungstenite::{
     WebSocketStream,
 };
 
-pub const SUPPORTED_CODEX_VERSION: &str = "codex-cli 0.150.1";
+pub const SUPPORTED_CODEX_VERSION: &str = "codex-cli 0.151.0";
 pub const SUPPORTED_SCHEMA_SHA256: &str =
-    "E9BAD0A20736E7D3ABA18C0F04BEF59856FB212AE21049FE17D786682203CFAE";
+    "31AE67BEB2C94CC9509F6A71968600062DC8C6D7FE45437ED3A9129838F4D2D9";
 const COMPATIBLE_CODEX_RELEASES: &[(&str, &str)] = &[
     (SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256),
+    (
+        "codex-cli 0.150.1",
+        "E9BAD0A20736E7D3ABA18C0F04BEF59856FB212AE21049FE17D786682203CFAE",
+    ),
     (
         "codex-cli 0.149.1",
         "4F4A8D8F53F971B97F818639F58C8D26BB68BFCDFA2D2F20572CB97E6761AB91",
@@ -62,6 +66,9 @@ const COMPATIBLE_CODEX_RELEASES: &[(&str, &str)] = &[
 const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 const MAX_HTTP_HEADER_BYTES: usize = 16 * 1024;
 pub const MAX_CODEX_CLIENTS: usize = 8;
+const MANAGED_LAUNCH_PENDING_TIMEOUT: Duration = Duration::from_secs(30);
+const MANAGED_LAUNCH_RECONNECT_GRACE: Duration = Duration::from_secs(3);
+const MANAGED_LAUNCH_RESULT_RETENTION: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexAppServerRuntime {
@@ -157,8 +164,24 @@ pub struct CodexBrokerStatus {
     pub client_connected: bool,
     pub connected_client_count: usize,
     pub max_client_count: usize,
-    pub cli_connection_command: Option<String>,
+    pub managed_launches: Vec<ManagedLaunchStatus>,
     pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagedLaunchState {
+    WaitingForConnection,
+    Connected,
+    TimedOut,
+    Ended,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ManagedLaunchStatus {
+    pub terminal_target_id: String,
+    pub display_name: String,
+    pub state: ManagedLaunchState,
 }
 
 impl Default for CodexBrokerStatus {
@@ -171,7 +194,7 @@ impl Default for CodexBrokerStatus {
             client_connected: false,
             connected_client_count: 0,
             max_client_count: MAX_CODEX_CLIENTS,
-            cli_connection_command: None,
+            managed_launches: Vec::new(),
             last_error: None,
         }
     }
@@ -183,6 +206,8 @@ pub struct CodexClientLaunchInfo {
     pub windows_executable: Option<PathBuf>,
     pub broker_token_path: PathBuf,
     pub broker_port: u16,
+    pub terminal_target_id: String,
+    pub display_name: String,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
@@ -233,6 +258,10 @@ pub enum CodexBrokerEvent {
     ClientConnected {
         connection_id: String,
     },
+    ManagedClientConnected {
+        connection_id: String,
+        terminal_target_id: String,
+    },
     ClientDisconnected {
         connection_id: String,
         origin: &'static str,
@@ -274,7 +303,12 @@ enum ManagerCommand {
         std_mpsc::Sender<Result<CodexBrokerStatus, CodexBrokerError>>,
     ),
     Stop(std_mpsc::Sender<Result<CodexBrokerStatus, CodexBrokerError>>),
-    ClientLaunchInfo(std_mpsc::Sender<Result<CodexClientLaunchInfo, CodexBrokerError>>),
+    ClientLaunchInfo {
+        terminal_target_id: String,
+        display_name: String,
+        reply: std_mpsc::Sender<Result<CodexClientLaunchInfo, CodexBrokerError>>,
+    },
+    CancelManagedLaunch(String),
     Shutdown,
 }
 
@@ -350,15 +384,30 @@ impl CodexBrokerManager {
         self.inner.status.read().unwrap().clone()
     }
 
-    pub fn client_launch_info(&self) -> Result<CodexClientLaunchInfo, CodexBrokerError> {
+    pub fn client_launch_info(
+        &self,
+        terminal_target_id: String,
+        display_name: String,
+    ) -> Result<CodexClientLaunchInfo, CodexBrokerError> {
         let (reply_tx, reply_rx) = std_mpsc::channel();
         self.inner
             .command_tx
-            .send(ManagerCommand::ClientLaunchInfo(reply_tx))
+            .send(ManagerCommand::ClientLaunchInfo {
+                terminal_target_id,
+                display_name,
+                reply: reply_tx,
+            })
             .map_err(|_| CodexBrokerError::ManagerUnavailable)?;
         reply_rx
             .recv()
             .map_err(|_| CodexBrokerError::ManagerUnavailable)?
+    }
+
+    pub fn cancel_managed_launch(&self, terminal_target_id: String) {
+        let _ = self
+            .inner
+            .command_tx
+            .send(ManagerCommand::CancelManagedLaunch(terminal_target_id));
     }
 
     pub fn try_recv_event(&self) -> Result<CodexBrokerEvent, std_mpsc::TryRecvError> {
@@ -396,8 +445,146 @@ struct Session {
     broker_task: Option<JoinHandle<Result<(), CodexBrokerError>>>,
     _secrets: TempDir,
     codex_executable: PathBuf,
-    broker_token_path: PathBuf,
+    managed_launches: Arc<Mutex<ManagedLaunchRegistry>>,
     config: CodexBrokerConfig,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedCredentialState {
+    Pending,
+    Connected,
+    Reconnecting,
+    TimedOut,
+    Ended,
+}
+
+struct ManagedCredential {
+    token: String,
+    token_path: PathBuf,
+    terminal_target_id: String,
+    display_name: String,
+    state: ManagedCredentialState,
+    deadline: Option<Instant>,
+    remove_at: Option<Instant>,
+}
+
+#[derive(Default)]
+struct ManagedLaunchRegistry {
+    entries: Vec<ManagedCredential>,
+}
+
+impl ManagedLaunchRegistry {
+    fn can_issue(&self, terminal_target_id: &str) -> bool {
+        self.active_count() < MAX_CODEX_CLIENTS
+            && !self
+                .entries
+                .iter()
+                .any(|entry| entry.terminal_target_id == terminal_target_id)
+    }
+
+    fn active_count(&self) -> usize {
+        self.entries
+            .iter()
+            .filter(|entry| {
+                matches!(
+                    entry.state,
+                    ManagedCredentialState::Pending
+                        | ManagedCredentialState::Connected
+                        | ManagedCredentialState::Reconnecting
+                )
+            })
+            .count()
+    }
+
+    fn statuses(&self) -> Vec<ManagedLaunchStatus> {
+        self.entries
+            .iter()
+            .map(|entry| ManagedLaunchStatus {
+                terminal_target_id: entry.terminal_target_id.clone(),
+                display_name: entry.display_name.clone(),
+                state: match entry.state {
+                    ManagedCredentialState::Pending | ManagedCredentialState::Reconnecting => {
+                        ManagedLaunchState::WaitingForConnection
+                    }
+                    ManagedCredentialState::Connected => ManagedLaunchState::Connected,
+                    ManagedCredentialState::TimedOut => ManagedLaunchState::TimedOut,
+                    ManagedCredentialState::Ended => ManagedLaunchState::Ended,
+                },
+            })
+            .collect()
+    }
+
+    fn authorize(&mut self, token: &str, now: Instant) -> Option<String> {
+        let entry = self.entries.iter_mut().find(|entry| {
+            constant_time_eq(&entry.token, token)
+                && matches!(
+                    entry.state,
+                    ManagedCredentialState::Pending | ManagedCredentialState::Reconnecting
+                )
+                && entry.deadline.is_none_or(|deadline| now < deadline)
+        })?;
+        entry.state = ManagedCredentialState::Connected;
+        entry.deadline = None;
+        Some(entry.terminal_target_id.clone())
+    }
+
+    fn disconnect(&mut self, terminal_target_id: &str, reconnect: bool, now: Instant) {
+        let Some(entry) = self
+            .entries
+            .iter_mut()
+            .find(|entry| entry.terminal_target_id == terminal_target_id)
+        else {
+            return;
+        };
+        if reconnect {
+            entry.state = ManagedCredentialState::Reconnecting;
+            entry.deadline = Some(now + MANAGED_LAUNCH_RECONNECT_GRACE);
+        } else {
+            entry.state = ManagedCredentialState::Ended;
+            entry.deadline = None;
+            entry.remove_at = Some(now + MANAGED_LAUNCH_RESULT_RETENTION);
+            let _ = fs::remove_file(&entry.token_path);
+        }
+    }
+
+    fn cancel(&mut self, terminal_target_id: &str) {
+        self.entries.retain(|entry| {
+            if entry.terminal_target_id == terminal_target_id {
+                let _ = fs::remove_file(&entry.token_path);
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    fn clear(&mut self) {
+        for entry in &self.entries {
+            let _ = fs::remove_file(&entry.token_path);
+        }
+        self.entries.clear();
+    }
+
+    fn reap(&mut self, now: Instant) {
+        for entry in &mut self.entries {
+            if matches!(
+                entry.state,
+                ManagedCredentialState::Pending | ManagedCredentialState::Reconnecting
+            ) && entry.deadline.is_some_and(|deadline| now >= deadline)
+            {
+                entry.state = if entry.state == ManagedCredentialState::Pending {
+                    ManagedCredentialState::TimedOut
+                } else {
+                    ManagedCredentialState::Ended
+                };
+                entry.deadline = None;
+                entry.remove_at = Some(now + MANAGED_LAUNCH_RESULT_RETENTION);
+                let _ = fs::remove_file(&entry.token_path);
+            }
+        }
+        self.entries
+            .retain(|entry| entry.remove_at.is_none_or(|deadline| now < deadline));
+    }
 }
 
 async fn manager_loop(
@@ -443,7 +630,11 @@ async fn manager_loop(
                         };
                         let _ = reply.send(result);
                     }
-                    ManagerCommand::ClientLaunchInfo(reply) => {
+                    ManagerCommand::ClientLaunchInfo {
+                        terminal_target_id,
+                        display_name,
+                        reply,
+                    } => {
                         let result = session
                             .as_ref()
                             .ok_or_else(|| {
@@ -452,23 +643,46 @@ async fn manager_loop(
                                 )
                             })
                             .and_then(|current| {
-                                let current_status = status.read().unwrap();
-                                if current_status.connected_client_count >= MAX_CODEX_CLIENTS {
+                                let phase = status.read().unwrap().phase;
+                                let mut launches = current.managed_launches.lock().unwrap();
+                                launches.reap(Instant::now());
+                                if launches.active_count() >= MAX_CODEX_CLIENTS {
                                     return Err(CodexBrokerError::InvalidConfig(
                                         "Codex CLI connection limit has been reached".to_string(),
                                     ));
                                 }
+                                if !launches.can_issue(&terminal_target_id) {
+                                    return Err(CodexBrokerError::InvalidConfig(
+                                        "terminal target ID is already managed".to_string(),
+                                    ));
+                                }
                                 if !matches!(
-                                    current_status.phase,
+                                    phase,
                                     CodexBrokerPhase::WaitingForClient
                                         | CodexBrokerPhase::Connected
                                         | CodexBrokerPhase::Reconnecting
                                 ) {
                                     return Err(CodexBrokerError::InvalidConfig(format!(
                                         "Codex CLI cannot be launched while integration is {:?}",
-                                        current_status.phase
+                                        phase
                                     )));
                                 }
+                                let token = generate_token()?;
+                                let token_path = current
+                                    ._secrets
+                                    .path()
+                                    .join(format!("client-{token}.token"));
+                                write_private_token(&token_path, &token)?;
+                                launches.entries.push(ManagedCredential {
+                                    token,
+                                    token_path: token_path.clone(),
+                                    terminal_target_id: terminal_target_id.clone(),
+                                    display_name: display_name.clone(),
+                                    state: ManagedCredentialState::Pending,
+                                    deadline: Some(Instant::now() + MANAGED_LAUNCH_PENDING_TIMEOUT),
+                                    remove_at: None,
+                                });
+                                refresh_managed_launch_status(&status, &launches);
                                 Ok(CodexClientLaunchInfo {
                                     runtime: current.config.runtime.clone(),
                                     windows_executable: match current.config.runtime {
@@ -477,16 +691,31 @@ async fn manager_loop(
                                         }
                                         CodexAppServerRuntime::Wsl { .. } => None,
                                     },
-                                    broker_token_path: current.broker_token_path.clone(),
+                                    broker_token_path: token_path,
                                     broker_port: current.config.broker_port,
+                                    terminal_target_id,
+                                    display_name,
                                 })
                             });
                         let _ = reply.send(result);
+                    }
+                    ManagerCommand::CancelManagedLaunch(terminal_target_id) => {
+                        if let Some(current) = session.as_ref() {
+                            let mut launches = current.managed_launches.lock().unwrap();
+                            launches.cancel(&terminal_target_id);
+                            refresh_managed_launch_status(&status, &launches);
+                        }
                     }
                     ManagerCommand::Shutdown => break,
                 }
             }
             _ = health_tick.tick(), if session.is_some() => {
+                {
+                    let current = session.as_ref().unwrap();
+                    let mut launches = current.managed_launches.lock().unwrap();
+                    launches.reap(Instant::now());
+                    refresh_managed_launch_status(&status, &launches);
+                }
                 let failure = inspect_session(session.as_mut().unwrap()).await;
                 if let Some(detail) = failure {
                     let current = session.take().unwrap();
@@ -550,20 +779,13 @@ async fn start_session(
     };
 
     let app_server_token = generate_token()?;
-    let broker_token = loop {
-        let candidate = generate_token()?;
-        if !constant_time_eq(&candidate, &app_server_token) {
-            break candidate;
-        }
-    };
+    // Kept only while constructing the legacy command text below; this value is
+    // never accepted by the Broker. Each managed terminal receives its own
+    // capability token from `client_launch_info`.
     let app_server_token_path = secrets.path().join("app-server.token");
-    let broker_token_path = secrets.path().join("broker.token");
     write_private_token(&app_server_token_path, &app_server_token)?;
-    write_private_token(&broker_token_path, &broker_token)?;
-    let cli_connection_command = match &config.runtime {
-        CodexAppServerRuntime::Windows => {
-            make_cli_connection_command(&executable, &broker_token_path, config.broker_port)
-        }
+    let _legacy_launcher_message = match &config.runtime {
+        CodexAppServerRuntime::Windows => String::new(),
         CodexAppServerRuntime::Wsl { .. } => {
             "設定の「Codexを開く」からWSLのCodex CLIを起動してください".to_string()
         }
@@ -637,17 +859,19 @@ async fn start_session(
     let broker_status = status.clone();
     let broker_events = event_tx.clone();
     let broker_config = config.clone();
+    let managed_launches = Arc::new(Mutex::new(ManagedLaunchRegistry::default()));
+    let broker_launches = managed_launches.clone();
     let broker_task = tokio::spawn(async move {
         run_broker(
             listener,
             shutdown_rx,
             BrokerRuntimeArgs {
                 upstream_url: app_server_url,
-                client_token: broker_token,
                 app_server_token,
                 upstream_timeout: broker_config.startup_timeout,
                 event_tx: broker_events,
                 status: broker_status,
+                managed_launches: broker_launches,
             },
         )
         .await
@@ -659,7 +883,7 @@ async fn start_session(
         current.codex_version = Some(version);
         current.client_connected = false;
         current.connected_client_count = 0;
-        current.cli_connection_command = Some(cli_connection_command);
+        current.managed_launches.clear();
         current.last_error = None;
     }
     let _ = event_tx.send(CodexBrokerEvent::Ready {
@@ -674,7 +898,7 @@ async fn start_session(
         broker_task: Some(broker_task),
         _secrets: secrets,
         codex_executable: executable,
-        broker_token_path,
+        managed_launches,
         config,
     })
 }
@@ -701,6 +925,7 @@ async fn inspect_session(session: &mut Session) -> Option<String> {
 }
 
 async fn stop_session(mut session: Session) {
+    session.managed_launches.lock().unwrap().clear();
     if let Some(shutdown) = session.broker_shutdown.take() {
         let _ = shutdown.send(());
     }
@@ -850,7 +1075,6 @@ async fn run_broker(
                 }
                 let args = ConnectionArgs {
                     upstream_url: args.upstream_url.clone(),
-                    client_token: args.client_token.clone(),
                     app_server_token: args.app_server_token.clone(),
                     upstream_timeout: args.upstream_timeout,
                     reserved_slots: reserved_slots.clone(),
@@ -858,6 +1082,7 @@ async fn run_broker(
                     reconnect_generation: reconnect_generation.clone(),
                     event_tx: args.event_tx.clone(),
                     status: args.status.clone(),
+                    managed_launches: args.managed_launches.clone(),
                     shutdown_rx: connection_shutdown.subscribe(),
                 };
                 connections.spawn(async move { handle_connection(socket, args).await });
@@ -889,16 +1114,15 @@ async fn run_broker(
 
 struct BrokerRuntimeArgs {
     upstream_url: String,
-    client_token: String,
     app_server_token: String,
     upstream_timeout: Duration,
     event_tx: std_mpsc::Sender<CodexBrokerEvent>,
     status: Arc<RwLock<CodexBrokerStatus>>,
+    managed_launches: Arc<Mutex<ManagedLaunchRegistry>>,
 }
 
 struct ConnectionArgs {
     upstream_url: String,
-    client_token: String,
     app_server_token: String,
     upstream_timeout: Duration,
     reserved_slots: Arc<AtomicUsize>,
@@ -906,6 +1130,7 @@ struct ConnectionArgs {
     reconnect_generation: Arc<AtomicU64>,
     event_tx: std_mpsc::Sender<CodexBrokerEvent>,
     status: Arc<RwLock<CodexBrokerStatus>>,
+    managed_launches: Arc<Mutex<ManagedLaunchRegistry>>,
     shutdown_rx: broadcast::Receiver<()>,
 }
 
@@ -954,14 +1179,21 @@ async fn handle_connection(
         }
         Err(HandshakeFailure::Io(error)) => return Err(CodexBrokerError::Broker(error)),
     };
-    if !constant_time_eq(
-        request.bearer_token.as_deref().unwrap_or(""),
-        &args.client_token,
-    ) {
+    let terminal_target_id = {
+        let mut launches = args.managed_launches.lock().unwrap();
+        launches.reap(Instant::now());
+        let authorized = launches.authorize(
+            request.bearer_token.as_deref().unwrap_or(""),
+            Instant::now(),
+        );
+        refresh_managed_launch_status(&args.status, &launches);
+        authorized
+    };
+    let Some(terminal_target_id) = terminal_target_id else {
         let _ = args.event_tx.send(CodexBrokerEvent::DownstreamAuthRejected);
         reject_upgrade(&mut downstream, "401 Unauthorized", "Unauthorized").await;
         return Ok(());
-    }
+    };
     if !try_acquire_client_slot(&args.reserved_slots) {
         let _ = args
             .event_tx
@@ -999,6 +1231,11 @@ async fn handle_connection(
                 Ok(Ok((socket, _response))) => socket,
                 _ => {
                     let _ = args.event_tx.send(CodexBrokerEvent::UpstreamConnectFailed);
+                    {
+                        let mut launches = args.managed_launches.lock().unwrap();
+                        launches.disconnect(&terminal_target_id, false, Instant::now());
+                        refresh_managed_launch_status(&args.status, &launches);
+                    }
                     reject_upgrade(&mut downstream, "502 Bad Gateway", "App Server connection failed").await;
                     return Ok(());
                 }
@@ -1016,9 +1253,12 @@ async fn handle_connection(
         &args.connected_count,
         CodexBrokerPhase::WaitingForClient,
     );
-    let _ = args.event_tx.send(CodexBrokerEvent::ClientConnected {
-        connection_id: connection_id.clone(),
-    });
+    let _ = args
+        .event_tx
+        .send(CodexBrokerEvent::ManagedClientConnected {
+            connection_id: connection_id.clone(),
+            terminal_target_id: terminal_target_id.clone(),
+        });
     let origin = forward_messages(
         downstream,
         upstream,
@@ -1038,6 +1278,11 @@ async fn handle_connection(
         },
     );
     let reconnecting = origin == "cli" && remaining == 0;
+    {
+        let mut launches = args.managed_launches.lock().unwrap();
+        launches.disconnect(&terminal_target_id, origin == "cli", Instant::now());
+        refresh_managed_launch_status(&args.status, &launches);
+    }
     if reconnecting {
         let generation = args
             .reconnect_generation
@@ -1650,24 +1895,6 @@ fn constant_time_eq(left: &str, right: &str) -> bool {
     left.as_bytes().ct_eq(right.as_bytes()).into()
 }
 
-fn make_cli_connection_command(executable: &Path, token_path: &Path, broker_port: u16) -> String {
-    fn quote(value: &Path) -> String {
-        let value = value.to_string_lossy();
-        let value = if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
-            format!(r"\\{unc}")
-        } else {
-            value.strip_prefix(r"\\?\").unwrap_or(&value).to_string()
-        };
-        format!("'{}'", value.replace('\'', "''"))
-    }
-    format!(
-        "$env:KEYLINK_CODEX_BROKER_TOKEN = Get-Content -LiteralPath {} -Raw; & {} --remote ws://127.0.0.1:{} --remote-auth-token-env KEYLINK_CODEX_BROKER_TOKEN",
-        quote(token_path),
-        quote(executable),
-        broker_port
-    )
-}
-
 fn display_path(path: &Path) -> String {
     let value = path.to_string_lossy();
     if let Some(unc) = value.strip_prefix(r"\\?\UNC\") {
@@ -1751,7 +1978,7 @@ fn set_starting_status(status: &Arc<RwLock<CodexBrokerStatus>>, config: &CodexBr
     current.codex_version = None;
     current.client_connected = false;
     current.connected_client_count = 0;
-    current.cli_connection_command = None;
+    current.managed_launches.clear();
     current.last_error = None;
 }
 
@@ -1764,7 +1991,15 @@ fn set_error_status(status: &Arc<RwLock<CodexBrokerStatus>>, detail: String) {
     current.phase = CodexBrokerPhase::Error;
     current.client_connected = false;
     current.connected_client_count = 0;
+    current.managed_launches.clear();
     current.last_error = Some(detail);
+}
+
+fn refresh_managed_launch_status(
+    status: &Arc<RwLock<CodexBrokerStatus>>,
+    launches: &ManagedLaunchRegistry,
+) {
+    status.write().unwrap().managed_launches = launches.statuses();
 }
 
 fn set_phase(
@@ -1831,10 +2066,10 @@ fn complete_reconnect_grace(
 mod tests {
     use super::{
         classify_json_rpc, compatible_codex_versions, compatible_schema_sha256,
-        complete_reconnect_grace, make_cli_connection_command, schema_is_compatible,
-        select_codex_executable, try_acquire_client_slot, BrokerRuntimeArgs, CodexBrokerEvent,
-        CodexBrokerPhase, CodexBrokerStatus, JsonRpcKind, MAX_CODEX_CLIENTS,
-        SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256,
+        complete_reconnect_grace, schema_is_compatible, select_codex_executable,
+        try_acquire_client_slot, BrokerRuntimeArgs, CodexBrokerEvent, CodexBrokerPhase,
+        CodexBrokerStatus, JsonRpcKind, MAX_CODEX_CLIENTS, SUPPORTED_CODEX_VERSION,
+        SUPPORTED_SCHEMA_SHA256,
     };
     use futures_util::{SinkExt, StreamExt};
     use tokio::{net::TcpListener, sync::oneshot, time};
@@ -1848,6 +2083,10 @@ mod tests {
         assert_eq!(
             compatible_schema_sha256(SUPPORTED_CODEX_VERSION),
             Some(SUPPORTED_SCHEMA_SHA256)
+        );
+        assert_eq!(
+            compatible_schema_sha256("codex-cli 0.150.1"),
+            Some("E9BAD0A20736E7D3ABA18C0F04BEF59856FB212AE21049FE17D786682203CFAE")
         );
         assert_eq!(
             compatible_schema_sha256("codex-cli 0.149.1"),
@@ -1870,7 +2109,7 @@ mod tests {
         assert_eq!(compatible_schema_sha256("codex-cli 0.145.0"), None);
         assert_eq!(
             compatible_codex_versions(),
-            "codex-cli 0.150.1, codex-cli 0.149.1, codex-cli 0.149.0, codex-cli 0.147.0, codex-cli 0.146.0"
+            "codex-cli 0.151.0, codex-cli 0.150.1, codex-cli 0.149.1, codex-cli 0.149.0, codex-cli 0.147.0, codex-cli 0.146.0"
         );
     }
 
@@ -1893,6 +2132,11 @@ mod tests {
         ));
         assert!(schema_is_compatible(
             SUPPORTED_CODEX_VERSION,
+            SUPPORTED_SCHEMA_SHA256,
+            true
+        ));
+        assert!(!schema_is_compatible(
+            "codex-cli 0.150.1",
             SUPPORTED_SCHEMA_SHA256,
             true
         ));
@@ -1922,6 +2166,22 @@ mod tests {
         }
         assert!(!try_acquire_client_slot(&count));
         assert_eq!(count.load(Ordering::Acquire), MAX_CODEX_CLIENTS);
+    }
+
+    #[test]
+    fn client_launch_info_reservation_counts_pending_connected_and_reconnecting() {
+        let tokens = (0..MAX_CODEX_CLIENTS)
+            .map(|index| format!("capability-{index}"))
+            .collect::<Vec<_>>();
+        let token_refs = tokens.iter().map(String::as_str).collect::<Vec<_>>();
+        let launches = test_managed_launches(&token_refs);
+        let mut launches = launches.lock().unwrap();
+        launches.entries[1].state = super::ManagedCredentialState::Connected;
+        launches.entries[2].state = super::ManagedCredentialState::Reconnecting;
+
+        assert_eq!(launches.active_count(), MAX_CODEX_CLIENTS);
+        assert!(!launches.can_issue("codex-existing"));
+        assert!(!launches.can_issue("codex-ninth"));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1958,19 +2218,20 @@ mod tests {
             shutdown_rx,
             BrokerRuntimeArgs {
                 upstream_url: format!("ws://{upstream_addr}"),
-                client_token: "client-token".to_string(),
                 app_server_token: "upstream-token".to_string(),
                 upstream_timeout: Duration::from_secs(2),
                 event_tx,
                 status: broker_status,
+                managed_launches: test_managed_launches(&["client-token-a", "client-token-b"]),
             },
         ));
 
         let connect = |name: &'static str| async move {
             let mut request = format!("ws://{broker_addr}").into_client_request().unwrap();
-            request
-                .headers_mut()
-                .insert("authorization", "Bearer client-token".parse().unwrap());
+            request.headers_mut().insert(
+                "authorization",
+                format!("Bearer client-token-{name}").parse().unwrap(),
+            );
             let (socket, _) = connect_async(request).await.unwrap();
             (name, socket)
         };
@@ -2008,7 +2269,7 @@ mod tests {
         let mut methods_by_connection = std::collections::HashMap::new();
         while connection_ids.len() < 2 || methods_by_connection.len() < 2 {
             match event_rx.recv_timeout(Duration::from_secs(2)).unwrap() {
-                CodexBrokerEvent::ClientConnected { connection_id } => {
+                CodexBrokerEvent::ManagedClientConnected { connection_id, .. } => {
                     connection_ids.insert(connection_id);
                 }
                 CodexBrokerEvent::Message {
@@ -2054,7 +2315,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn broker_accepts_eight_websocket_clients_and_rejects_the_ninth_with_conflict() {
+    async fn broker_rejects_an_unissued_capability_after_eight_managed_clients() {
         let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream_listener.local_addr().unwrap();
         let upstream = tokio::spawn(async move {
@@ -2085,20 +2346,30 @@ mod tests {
             shutdown_rx,
             BrokerRuntimeArgs {
                 upstream_url: format!("ws://{upstream_addr}"),
-                client_token: "client-token".to_string(),
                 app_server_token: "upstream-token".to_string(),
                 upstream_timeout: Duration::from_secs(2),
                 event_tx,
                 status: status.clone(),
+                managed_launches: test_managed_launches(&[
+                    "client-token-0",
+                    "client-token-1",
+                    "client-token-2",
+                    "client-token-3",
+                    "client-token-4",
+                    "client-token-5",
+                    "client-token-6",
+                    "client-token-7",
+                ]),
             },
         ));
 
         let mut clients = Vec::new();
-        for _ in 0..MAX_CODEX_CLIENTS {
+        for index in 0..MAX_CODEX_CLIENTS {
             let mut request = format!("ws://{broker_addr}").into_client_request().unwrap();
-            request
-                .headers_mut()
-                .insert("authorization", "Bearer client-token".parse().unwrap());
+            request.headers_mut().insert(
+                "authorization",
+                format!("Bearer client-token-{index}").parse().unwrap(),
+            );
             clients.push(connect_async(request).await.unwrap().0);
         }
         time::timeout(Duration::from_secs(2), async {
@@ -2115,13 +2386,13 @@ mod tests {
         let mut ninth_request = format!("ws://{broker_addr}").into_client_request().unwrap();
         ninth_request
             .headers_mut()
-            .insert("authorization", "Bearer client-token".parse().unwrap());
+            .insert("authorization", "Bearer client-token-8".parse().unwrap());
         let rejection = connect_async(ninth_request)
             .await
             .expect_err("ninth client must be rejected");
         assert!(matches!(
             rejection,
-            tokio_tungstenite::tungstenite::Error::Http(response) if response.status() == 409
+            tokio_tungstenite::tungstenite::Error::Http(response) if response.status() == 401
         ));
         assert_eq!(
             status.read().unwrap().connected_client_count,
@@ -2134,13 +2405,33 @@ mod tests {
         upstream.abort();
     }
     use std::{
-        path::{Path, PathBuf},
+        path::PathBuf,
         sync::{
             atomic::{AtomicU64, AtomicUsize, Ordering},
             Arc, RwLock,
         },
         time::Duration,
     };
+
+    fn test_managed_launches(
+        tokens: &[&str],
+    ) -> Arc<std::sync::Mutex<super::ManagedLaunchRegistry>> {
+        Arc::new(std::sync::Mutex::new(super::ManagedLaunchRegistry {
+            entries: tokens
+                .iter()
+                .enumerate()
+                .map(|(index, token)| super::ManagedCredential {
+                    token: (*token).to_string(),
+                    token_path: PathBuf::from(format!("test-capability-{index}.token")),
+                    terminal_target_id: format!("codex-test-target-{index}"),
+                    display_name: "Codex test".to_string(),
+                    state: super::ManagedCredentialState::Pending,
+                    deadline: None,
+                    remove_at: None,
+                })
+                .collect(),
+        }))
+    }
 
     #[test]
     fn stale_reconnect_grace_cannot_finish_a_newer_disconnect() {
@@ -2176,19 +2467,5 @@ mod tests {
                 r"C:\Users\test\AppData\Roaming\npm\codex.cmd"
             ))
         );
-    }
-
-    #[test]
-    fn cli_command_removes_windows_verbatim_path_prefixes() {
-        let command = make_cli_connection_command(
-            Path::new(r"\\?\C:\Users\test\AppData\Roaming\npm\codex.cmd"),
-            Path::new(r"\\?\C:\Users\test\AppData\Local\Temp\broker.token"),
-            4501,
-        );
-
-        assert!(command.contains(r"& 'C:\Users\test\AppData\Roaming\npm\codex.cmd'"));
-        assert!(command
-            .contains(r"Get-Content -LiteralPath 'C:\Users\test\AppData\Local\Temp\broker.token'"));
-        assert!(!command.contains(r"\\?\"));
     }
 }

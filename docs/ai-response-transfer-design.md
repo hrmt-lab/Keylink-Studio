@@ -6,7 +6,7 @@
 - 作成日: 2026-08-30
 - 対象: Keylink Studio Host、Codex Broker、Claude Code Observer、Tauri UI
 - 対象ハードウェア: ScreenKey 4個、通常キー 7個、エンコーダ 1個を搭載したキーボード
-- 基準環境: Codex CLI 0.150.1 App Server schema、Claude Code 2.1.241、Windows Terminal 1.24 系
+- 基準環境: Codex CLI 0.151.0 App Server schema、Claude Code 2.1.241、Windows Terminal 1.24 系
 
 本書は、あるAIの直前回答を、別のAIへ質問材料として渡す機能の設計である。
 Host Link packet形式とFirmwareの変更を必要としない範囲で構成する。
@@ -201,7 +201,7 @@ transcriptの読み取りは行わない。
 Claude Codeは正規の入力経路が存在しないため、Terminalへの貼り付けを暫定手段として用いる。
 
 前提条件として、Claude Codeを**新規ウィンドウで起動する方式**が必要である。現行の
-`claude_launcher.rs`は`wt.exe -w 0 new-tab`で起動しており、複数セッションが同一Windows Terminal
+`claude_launcher.rs`は`wt.exe -w <terminal_target_id> new-tab`で起動しており、複数セッションが専用Windows Terminal
 ウィンドウのタブとなるため、foreground HWNDの照合では宛先セッションを識別できない。この変更が
 未実装のうちは、Claude Codeを転送先候補に出さない。
 
@@ -443,6 +443,6 @@ WORKINGにし、その完了を待つ非同期状態を転送モードへ追加�
 - Claude CodeのStop hook bodyは`last_assistant_message`、`prompt_id`、`session_id`、`transcript_path`、`cwd`、`permission_mode`、`stop_hook_active`、`effort`、`background_tasks`、`session_crons`を含む
 - `last_assistant_message`は19,799文字の回答を切り詰めずに到達させた
 - `keylink-claude-hook`の`MAX_BODY_BYTES`は1 MiBで、超過時は`read_limited`が`Err`を返しPOSTを破棄する
-- `claude_launcher.rs`は`wt.exe -w 0 new-tab`で起動し、複数セッションが同一ウィンドウのタブとなる
+- `claude_launcher.rs`は`wt.exe -w <terminal_target_id> new-tab`で起動し、複数セッションは起動ごとの専用ウィンドウとなる
 - `AiClientStatePacket`は固定6／7／8バイトであり、任意文字列をScreenKeyへ送る経路はない
 - `HostActionKind`はモード概念を持たず、`actions.rs`の単一dispatcherが無条件に実行する

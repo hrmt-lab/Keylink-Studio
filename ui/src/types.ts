@@ -141,19 +141,31 @@ export interface CodexBrokerStatus {
   client_connected: boolean;
   connected_client_count: number;
   max_client_count: number;
-  cli_connection_command: string | null;
+  managed_launches: ManagedLaunchStatus[];
   last_error: string | null;
 }
 
 export interface CodexLaunchResult {
-  environment: CodexLaunchEnvironment;
-  project_directory: string;
+    environment: CodexLaunchEnvironment;
+    project_directory: string;
+    terminal_target_id: string;
+    display_name: string;
   config: AppConfig;
 }
 
 export interface ClaudeLaunchResult {
   project_directory: string;
-  plugin_directory: string;
+    plugin_directory: string;
+    terminal_target_id: string;
+    display_name: string;
+}
+
+export type ManagedLaunchState = "waiting_for_connection" | "connected" | "timed_out" | "ended";
+
+export interface ManagedLaunchStatus {
+  terminal_target_id: string;
+  display_name: string;
+  state: ManagedLaunchState;
 }
 
 export interface WslDistribution {
@@ -186,8 +198,8 @@ export interface AiClientStateSnapshot {
 }
 
 export type AiDisplayTarget =
-  | { kind: "codex"; thread_id: string }
-  | { kind: "claude"; launch_id: string; session_id: string };
+  | { kind: "codex"; terminal_target_id: string }
+  | { kind: "claude"; terminal_target_id: string };
 
 export type AiDisplaySlotMode =
   | { mode: "auto" }

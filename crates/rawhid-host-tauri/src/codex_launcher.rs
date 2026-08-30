@@ -22,6 +22,8 @@ pub struct WslDistribution {
 pub struct CodexLaunchResult {
     pub environment: CodexLaunchEnvironment,
     pub project_directory: String,
+    pub terminal_target_id: String,
+    pub display_name: String,
 }
 
 pub fn list_wsl_distributions() -> Result<Vec<WslDistribution>, String> {
@@ -72,7 +74,7 @@ pub fn launch(
             validate_windows_project(project)?;
             (
                 windows_bootstrap_script(project, connection),
-                terminal_title(project),
+                connection.display_name.clone(),
                 project.to_string(),
             )
         }
@@ -95,16 +97,18 @@ pub fn launch(
             ensure_wsl_networking(distro)?;
             (
                 wsl_bootstrap_script(distro, project, executable, connection),
-                terminal_title(project),
+                connection.display_name.clone(),
                 project.to_string(),
             )
         }
     };
 
-    spawn_windows_terminal(&title, &script)?;
+    spawn_windows_terminal(&connection.terminal_target_id, &title, &script)?;
     Ok(CodexLaunchResult {
         environment: config.environment,
         project_directory,
+        terminal_target_id: connection.terminal_target_id.clone(),
+        display_name: connection.display_name.clone(),
     })
 }
 
@@ -233,11 +237,15 @@ fn wsl_bootstrap_script(
     )
 }
 
-fn spawn_windows_terminal(title: &str, script: &str) -> Result<(), String> {
+fn spawn_windows_terminal(
+    terminal_target_id: &str,
+    title: &str,
+    script: &str,
+) -> Result<(), String> {
     #[cfg(windows)]
     {
         Command::new("wt.exe")
-            .args(windows_terminal_args(title, script))
+            .args(windows_terminal_args(terminal_target_id, title, script))
             .spawn()
             .map(|_| ())
             .map_err(|error| {
@@ -248,18 +256,18 @@ fn spawn_windows_terminal(title: &str, script: &str) -> Result<(), String> {
     }
     #[cfg(not(windows))]
     {
-        let _ = (title, script);
+        let _ = (terminal_target_id, title, script);
         Err("CodexランチャーはWindows版Keylink Studioでのみ利用できます".to_string())
     }
 }
 
-fn windows_terminal_args(title: &str, script: &str) -> Vec<OsString> {
+fn windows_terminal_args(terminal_target_id: &str, title: &str, script: &str) -> Vec<OsString> {
     vec![
         "-w".into(),
-        "0".into(),
+        terminal_target_id.into(),
         "new-tab".into(),
         "--title".into(),
-        format!("Codex: {title}").into(),
+        title.into(),
         "--suppressApplicationTitle".into(),
         "powershell.exe".into(),
         "-NoLogo".into(),
@@ -367,16 +375,6 @@ fn display_path(path: &Path) -> String {
     }
 }
 
-fn terminal_title(project: &str) -> String {
-    project
-        .trim_end_matches(['/', '\\'])
-        .rsplit(['/', '\\'])
-        .next()
-        .filter(|name| !name.is_empty())
-        .unwrap_or("Codex")
-        .to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -388,6 +386,8 @@ mod tests {
             windows_executable: Some(PathBuf::from(r"C:\Tools\Codex's bin\codex.cmd")),
             broker_token_path: PathBuf::from(r"C:\Temp\Keylink's token\broker.token"),
             broker_port: 4501,
+            terminal_target_id: "codex-0123456789abcdef0123456789abcdef".to_string(),
+            display_name: "Codex · project · 01234567".to_string(),
         }
     }
 
@@ -427,7 +427,11 @@ mod tests {
     #[test]
     fn terminal_uses_one_encoded_powershell_command() {
         let script = windows_bootstrap_script(r"C:\Work\日本語's project", &connection());
-        let args = windows_terminal_args("日本語 project", &script);
+        let args = windows_terminal_args(
+            "codex-0123456789abcdef0123456789abcdef",
+            "Codex · 日本語 project · 01234567",
+            &script,
+        );
         let args = args
             .iter()
             .map(|value| value.to_string_lossy().into_owned())

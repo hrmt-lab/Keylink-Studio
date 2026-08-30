@@ -231,7 +231,8 @@ export type HostActionKind =
   | "refresh_ai_usage"
   | "cycle_ai_session"
   | "launch"
-  | "open_folder";
+  | "open_folder"
+  | "focus_ai_terminal";
 
 export interface ActionBinding {
   action_id: number;

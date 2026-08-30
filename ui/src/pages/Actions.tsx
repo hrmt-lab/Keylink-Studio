@@ -27,6 +27,7 @@ const ACTION_KINDS: HostActionKind[] = [
   "stop_monitoring",
   "refresh_ai_usage",
   "cycle_ai_session",
+  "focus_ai_terminal",
   "launch",
   "open_folder",
 ];

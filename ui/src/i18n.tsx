@@ -130,6 +130,7 @@ const T = {
     "actions.kind.stop_monitoring": "監視を停止",
     "actions.kind.refresh_ai_usage": "AI 使用量を更新",
     "actions.kind.cycle_ai_session": "AIの表示セッションを切り替える",
+    "actions.kind.focus_ai_terminal": "AIのターミナルを前面に出す",
     "actions.kind.launch": "アプリを起動",
     "actions.kind.open_folder": "フォルダを開く",
     "actions.firmware_hint":
@@ -832,6 +833,7 @@ const T = {
     "actions.kind.stop_monitoring": "Stop monitoring",
     "actions.kind.refresh_ai_usage": "Refresh AI usage",
     "actions.kind.cycle_ai_session": "Switch displayed AI session",
+    "actions.kind.focus_ai_terminal": "Bring the AI terminal to the front",
     "actions.kind.launch": "Launch app",
     "actions.kind.open_folder": "Open folder",
     "actions.firmware_hint":

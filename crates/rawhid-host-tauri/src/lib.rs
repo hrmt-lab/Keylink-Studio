@@ -1,4 +1,5 @@
 mod actions;
+mod ai_terminal_focus;
 mod app_launch;
 mod claude_launcher;
 mod codex_launcher;

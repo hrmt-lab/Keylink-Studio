@@ -67,6 +67,7 @@ pub struct MonitorExtras {
     pub config: Arc<std::sync::Mutex<AppConfig>>,
     pub ai_usage_runtime: Arc<std::sync::Mutex<Option<AiUsageRuntime>>>,
     pub ai_usage_refreshing: Arc<AtomicBool>,
+    pub ai_terminal_focusing: Arc<AtomicBool>,
     pub key_stats: SharedKeyStatsStore,
     pub codex_activity: Arc<CodexActivityRuntime>,
     pub claude_integration: Arc<Mutex<Option<ClaudeIntegration>>>,
@@ -771,7 +772,11 @@ fn new_terminal_target_id(provider: &str) -> Result<String, String> {
     Ok(format!("{provider}-{}", hex::encode(bytes)))
 }
 
-fn terminal_display_name(provider: &str, project: &str, terminal_target_id: &str) -> String {
+pub(crate) fn terminal_display_name(
+    provider: &str,
+    project: &str,
+    terminal_target_id: &str,
+) -> String {
     let project = project
         .trim_end_matches(['/', '\\'])
         .rsplit(['/', '\\'])
@@ -4078,6 +4083,7 @@ pub fn start_host_link_worker(
         config: Arc::clone(&state.config),
         ai_usage_runtime: Arc::clone(&state.ai_usage_runtime),
         ai_usage_refreshing: Arc::clone(&state.ai_usage_refreshing),
+        ai_terminal_focusing: Arc::clone(&state.ai_terminal_focusing),
         key_stats: Arc::clone(&state.key_stats),
         codex_activity: Arc::clone(&state.codex_activity),
         claude_integration: Arc::clone(&state.claude_integration),

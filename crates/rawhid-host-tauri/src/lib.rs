@@ -6,6 +6,8 @@ mod codex_launcher;
 mod commands;
 mod explorer;
 mod foreground;
+mod hud_probe;
+mod hud_window;
 mod icon;
 mod startup;
 mod state;
@@ -117,6 +119,40 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("failed to start Keylink Studio");
+}
+
+/// Verification-only entry point for `--hud-focus-probe` (see `main.rs`).
+///
+/// Builds its own minimal `tauri::Builder` deliberately kept separate from
+/// `run()` above:
+/// - No `tauri_plugin_single_instance`: that plugin forwards CLI args to an
+///   already-running Studio instance instead of letting a second process
+///   start, which would prevent the probe from ever running while Studio is
+///   in its normal tray-resident state.
+/// - No tray, `AppState`, or `invoke_handler`: the probe doesn't need any
+///   of Studio's normal command surface.
+///
+/// `setup()` hides the `main` window immediately (mirroring the tray-resident
+/// state `run()` settles into) and then hands off to `hud_probe::run` on a
+/// background thread — `setup()` must return quickly or Tauri's event loop
+/// never starts pumping messages, which the probe's WebView2-backed HUD
+/// window and Win32 message loop both depend on.
+pub fn run_hud_focus_probe() {
+    tauri::Builder::default()
+        .setup(|app| {
+            if let Some(main_window) = app.get_webview_window("main") {
+                let _ = main_window.hide();
+            }
+
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                hud_probe::run(handle);
+            });
+
+            Ok(())
+        })
+        .run(tauri::generate_context!())
+        .expect("failed to start HUD focus probe");
 }
 
 fn setup_window_icon(app: &mut tauri::App) -> tauri::Result<()> {

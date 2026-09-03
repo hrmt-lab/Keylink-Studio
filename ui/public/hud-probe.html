@@ -1,0 +1,72 @@
+<!doctype html>
+<!--
+  hud-focus-probe verification page (throwaway).
+
+  This lives in ui/public/ (copied to dist as-is, outside Vite's bundle) and
+  is deliberately static: no <script>, no window.__TAURI__. Content updates
+  (P3 in hud_probe.rs) are pushed from Rust via `WebviewWindow::eval()`,
+  which writes directly into #hud-probe-text below — not a Tauri event, so
+  this page needs no `@tauri-apps/api` import, no `withGlobalTauri`, and no
+  capability entry. See `set_hud_text` in hud_probe.rs for the write side
+  and the module doc there for why: `withGlobalTauri` is an app-wide flag
+  that would also expose window.__TAURI__ on the production `main` window,
+  which is not an acceptable cost for a throwaway probe page.
+
+  A production HUD page should instead be a normal bundled route under
+  ui/src/ so it can `import` @tauri-apps/api and use real Tauri events —
+  neither of today's workarounds (eval injection, a bare public/ page)
+  should be copied into production code.
+-->
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <title>HUD Focus Probe</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        width: 100%;
+        height: 100%;
+        overflow: hidden;
+        background: #10151c;
+        color: #f2f4f8;
+        font-family: "Segoe UI", sans-serif;
+      }
+
+      .panel {
+        box-sizing: border-box;
+        width: 100%;
+        height: 100%;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        padding: 16px;
+        text-align: center;
+        border: 2px solid #3ddc97;
+      }
+
+      .title {
+        font-size: 12px;
+        letter-spacing: 0.08em;
+        text-transform: uppercase;
+        color: #3ddc97;
+      }
+
+      #hud-probe-text {
+        font-size: 16px;
+        line-height: 1.4;
+        white-space: pre-wrap;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="panel">
+      <div class="title">Keylink Studio HUD Probe</div>
+      <!-- Written to directly by hud_probe.rs's set_hud_text() via eval(). -->
+      <div id="hud-probe-text">idle</div>
+    </div>
+  </body>
+</html>

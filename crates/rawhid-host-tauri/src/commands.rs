@@ -53,6 +53,7 @@ use rawhid_host_core::{
 use tauri::{AppHandle, Emitter, State};
 
 use crate::foreground::ForegroundWatcher;
+use crate::hud_coordinator::HudCoordinator;
 use crate::state::{
     add_log, AiDisplayCandidate, AiDisplaySelection, AiDisplayTarget, AppState, ClaudeIntegration,
     ClaudeLaunchIntegration, HostLinkCall, HostLinkRequest, HostLinkResponse, LogEntry,
@@ -73,6 +74,7 @@ pub struct MonitorExtras {
     pub codex_activity: Arc<CodexActivityRuntime>,
     pub claude_integration: Arc<Mutex<Option<ClaudeIntegration>>>,
     pub ai_display_slots: Arc<Mutex<AiDisplaySelection>>,
+    pub hud: Arc<Mutex<Option<HudCoordinator>>>,
 }
 
 #[derive(Default)]
@@ -4089,6 +4091,7 @@ pub fn start_host_link_worker(
         codex_activity: Arc::clone(&state.codex_activity),
         claude_integration: Arc::clone(&state.claude_integration),
         ai_display_slots: Arc::clone(&state.ai_display_slots),
+        hud: Arc::clone(&state.hud),
     };
 
     let (tx, rx) = mpsc::channel();
@@ -4450,7 +4453,7 @@ fn selected_ai_output_with_targets(
     candidates.extend(
         codex_snapshots
             .iter()
-            .filter(|snapshot| snapshot.state.session_active && snapshot.focused)
+            .filter(|snapshot| snapshot.state.session_active && snapshot.is_display_target)
             .map(|snapshot| AiDisplayCandidate {
                 target: AiDisplayTarget::Codex {
                     terminal_target_id: snapshot.terminal_target_id.clone(),
@@ -5151,6 +5154,35 @@ fn run_monitor_loop(
         let now = Instant::now();
         let codex_snapshots = extras.codex_activity.snapshots();
         let codex_changes = drain_codex_state_changes(&extras.codex_activity);
+        // Diagnostic for the reported "first approval flashes yellow then
+        // turns green while the request is still unanswered": records every
+        // Codex activity transition alongside how many approvals the store
+        // still holds, so a Completed state arriving with a non-zero count
+        // is visible in the app's log without reproducing under a debugger.
+        // IDs and counts only -- no request bodies (docs/spec.md: the UI log
+        // carries sanitized text only).
+        for change in &codex_changes {
+            let pending = extras.codex_activity.pending_approvals().len();
+            let level = if change.state.activity_state == AiActivityState::Completed && pending > 0
+            {
+                "warn"
+            } else {
+                "info"
+            };
+            let entry = add_log(
+                &log_entries,
+                &log_counter,
+                level,
+                &format!(
+                    "codex activity thread={} state={:?} reason={:?} pending_approvals={}",
+                    thread_tag(&change.thread_id),
+                    change.state.activity_state,
+                    change.reason,
+                    pending
+                ),
+            );
+            let _ = app.emit("log-added", entry);
+        }
         // Both clients' pending-approval bodies live in the one store Codex
         // already owns (`CodexActivityRuntime`), so a future HUD reads a
         // single source regardless of which AI it is showing.
@@ -5175,7 +5207,8 @@ fn run_monitor_loop(
                 Some(AiDisplayTarget::Codex { terminal_target_id }) => codex_snapshots
                     .iter()
                     .find(|snapshot| {
-                        snapshot.focused && snapshot.terminal_target_id == *terminal_target_id
+                        snapshot.is_display_target
+                            && snapshot.terminal_target_id == *terminal_target_id
                     })
                     .map(|snapshot| snapshot.thread_id.clone()),
                 _ => None,
@@ -5227,6 +5260,13 @@ fn run_monitor_loop(
         extras
             .codex_activity
             .set_selected_thread(selected_codex_thread);
+        // Stage 1 of `docs/ai-approval-hud-design.md`: display only, no
+        // response path. Both clients' unresolved-approval bodies were just
+        // fed into `pending_approvals` by `drain_codex_state_changes` /
+        // `drain_claude_state_changes` above.
+        if let Some(hud) = extras.hud.lock().unwrap().as_ref() {
+            hud.update(&app, &extras.codex_activity.pending_approvals());
+        }
         if let Err(error) = sync_ai_client_state(
             &mut runner,
             ai_snapshot,
@@ -5597,7 +5637,7 @@ mod tests {
             terminal_target_id: format!("codex-{thread_id}"),
             state: ai_state(activity_state, revision),
             registration_order: u64::from(revision),
-            focused: true,
+            is_display_target: true,
         }
     }
 
@@ -6226,4 +6266,20 @@ mod tests {
         assert!(!result.skipped);
         worker.join().unwrap();
     }
+}
+
+/// Short, *distinguishing* label for a Codex thread id in the app log.
+///
+/// Codex thread ids are UUIDv7, which are time-ordered: two threads created
+/// seconds apart share a long common prefix. Truncating to the front alone
+/// collapsed distinct threads into one label during the "approval flashes
+/// then reverts" investigation and made two threads look like one, so keep
+/// the tail (the random part) as well.
+fn thread_tag(thread_id: &str) -> String {
+    let head: String = thread_id.chars().take(8).collect();
+    let tail: String = {
+        let chars: Vec<char> = thread_id.chars().collect();
+        chars[chars.len().saturating_sub(6)..].iter().collect()
+    };
+    format!("{head}..{tail}")
 }

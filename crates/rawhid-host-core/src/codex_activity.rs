@@ -68,7 +68,19 @@ pub struct CodexSessionSnapshot {
     pub terminal_target_id: String,
     pub registration_order: u64,
     pub state: AiClientStateSnapshot,
-    pub focused: bool,
+    /// Whether this thread is the one ScreenKey/HUD should show for
+    /// `owner_connection_id`. This is the connection's *display target*,
+    /// not necessarily the thread Codex itself last brought to the
+    /// foreground (see `CodexSessionRegistry::recompute_display_target`):
+    /// a thread waiting on the user (`WaitingApproval`/`WaitingInput`) wins
+    /// this over a more recently focused thread that isn't waiting, so an
+    /// approval prompt can never be hidden behind a short-lived side thread.
+    /// Absent that, a thread that is already `Working` keeps this over a
+    /// different thread that only just grabbed Codex's own focus, so a
+    /// short-lived side thread (e.g. conversation-title generation) can't
+    /// steal the display away from a session actively working for the user.
+    /// At most one thread per `owner_connection_id` has this set.
+    pub is_display_target: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -918,11 +930,32 @@ pub struct CodexSessionRegistry {
     order: Vec<String>,
     next_revision: u16,
     selected_thread_id: Option<String>,
-    /// Per-connection focused thread: the one Codex thread that connection's
-    /// display candidate should represent, even though older threads on the
-    /// same connection keep their reducers running in `sessions`.
+    /// Per-connection Codex focus: the one Codex thread that connection last
+    /// started/forked/turned on, even though older threads on the same
+    /// connection keep their reducers running in `sessions`. This tracks
+    /// what Codex itself has brought forward; it is *not* the display
+    /// selection ScreenKey/HUD use (see `effective_focus_by_connection`,
+    /// which layers waiting-thread priority on top of this).
     focused: HashMap<String, String>,
     connection_targets: HashMap<String, String>,
+    /// Monotonic stamp recording, for each thread currently
+    /// `WaitingApproval`/`WaitingInput`, when it most recently entered that
+    /// state. Used only to break ties in `effective_focus_by_connection`
+    /// when a connection has more than one thread waiting at once: the
+    /// thread that started waiting first keeps the display slot. Entries
+    /// are removed once the thread stops waiting.
+    waiting_order: HashMap<String, u64>,
+    next_waiting_order: u64,
+    /// Per-connection display target, as last computed by
+    /// `recompute_display_target` at the end of `apply()`. This is the
+    /// single source of truth `effective_focus_by_connection` reads; it
+    /// exists (rather than recomputing fresh every time) so that rule 2
+    /// there — "stay on a thread that is still `Working` rather than
+    /// jumping to whatever `self.focused` says" — has somewhere to
+    /// remember what was previously on screen. Cleaned up wherever
+    /// `waiting_order` is: non-graceful disconnect, `end_all`, and thread
+    /// retirement in `tick`.
+    display_target: HashMap<String, String>,
 }
 
 impl Default for CodexSessionRegistry {
@@ -940,30 +973,137 @@ impl CodexSessionRegistry {
             selected_thread_id: None,
             focused: HashMap::new(),
             connection_targets: HashMap::new(),
+            waiting_order: HashMap::new(),
+            next_waiting_order: 0,
+            display_target: HashMap::new(),
         }
     }
 
     pub fn snapshots(&self) -> Vec<CodexSessionSnapshot> {
+        let display_targets = self.effective_focus_by_connection();
         self.order
             .iter()
             .filter_map(|thread_id| {
                 self.sessions.get(thread_id).map(|entry| {
-                    // A thread is focused only if it is still the thread its
-                    // *current* owner last started/forked/turned on; if
-                    // ownership moved on, the previous owner's focus is stale
-                    // and simply no longer matches here.
-                    let focused = self.focused.get(&entry.owner_connection_id) == Some(thread_id);
+                    // A thread is the display target only if it is still the
+                    // thread its *current* owner resolves to; if ownership
+                    // moved on, the previous owner's selection is stale and
+                    // simply no longer matches here.
+                    let is_display_target =
+                        display_targets.get(&entry.owner_connection_id) == Some(thread_id);
                     CodexSessionSnapshot {
                         thread_id: thread_id.clone(),
                         owner_connection_id: entry.owner_connection_id.clone(),
                         terminal_target_id: entry.terminal_target_id.clone(),
                         registration_order: entry.registration_order,
                         state: entry.reducer.snapshot(),
-                        focused,
+                        is_display_target,
                     }
                 })
             })
             .collect()
+    }
+
+    /// Returns, for each connection, the single thread `snapshots()` should
+    /// mark as the display target. Purely a read of `self.display_target`,
+    /// which `recompute_display_target` keeps up to date at the end of every
+    /// `apply()` call — see that method for the preference order this
+    /// reflects.
+    fn effective_focus_by_connection(&self) -> HashMap<String, String> {
+        self.display_target.clone()
+    }
+
+    /// Recomputes and stores `connection_id`'s display target, reflecting
+    /// the event `apply()` just finished processing (thread state,
+    /// `self.focused`, and `self.waiting_order` are all already up to date
+    /// for it by the time this runs).
+    ///
+    /// Preference order:
+    /// 1. A thread currently `WaitingApproval`/`WaitingInput` — the AI is
+    ///    waiting on the user there, and that must never be hidden behind a
+    ///    thread that merely happens to be more recently focused. If several
+    ///    threads on the same connection are waiting at once, the
+    ///    connection's Codex-focused thread (`self.focused`) wins when it is
+    ///    among them; otherwise the thread that started waiting first
+    ///    (`self.waiting_order`) wins, a stable tiebreak independent of
+    ///    wall-clock races.
+    /// 2. Otherwise, if the connection's *current* display target was
+    ///    already `Working` before this event (`display_target_was_working`,
+    ///    sampled by the caller before anything was mutated) and is still
+    ///    `Working` now, keep it. A thread actively working for the user
+    ///    must not lose the display slot just because some other, possibly
+    ///    short-lived thread grabs `self.focused` — or even completes —
+    ///    while it runs. Requiring it to have *already* been `Working`
+    ///    (not just `Working` now) matters: a thread that only just
+    ///    transitioned out of `WaitingApproval`/`WaitingInput` into
+    ///    `Working` on this very event hasn't earned this stickiness yet,
+    ///    and falls through to rule 3 instead — the display target returns
+    ///    to `self.focused` as soon as a wait resolves, same as before this
+    ///    rule existed.
+    /// 3. Otherwise, the connection's Codex-focused thread (`self.focused`).
+    ///
+    /// Still exactly one candidate thread per connection either way.
+    fn recompute_display_target(&mut self, connection_id: &str, display_target_was_working: bool) {
+        let waiting_threads: Vec<String> = self
+            .order
+            .iter()
+            .filter(|thread_id| {
+                self.sessions.get(*thread_id).is_some_and(|entry| {
+                    entry.owner_connection_id == connection_id
+                        && matches!(
+                            entry.reducer.snapshot().activity_state,
+                            AiActivityState::WaitingApproval | AiActivityState::WaitingInput
+                        )
+                })
+            })
+            .cloned()
+            .collect();
+
+        let chosen: Option<String> = if !waiting_threads.is_empty() {
+            let codex_focused = self.focused.get(connection_id);
+            Some(
+                codex_focused
+                    .filter(|focused_thread| waiting_threads.iter().any(|t| t == *focused_thread))
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        waiting_threads
+                            .into_iter()
+                            .min_by_key(|thread_id| {
+                                self.waiting_order
+                                    .get(thread_id)
+                                    .copied()
+                                    .unwrap_or(u64::MAX)
+                            })
+                            .expect("checked non-empty above")
+                    }),
+            )
+        } else {
+            let sticky = if display_target_was_working {
+                self.display_target
+                    .get(connection_id)
+                    .cloned()
+                    .filter(|thread_id| {
+                        self.sessions.get(thread_id).is_some_and(|entry| {
+                            entry.owner_connection_id == connection_id
+                                && entry.reducer.snapshot().activity_state
+                                    == AiActivityState::Working
+                        })
+                    })
+            } else {
+                None
+            };
+            sticky.or_else(|| self.focused.get(connection_id).cloned())
+        };
+
+        match chosen {
+            Some(thread_id) => {
+                self.display_target
+                    .insert(connection_id.to_string(), thread_id);
+            }
+            None => {
+                self.display_target.remove(connection_id);
+            }
+        }
     }
 
     pub fn set_selected_thread(&mut self, thread_id: Option<String>) {
@@ -981,6 +1121,18 @@ impl CodexSessionRegistry {
         event: AiClientEvent,
         now: Instant,
     ) -> Vec<CodexStateChange> {
+        // Sampled before anything below mutates thread state, so this
+        // reflects whether the *current* display target was already
+        // `Working` going into this event — see `recompute_display_target`
+        // rule 2.
+        let display_target_was_working = self
+            .display_target
+            .get(connection_id)
+            .and_then(|thread_id| self.sessions.get(thread_id))
+            .is_some_and(|entry| {
+                entry.reducer.snapshot().activity_state == AiActivityState::Working
+            });
+
         if let AiClientEvent::SessionStarted { thread_id }
         | AiClientEvent::SessionForked { thread_id } = &event
         {
@@ -1047,17 +1199,40 @@ impl CodexSessionRegistry {
             }
             _ => {}
         }
-        entry
-            .reducer
-            .apply(event, now)
+        let changes = entry.reducer.apply(event, now);
+        let activity_state = entry.reducer.snapshot().activity_state;
+        let terminal_target_id = entry.terminal_target_id.clone();
+        let result: Vec<CodexStateChange> = changes
             .into_iter()
             .map(|change| CodexStateChange {
                 thread_id: thread_id.clone(),
-                terminal_target_id: entry.terminal_target_id.clone(),
+                terminal_target_id: terminal_target_id.clone(),
                 state: change.state,
                 reason: change.reason,
             })
-            .collect()
+            .collect();
+
+        // Stamp (or clear) this thread's waiting-order entry so
+        // `effective_focus_by_connection` can break ties between
+        // simultaneously waiting threads deterministically.
+        if matches!(
+            activity_state,
+            AiActivityState::WaitingApproval | AiActivityState::WaitingInput
+        ) {
+            self.waiting_order
+                .entry(thread_id.clone())
+                .or_insert_with(|| {
+                    let order = self.next_waiting_order;
+                    self.next_waiting_order = self.next_waiting_order.wrapping_add(1);
+                    order
+                });
+        } else {
+            self.waiting_order.remove(&thread_id);
+        }
+
+        self.recompute_display_target(connection_id, display_target_was_working);
+
+        result
     }
 
     fn disconnect(
@@ -1103,12 +1278,14 @@ impl CodexSessionRegistry {
         if !graceful {
             for thread_id in &owned {
                 self.sessions.remove(thread_id);
+                self.waiting_order.remove(thread_id);
             }
             self.order.retain(|thread_id| !owned.contains(thread_id));
             // A non-graceful disconnect ends this connection outright; leaving
             // its focus behind would let a later reused connection_id inherit
             // a stale focus pointer.
             self.focused.remove(connection_id);
+            self.display_target.remove(connection_id);
             self.connection_targets.remove(connection_id);
         }
         changes
@@ -1116,6 +1293,8 @@ impl CodexSessionRegistry {
 
     fn end_all(&mut self, now: Instant) -> Vec<CodexStateChange> {
         self.focused.clear();
+        self.waiting_order.clear();
+        self.display_target.clear();
         let keys = self.order.clone();
         let mut changes = Vec::new();
         for thread_id in keys {
@@ -1162,6 +1341,8 @@ impl CodexSessionRegistry {
         for thread_id in retired {
             self.sessions.remove(&thread_id);
             self.order.retain(|candidate| candidate != &thread_id);
+            self.waiting_order.remove(&thread_id);
+            self.display_target.retain(|_, target| target != &thread_id);
         }
         changes
     }
@@ -2599,8 +2780,8 @@ mod tests {
         assert_eq!(snapshots[1].thread_id, THREAD_B);
         // Both entries survive for state tracking, but only the connection's
         // most recently started thread should be a ScreenKey display candidate.
-        assert!(!snapshots[0].focused);
-        assert!(snapshots[1].focused);
+        assert!(!snapshots[0].is_display_target);
+        assert!(snapshots[1].is_display_target);
     }
 
     #[test]
@@ -2635,14 +2816,14 @@ mod tests {
                 .iter()
                 .find(|snapshot| snapshot.thread_id == THREAD_A)
                 .unwrap()
-                .focused
+                .is_display_target
         );
         assert!(
             !snapshots
                 .iter()
                 .find(|snapshot| snapshot.thread_id == THREAD_B)
                 .unwrap()
-                .focused
+                .is_display_target
         );
     }
 
@@ -2668,7 +2849,7 @@ mod tests {
         // Two independent CLI connections should both remain visible.
         let snapshots = registry.snapshots();
         assert_eq!(snapshots.len(), 2);
-        assert!(snapshots.iter().all(|snapshot| snapshot.focused));
+        assert!(snapshots.iter().all(|snapshot| snapshot.is_display_target));
     }
 
     #[test]
@@ -2694,7 +2875,7 @@ mod tests {
         let snapshots = registry.snapshots();
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].owner_connection_id, "connection-b");
-        assert!(snapshots[0].focused);
+        assert!(snapshots[0].is_display_target);
 
         // connection-a no longer owns anything, so it has no valid focus left.
         registry.apply(
@@ -2707,7 +2888,7 @@ mod tests {
         );
         let snapshots = registry.snapshots();
         assert_eq!(snapshots[0].owner_connection_id, "connection-b");
-        assert!(snapshots[0].focused);
+        assert!(snapshots[0].is_display_target);
     }
 
     #[test]
@@ -2796,6 +2977,566 @@ mod tests {
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].thread_id, THREAD_B);
         assert!(snapshots[0].state.session_active);
+    }
+
+    #[test]
+    fn waiting_thread_outranks_a_more_recently_focused_completed_thread() {
+        // Reproduces the field bug: Codex opens a short-lived side thread
+        // (observed in practice around conversation-title generation) that
+        // steals `self.focused` right as the original thread starts waiting
+        // on an approval. ScreenKey must still show the thread the user
+        // actually needs to answer, not the side thread that just finished.
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_A.to_string(),
+                turn_id: TURN_A.to_string(),
+            },
+            now,
+        );
+
+        // The short-lived side thread starts and finishes, moving
+        // `self.focused` onto it and leaving it there.
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_B.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_B.to_string(),
+                turn_id: TURN_B.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnFinished {
+                thread_id: THREAD_B.to_string(),
+                turn_id: TURN_B.to_string(),
+                outcome: TurnOutcome::Completed,
+            },
+            now,
+        );
+
+        // Thread A now asks for approval.
+        registry.apply(
+            "connection-a",
+            AiClientEvent::RequestStarted {
+                key: "approval-a".to_string(),
+                kind: RequestKind::Approval,
+                thread_id: THREAD_A.to_string(),
+                turn_id: Some(TURN_A.to_string()),
+            },
+            now,
+        );
+
+        let snapshots = registry.snapshots();
+        let a = snapshots
+            .iter()
+            .find(|snapshot| snapshot.thread_id == THREAD_A)
+            .unwrap();
+        let b = snapshots
+            .iter()
+            .find(|snapshot| snapshot.thread_id == THREAD_B)
+            .unwrap();
+        assert_eq!(a.state.activity_state, AiActivityState::WaitingApproval);
+        assert_eq!(b.state.activity_state, AiActivityState::Completed);
+        // `self.focused` (Codex's own notion of "current thread") is still
+        // B, but the display target must be A: it is the thread actually
+        // waiting on the user.
+        assert!(a.is_display_target);
+        assert!(!b.is_display_target);
+    }
+
+    #[test]
+    fn display_target_returns_to_the_focused_thread_once_the_wait_resolves() {
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_A.to_string(),
+                turn_id: TURN_A.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_B.to_string(),
+            },
+            now,
+        );
+        // B is now `self.focused` (started last); A is waiting on approval.
+        registry.apply(
+            "connection-a",
+            AiClientEvent::RequestStarted {
+                key: "approval-a".to_string(),
+                kind: RequestKind::Approval,
+                thread_id: THREAD_A.to_string(),
+                turn_id: Some(TURN_A.to_string()),
+            },
+            now,
+        );
+
+        let waiting = registry.snapshots();
+        assert!(
+            waiting
+                .iter()
+                .find(|snapshot| snapshot.thread_id == THREAD_A)
+                .unwrap()
+                .is_display_target
+        );
+        assert!(
+            !waiting
+                .iter()
+                .find(|snapshot| snapshot.thread_id == THREAD_B)
+                .unwrap()
+                .is_display_target
+        );
+
+        registry.apply(
+            "connection-a",
+            AiClientEvent::RequestResolved {
+                key: "approval-a".to_string(),
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        );
+
+        let resolved = registry.snapshots();
+        let a = resolved
+            .iter()
+            .find(|snapshot| snapshot.thread_id == THREAD_A)
+            .unwrap();
+        let b = resolved
+            .iter()
+            .find(|snapshot| snapshot.thread_id == THREAD_B)
+            .unwrap();
+        assert_eq!(a.state.activity_state, AiActivityState::Working);
+        // Nothing is waiting any more, so display falls back to
+        // `self.focused` exactly as before this fix.
+        assert!(!a.is_display_target);
+        assert!(b.is_display_target);
+    }
+
+    #[test]
+    fn focused_thread_wins_when_multiple_threads_are_waiting() {
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_A.to_string(),
+                turn_id: TURN_A.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::RequestStarted {
+                key: "approval-a".to_string(),
+                kind: RequestKind::Approval,
+                thread_id: THREAD_A.to_string(),
+                turn_id: Some(TURN_A.to_string()),
+            },
+            now,
+        );
+
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_B.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_B.to_string(),
+                turn_id: TURN_B.to_string(),
+            },
+            now,
+        );
+        // B becomes `self.focused` via `TurnStarted`, and now also starts
+        // waiting, so both threads are waiting at once.
+        registry.apply(
+            "connection-a",
+            AiClientEvent::RequestStarted {
+                key: "approval-b".to_string(),
+                kind: RequestKind::Approval,
+                thread_id: THREAD_B.to_string(),
+                turn_id: Some(TURN_B.to_string()),
+            },
+            now,
+        );
+
+        let snapshots = registry.snapshots();
+        let a = snapshots
+            .iter()
+            .find(|snapshot| snapshot.thread_id == THREAD_A)
+            .unwrap();
+        let b = snapshots
+            .iter()
+            .find(|snapshot| snapshot.thread_id == THREAD_B)
+            .unwrap();
+        assert_eq!(a.state.activity_state, AiActivityState::WaitingApproval);
+        assert_eq!(b.state.activity_state, AiActivityState::WaitingApproval);
+        // A started waiting first, but B is Codex's own focused thread, so
+        // it wins the single display slot per the tiebreak rule.
+        assert!(!a.is_display_target);
+        assert!(b.is_display_target);
+    }
+
+    #[test]
+    fn earliest_waiting_thread_wins_when_the_focused_thread_is_not_waiting() {
+        const THREAD_C: &str = "thread-c";
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_A.to_string(),
+                turn_id: TURN_A.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::RequestStarted {
+                key: "approval-a".to_string(),
+                kind: RequestKind::Approval,
+                thread_id: THREAD_A.to_string(),
+                turn_id: Some(TURN_A.to_string()),
+            },
+            now,
+        );
+
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_B.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_B.to_string(),
+                turn_id: TURN_B.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::RequestStarted {
+                key: "approval-b".to_string(),
+                kind: RequestKind::Approval,
+                thread_id: THREAD_B.to_string(),
+                turn_id: Some(TURN_B.to_string()),
+            },
+            now,
+        );
+
+        // C becomes `self.focused` via `SessionStarted`, but never waits.
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_C.to_string(),
+            },
+            now,
+        );
+
+        let snapshots = registry.snapshots();
+        let a = snapshots
+            .iter()
+            .find(|snapshot| snapshot.thread_id == THREAD_A)
+            .unwrap();
+        let b = snapshots
+            .iter()
+            .find(|snapshot| snapshot.thread_id == THREAD_B)
+            .unwrap();
+        let c = snapshots
+            .iter()
+            .find(|snapshot| snapshot.thread_id == THREAD_C)
+            .unwrap();
+        assert_eq!(a.state.activity_state, AiActivityState::WaitingApproval);
+        assert_eq!(b.state.activity_state, AiActivityState::WaitingApproval);
+        // Neither waiting thread is `self.focused` (that's C), so the one
+        // that started waiting first (A) keeps the display slot — a stable
+        // choice that does not depend on wall-clock timing.
+        assert!(a.is_display_target);
+        assert!(!b.is_display_target);
+        assert!(!c.is_display_target);
+    }
+
+    #[test]
+    fn working_thread_keeps_the_display_target_while_a_side_thread_completes() {
+        // Reproduces the field bug this test guards against: a short-lived
+        // side thread (observed in practice around conversation-title
+        // generation) starts and completes *while* the real thread the user
+        // is waiting on is still `Working`. Before this fix, the side
+        // thread's `SessionStarted`/`TurnStarted` stole `self.focused`, and
+        // its `TurnCompleted` briefly showed green on ScreenKey/the keyboard
+        // LEDs for a thread the user never asked about. The display target
+        // must stay on thread A throughout.
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_A.to_string(),
+                turn_id: TURN_A.to_string(),
+            },
+            now,
+        );
+
+        let is_display_target = |registry: &CodexSessionRegistry, thread_id: &str| {
+            registry
+                .snapshots()
+                .into_iter()
+                .find(|snapshot| snapshot.thread_id == thread_id)
+                .unwrap()
+                .is_display_target
+        };
+        assert!(is_display_target(&registry, THREAD_A));
+
+        // The side thread starts (this alone used to move `self.focused`,
+        // and with it the display target, onto B).
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_B.to_string(),
+            },
+            now,
+        );
+        assert!(is_display_target(&registry, THREAD_A));
+        assert!(!is_display_target(&registry, THREAD_B));
+
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_B.to_string(),
+                turn_id: TURN_B.to_string(),
+            },
+            now,
+        );
+        assert!(is_display_target(&registry, THREAD_A));
+        assert!(!is_display_target(&registry, THREAD_B));
+
+        // The side thread completes — this is exactly where the green flash
+        // used to happen.
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnFinished {
+                thread_id: THREAD_B.to_string(),
+                turn_id: TURN_B.to_string(),
+                outcome: TurnOutcome::Completed,
+            },
+            now,
+        );
+
+        let snapshots = registry.snapshots();
+        let a = snapshots
+            .iter()
+            .find(|snapshot| snapshot.thread_id == THREAD_A)
+            .unwrap();
+        let b = snapshots
+            .iter()
+            .find(|snapshot| snapshot.thread_id == THREAD_B)
+            .unwrap();
+        assert_eq!(a.state.activity_state, AiActivityState::Working);
+        assert_eq!(b.state.activity_state, AiActivityState::Completed);
+        assert!(a.is_display_target);
+        assert!(!b.is_display_target);
+    }
+
+    #[test]
+    fn display_target_moves_to_the_focused_thread_once_the_working_thread_stops() {
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_A.to_string(),
+                turn_id: TURN_A.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_B.to_string(),
+            },
+            now,
+        );
+
+        // A is still the display target while it works, even though B is
+        // `self.focused` (started more recently).
+        let before = registry.snapshots();
+        assert!(
+            before
+                .iter()
+                .find(|snapshot| snapshot.thread_id == THREAD_A)
+                .unwrap()
+                .is_display_target
+        );
+
+        // A's turn ends without ever waiting on the user — it stops being
+        // `Working`, so it no longer has a claim on the display slot and
+        // control returns to Codex's own focus (B).
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnFinished {
+                thread_id: THREAD_A.to_string(),
+                turn_id: TURN_A.to_string(),
+                outcome: TurnOutcome::Interrupted,
+            },
+            now,
+        );
+
+        let after = registry.snapshots();
+        let a = after
+            .iter()
+            .find(|snapshot| snapshot.thread_id == THREAD_A)
+            .unwrap();
+        let b = after
+            .iter()
+            .find(|snapshot| snapshot.thread_id == THREAD_B)
+            .unwrap();
+        assert_eq!(a.state.activity_state, AiActivityState::Available);
+        assert!(!a.is_display_target);
+        assert!(b.is_display_target);
+    }
+
+    #[test]
+    fn a_newly_waiting_thread_still_outranks_a_working_display_target() {
+        // Rule 1 (a thread waiting on the user) must keep outranking rule 2
+        // (stickiness to a `Working` thread) — the new stickiness must not
+        // resurrect the bug rule 1 was added to fix.
+        let now = Instant::now();
+        let mut registry = CodexSessionRegistry::new();
+
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_A.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_A.to_string(),
+                turn_id: TURN_A.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::SessionStarted {
+                thread_id: THREAD_B.to_string(),
+            },
+            now,
+        );
+        registry.apply(
+            "connection-a",
+            AiClientEvent::TurnStarted {
+                thread_id: THREAD_B.to_string(),
+                turn_id: TURN_B.to_string(),
+            },
+            now,
+        );
+
+        // A is still Working and sticky-holding the display slot at this
+        // point.
+        let before = registry.snapshots();
+        assert!(
+            before
+                .iter()
+                .find(|snapshot| snapshot.thread_id == THREAD_A)
+                .unwrap()
+                .is_display_target
+        );
+
+        registry.apply(
+            "connection-a",
+            AiClientEvent::RequestStarted {
+                key: "approval-b".to_string(),
+                kind: RequestKind::Approval,
+                thread_id: THREAD_B.to_string(),
+                turn_id: Some(TURN_B.to_string()),
+            },
+            now,
+        );
+
+        let after = registry.snapshots();
+        let a = after
+            .iter()
+            .find(|snapshot| snapshot.thread_id == THREAD_A)
+            .unwrap();
+        let b = after
+            .iter()
+            .find(|snapshot| snapshot.thread_id == THREAD_B)
+            .unwrap();
+        assert_eq!(a.state.activity_state, AiActivityState::Working);
+        assert_eq!(b.state.activity_state, AiActivityState::WaitingApproval);
+        assert!(!a.is_display_target);
+        assert!(b.is_display_target);
     }
 
     #[test]

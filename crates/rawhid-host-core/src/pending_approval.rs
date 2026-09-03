@@ -310,6 +310,27 @@ impl PendingApprovalStore {
         })
     }
 
+    /// Returns the key and snapshot of the most recently *inserted* entry
+    /// (the LRU's back), for a HUD showing "the newest unresolved request"
+    /// per `docs/ai-approval-hud-design.md` §10: "複数セッションが同時に承認
+    /// 待ちのときは、最新の1件を表示する". `get` does not move a key within
+    /// the LRU, so a HUD repeatedly reading the same entry does not disturb
+    /// this ordering.
+    pub fn latest(&self) -> Option<(ApprovalKey, PendingApprovalSnapshot)> {
+        let inner = self.inner.lock().unwrap();
+        let key = inner.lru.back()?.clone();
+        inner.entries.get(&key).map(|entry| {
+            (
+                key.clone(),
+                PendingApprovalSnapshot {
+                    client: entry.client,
+                    content: entry.content.clone(),
+                    protected: entry.protected,
+                },
+            )
+        })
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().entries.len()
     }
@@ -551,6 +572,43 @@ mod tests {
             snapshot.content,
             PendingApprovalContent::Body(body("second"))
         );
+    }
+
+    #[test]
+    fn latest_returns_the_most_recently_inserted_unresolved_entry() {
+        let store = PendingApprovalStore::new();
+        assert!(store.latest().is_none());
+
+        let key_a = ApprovalKey::new("a");
+        let key_b = ApprovalKey::new("b");
+        store.insert(
+            key_a.clone(),
+            ApprovalClient::Codex,
+            codex_owner("c1"),
+            body("a"),
+        );
+        store.insert(
+            key_b.clone(),
+            ApprovalClient::Codex,
+            codex_owner("c2"),
+            body("b"),
+        );
+
+        let (latest_key, _) = store.latest().expect("an entry is pending");
+        assert_eq!(latest_key, key_b);
+
+        // Reading via `get` must not disturb insertion order.
+        store.get(&key_a);
+        let (latest_key, _) = store.latest().expect("an entry is pending");
+        assert_eq!(latest_key, key_b);
+
+        // Resolving the newest entry falls back to the next-newest.
+        store.resolve(&key_b);
+        let (latest_key, _) = store.latest().expect("an entry is pending");
+        assert_eq!(latest_key, key_a);
+
+        store.resolve(&key_a);
+        assert!(store.latest().is_none());
     }
 
     #[test]

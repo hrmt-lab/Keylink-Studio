@@ -18,6 +18,7 @@ import type {
   ComboInfoDto,
   ComboItemDto,
   ComboItemInputDto,
+  HudApprovalPayload,
   KeyPressEvent,
   KeyCatalogEntry,
   KeyStatsSummary,
@@ -266,3 +267,9 @@ export const onKeyPressEvent = (
   cb: (event: KeyPressEvent) => void
 ): Promise<UnlistenFn> =>
   listen<KeyPressEvent>("key-press-event", (e) => cb(e.payload));
+
+/** HUD-window-only: pushed by rawhid-host-tauri's `hud_coordinator.rs`. */
+export const onHudApprovalUpdate = (
+  cb: (payload: HudApprovalPayload | null) => void
+): Promise<UnlistenFn> =>
+  listen<HudApprovalPayload | null>("hud-approval-update", (e) => cb(e.payload));

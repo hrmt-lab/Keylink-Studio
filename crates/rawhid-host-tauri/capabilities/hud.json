@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "hud",
+  "description": "HUD window. Display only: it listens for approval payloads and renders them. It must not be able to move focus or open dialogs — the non-activating behaviour verified in docs/hud-focus-gate-results.md depends on the window never activating itself, and the content it renders comes from AI output.",
+  "windows": ["hud"],
+  "permissions": ["core:event:allow-listen", "core:event:allow-unlisten"]
+}

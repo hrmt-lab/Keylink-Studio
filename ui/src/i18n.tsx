@@ -711,6 +711,15 @@ const T = {
     "settings.appearance.accent.add": "追加",
     "settings.appearance.accent.remove": "この色を削除",
     "settings.appearance.accent.pick": "色を選択",
+
+    "hud.oversized": "内容が大きすぎるため表示できません。",
+    "hud.no_primary_text": "内容を表示できません。",
+    "hud.cwd": "作業ディレクトリ",
+    "hud.reason": "理由",
+    "hud.kind.codex_command": "コマンド実行の許可",
+    "hud.kind.codex_unknown": "承認待ち",
+    "hud.kind.claude_tool": "{tool} の実行許可",
+    "hud.kind.claude_unknown": "許可待ち",
   },
   en: {
     "app.loading": "Loading...",
@@ -1414,6 +1423,15 @@ const T = {
     "settings.appearance.accent.add": "Add",
     "settings.appearance.accent.remove": "Remove this color",
     "settings.appearance.accent.pick": "Pick a color",
+
+    "hud.oversized": "This request is too large to display.",
+    "hud.no_primary_text": "No content to display.",
+    "hud.cwd": "Working directory",
+    "hud.reason": "Reason",
+    "hud.kind.codex_command": "Command execution approval",
+    "hud.kind.codex_unknown": "Waiting for approval",
+    "hud.kind.claude_tool": "{tool} execution approval",
+    "hud.kind.claude_unknown": "Waiting for approval",
   },
 } as const;
 

@@ -6,6 +6,7 @@ mod codex_launcher;
 mod commands;
 mod explorer;
 mod foreground;
+mod hud_coordinator;
 mod hud_probe;
 mod hud_window;
 mod icon;
@@ -105,6 +106,7 @@ pub fn run() {
         .setup(move |app| {
             setup_window_icon(app)?;
             setup_tray(app)?;
+            setup_hud(app)?;
             let handle = app.handle().clone();
             let state = app.state::<AppState>();
             commands::start_host_link_worker(handle, state.inner(), start_on_launch)
@@ -153,6 +155,19 @@ pub fn run_hud_focus_probe() {
         })
         .run(tauri::generate_context!())
         .expect("failed to start HUD focus probe");
+}
+
+/// Creates the HUD window hidden (see `hud_window.rs`'s module doc for why
+/// this must happen at startup rather than lazily) and stores the resulting
+/// `HudCoordinator` in `AppState` so the host-link monitor thread
+/// (`commands.rs`'s `run_monitor_loop`) can push approval updates to it once
+/// it starts a few lines below.
+fn setup_hud(app: &mut tauri::App) -> tauri::Result<()> {
+    let coordinator =
+        hud_coordinator::HudCoordinator::create(app.handle()).map_err(std::io::Error::other)?;
+    let state = app.state::<AppState>();
+    *state.hud.lock().unwrap() = Some(coordinator);
+    Ok(())
 }
 
 fn setup_window_icon(app: &mut tauri::App) -> tauri::Result<()> {

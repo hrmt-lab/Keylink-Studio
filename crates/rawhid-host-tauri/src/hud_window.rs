@@ -57,6 +57,18 @@ impl HudWindow {
             .skip_taskbar(true)
             .decorations(false)
             .resizable(false)
+            // Lets the HUD panel show a translucent surface (its own
+            // background is painted at bg-surface/90 in Hud.tsx, with
+            // hud/hud.css clearing html/body's opaque background from
+            // index.css) instead of an opaque window rectangle. Requires
+            // `decorations(false)` above, which this window already has.
+            .transparent(true)
+            // Without this, DWM draws its own drop shadow around the
+            // undecorated window rectangle. That shadow has square corners,
+            // so it stays visible outside the panel's `rounded-card` edges
+            // and the window reads as square no matter how the panel itself
+            // is rounded. The panel draws its own edge (`ring-1 ring-border`).
+            .shadow(false)
             .build()
             .map_err(|err| format!("failed to create HUD window: {err}"))?;
 
@@ -108,6 +120,31 @@ impl HudWindow {
 
     #[cfg(not(windows))]
     pub fn hide(&self) {}
+
+    /// The raw HWND value, for code that must hide this window from
+    /// another thread later (see `hud_coordinator.rs`'s exit animation).
+    ///
+    /// `HWND` is a raw-pointer newtype and therefore not `Send`, which is
+    /// why this type stores the handle as an `isize` in the first place;
+    /// callers move the value and rebuild the handle on the far side.
+    pub fn hwnd_raw(&self) -> isize {
+        self.hwnd_raw
+    }
+
+    /// [`Self::hide`] for a window identified only by its raw handle
+    /// value, so a thread that outlives the borrow can still hide it.
+    #[cfg(windows)]
+    pub fn hide_raw(hwnd_raw: isize) {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+
+        unsafe {
+            let _ = ShowWindow(HWND(hwnd_raw as *mut core::ffi::c_void), SW_HIDE);
+        }
+    }
+
+    #[cfg(not(windows))]
+    pub fn hide_raw(_hwnd_raw: isize) {}
 
     /// Shows the window and forcibly activates it.
     ///

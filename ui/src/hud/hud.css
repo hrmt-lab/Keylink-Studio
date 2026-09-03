@@ -1,0 +1,61 @@
+/* HUD-window-only override. index.css paints an opaque background on
+   html/body for the main app window; the HUD window is transparent
+   (hud_window.rs's `.transparent(true)`) so its own chrome (html/body)
+   must stay transparent and let Hud.tsx's own bg-surface/90 panel be the
+   only thing drawn. Imported after index.css in hud/main.tsx so this wins
+   the cascade. */
+html,
+body,
+#root {
+  background: transparent;
+}
+
+/* Entry animation. The HUD appears next to whatever the user is already
+   looking at, so it stays calm on purpose: the ScreenKey is what does the
+   "notice me" job, and a panel that lunges at the eye would compete with
+   the work the user is in the middle of. Fade plus a short rise reads as
+   "this arrived" without demanding a reaction.
+
+   Pure CSS, so it cannot touch focus -- the non-activating behaviour
+   verified in docs/hud-focus-gate-results.md stays intact. */
+@keyframes hud-enter {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.hud-enter {
+  animation: hud-enter 180ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* Applied by Hud.tsx for the brief window between the Host clearing the
+   payload and `HudWindow::hide()` landing (hud_coordinator.rs delays the
+   hide by HUD_EXIT_ANIMATION_MS so this can finish). Shorter than the
+   entry: leaving should not hold the user's attention. */
+.hud-leave {
+  animation: hud-leave 130ms ease-in forwards;
+}
+
+@keyframes hud-leave {
+  from {
+    opacity: 1;
+    transform: translateY(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+}
+
+/* Someone who has asked the OS to reduce motion gets the fade only. */
+@media (prefers-reduced-motion: reduce) {
+  .hud-enter,
+  .hud-leave {
+    animation-duration: 1ms;
+  }
+}

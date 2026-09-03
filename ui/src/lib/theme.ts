@@ -3,8 +3,16 @@
  * (RGB triplets, see index.css :root) so the whole Tailwind palette follows a
  * single user-picked base color. UI-only preference, persisted in localStorage.
  */
+import { emit } from "@tauri-apps/api/event";
 
 export const DEFAULT_ACCENT = "#EF5B25";
+
+/** Broadcast when `setAccent` changes the accent, so other windows (the HUD)
+ *  can re-apply it without an app restart. Emitted from every window that
+ *  calls `setAccent` (currently just Settings, in the main window), but any
+ *  window with `core:event:allow-listen` may listen -- the HUD does, in
+ *  `hud/main.tsx`. */
+export const ACCENT_CHANGED_EVENT = "accent-changed";
 
 export const PRESET_ACCENTS = [
   "#EF5B25", // orange (default)
@@ -64,8 +72,13 @@ export function getAccent(): string {
 
 export function setAccent(hex: string): void {
   if (!hexToRgb(hex)) return;
-  localStorage.setItem(ACCENT_KEY, normalize(hex));
+  const normalized = normalize(hex);
+  localStorage.setItem(ACCENT_KEY, normalized);
   applyAccent(hex);
+  // Best-effort: a window without a live HUD (or no Tauri runtime, e.g. a
+  // browser-only dev preview) must not break this call -- setAccent is also
+  // the Settings-page accent picker's write path.
+  void emit(ACCENT_CHANGED_EVENT, normalized).catch(() => {});
 }
 
 /** Apply the persisted accent on startup. */

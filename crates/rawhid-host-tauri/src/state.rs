@@ -23,6 +23,8 @@ use rawhid_host_core::{
     ClaudeObserverCounters, ClaudeObserverEvents, ClaudeObserverReceiver, ClaudeSessionRegistry,
 };
 
+use crate::hud_coordinator::HudCoordinator;
+
 pub const MAX_LOG_ENTRIES: usize = 200;
 pub const MAX_AI_DISPLAY_SLOTS: u8 = 8;
 
@@ -83,6 +85,11 @@ pub struct AppState {
     pub studio_edit: Arc<Mutex<Option<StudioEditSession>>>,
     pub encoder_restore_rollbacks:
         Arc<Mutex<HashMap<(String, u64), BTreeMap<(u32, u8), EncoderGetBindings>>>>,
+    /// Populated once at startup by `lib.rs`'s `setup_hud`, which is the
+    /// only place an `AppHandle` capable of building the HUD window is
+    /// available. `None` only for the brief window between `AppState::new`
+    /// and that `setup()` callback running.
+    pub hud: Arc<Mutex<Option<HudCoordinator>>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -505,6 +512,7 @@ impl AppState {
             key_stats,
             studio_edit: Arc::new(Mutex::new(None)),
             encoder_restore_rollbacks: Arc::new(Mutex::new(HashMap::new())),
+            hud: Arc::new(Mutex::new(None)),
         }
     }
 }

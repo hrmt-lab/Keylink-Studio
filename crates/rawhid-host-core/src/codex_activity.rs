@@ -10,10 +10,15 @@ use serde_json::Value;
 
 use crate::{
     codex_broker::{
-        BrokerDirection, CodexBrokerEvent, CodexBrokerManager, JsonRpcKind, JsonRpcMetadata,
+        BrokerDirection, CodexApprovalRequestBody, CodexBrokerEvent, CodexBrokerManager,
+        JsonRpcKind, JsonRpcMetadata,
     },
     next_ai_session_registration_order,
     packet::{AiActivityState, AiClientType, AiClientVariant, AiWorkPhase},
+    pending_approval::{
+        codex_key, ApprovalClient, ApprovalKey, ApprovalOwner, PendingApprovalBody,
+        PendingApprovalStore,
+    },
 };
 
 const RECONNECT_GRACE: Duration = Duration::from_secs(3);
@@ -1211,6 +1216,7 @@ pub struct CodexActivityRuntime {
     snapshots: Arc<RwLock<Vec<CodexSessionSnapshot>>>,
     changes: Arc<Mutex<VecDeque<CodexStateChange>>>,
     selected_thread_id: Arc<RwLock<Option<String>>>,
+    pending_approvals: Arc<PendingApprovalStore>,
     stop_tx: mpsc::Sender<()>,
     worker: Option<thread::JoinHandle<()>>,
 }
@@ -1223,6 +1229,8 @@ impl CodexActivityRuntime {
         let worker_changes = changes.clone();
         let selected_thread_id = Arc::new(RwLock::new(None));
         let worker_selected_thread_id = selected_thread_id.clone();
+        let pending_approvals = Arc::new(PendingApprovalStore::new());
+        let worker_pending_approvals = pending_approvals.clone();
         let (stop_tx, stop_rx) = mpsc::channel();
         let worker = thread::Builder::new()
             .name("codex-activity-reducer".to_string())
@@ -1232,6 +1240,7 @@ impl CodexActivityRuntime {
                     worker_snapshots,
                     worker_changes,
                     worker_selected_thread_id,
+                    worker_pending_approvals,
                     stop_rx,
                 )
             })
@@ -1240,9 +1249,19 @@ impl CodexActivityRuntime {
             snapshots,
             changes,
             selected_thread_id,
+            pending_approvals,
             stop_tx,
             worker: Some(worker),
         }
+    }
+
+    /// Shared handle to the store of unresolved Codex approval-request
+    /// bodies. Populated by this runtime's own event loop (see
+    /// `resolve_codex_approval` below) regardless of whether anything
+    /// reads from it yet -- there is no HUD consumer in this phase (see
+    /// `docs/ai-approval-hud-design.md` §13, stage 1).
+    pub fn pending_approvals(&self) -> Arc<PendingApprovalStore> {
+        self.pending_approvals.clone()
     }
 
     pub fn snapshot(&self) -> AiClientStateSnapshot {
@@ -1295,10 +1314,19 @@ fn run_activity_loop(
     snapshots: Arc<RwLock<Vec<CodexSessionSnapshot>>>,
     changes: Arc<Mutex<VecDeque<CodexStateChange>>>,
     selected_thread_id: Arc<RwLock<Option<String>>>,
+    pending_approvals: Arc<PendingApprovalStore>,
     stop_rx: mpsc::Receiver<()>,
 ) {
     let mut adapters: HashMap<String, CodexEventAdapter> = HashMap::new();
     let mut registry = CodexSessionRegistry::new();
+    // Tracks the approval key of every still-open requestApproval by the
+    // turn it belongs to, purely so `turn/completed` can discard a
+    // leftover entry as a safety net (see `resolve_codex_approval`). The
+    // primary resolution paths -- the CLI's own response, and
+    // `serverRequest/resolved` -- key off the request id directly and
+    // don't need this map. Keyed by (connection_id, thread_id, turn_id)
+    // because more than one command can be approved within one turn.
+    let mut approval_turns: HashMap<(String, String, String), Vec<ApprovalKey>> = HashMap::new();
     loop {
         if stop_rx.try_recv().is_ok() {
             break;
@@ -1341,6 +1369,10 @@ fn run_activity_loop(
                         ..
                     } => {
                         adapters.remove(&connection_id);
+                        pending_approvals.clear_owner(&ApprovalOwner::Codex {
+                            connection_id: connection_id.clone(),
+                        });
+                        approval_turns.retain(|(owner, _, _), _| owner != &connection_id);
                         let changes_for_connection =
                             registry.disconnect(&connection_id, origin == "cli", now);
                         publish_registry_changes(
@@ -1351,11 +1383,31 @@ fn run_activity_loop(
                             &selected_thread_id,
                         );
                     }
+                    CodexBrokerEvent::ApprovalRequestBody {
+                        connection_id,
+                        request_id,
+                        body,
+                    } => {
+                        ingest_codex_approval(
+                            &pending_approvals,
+                            &mut approval_turns,
+                            &connection_id,
+                            &request_id,
+                            *body,
+                        );
+                    }
                     CodexBrokerEvent::Message {
                         connection_id,
                         direction,
                         metadata,
                     } => {
+                        resolve_codex_approval(
+                            &pending_approvals,
+                            &mut approval_turns,
+                            &connection_id,
+                            direction,
+                            &metadata,
+                        );
                         let Some(adapter) = adapters.get_mut(&connection_id) else {
                             continue;
                         };
@@ -1381,6 +1433,8 @@ fn run_activity_loop(
                         ..
                     } => {
                         adapters.clear();
+                        pending_approvals.clear_client(ApprovalClient::Codex);
+                        approval_turns.clear();
                         let ended = registry.end_all(now);
                         publish_registry_changes(
                             ended,
@@ -1398,6 +1452,8 @@ fn run_activity_loop(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
+                pending_approvals.clear_client(ApprovalClient::Codex);
+                approval_turns.clear();
                 let ended = registry.end_all(Instant::now());
                 publish_registry_changes(
                     ended,
@@ -1409,6 +1465,98 @@ fn run_activity_loop(
                 break;
             }
         }
+    }
+}
+
+/// Records the body of one Codex `requestApproval` into `pending_approvals`.
+///
+/// This is a sibling of `CodexEventAdapter`/`CodexSessionRegistry`, not a
+/// part of them: it never reads or writes `AiClientStateReducer`'s state,
+/// and its failure or absence has no effect on the activity state machine
+/// those drive. It exists purely to keep the store in sync with what the
+/// Broker observed.
+fn ingest_codex_approval(
+    pending_approvals: &PendingApprovalStore,
+    approval_turns: &mut HashMap<(String, String, String), Vec<ApprovalKey>>,
+    connection_id: &str,
+    request_id: &Value,
+    body: CodexApprovalRequestBody,
+) {
+    let key = codex_key(connection_id, request_id);
+    if let (Some(thread_id), Some(turn_id)) = (body.thread_id.clone(), body.turn_id.clone()) {
+        approval_turns
+            .entry((connection_id.to_string(), thread_id, turn_id))
+            .or_default()
+            .push(key.clone());
+    }
+    let owner = ApprovalOwner::Codex {
+        connection_id: connection_id.to_string(),
+    };
+    let normalized = PendingApprovalBody {
+        primary_text: body.command_actions.first().cloned(),
+        full_command: body.command,
+        reason: body.reason,
+        cwd: body.cwd,
+        kind: body.kind,
+        available_decisions: Some(body.available_decisions),
+        // Codex's own request id lives in `key`/`approval_turns` above, not
+        // in the body -- these two fields are Claude-only.
+        tool_use_id: None,
+        prompt_id: None,
+    };
+    pending_approvals.insert(key, ApprovalClient::Codex, owner, normalized);
+}
+
+/// Resolution triggers for `pending_approvals`, read from the same
+/// `JsonRpcMetadata` the activity reducer already receives -- never from
+/// the request body itself (that only ever flows once, via
+/// `ApprovalRequestBody`/`ingest_codex_approval`). Three signals resolve an
+/// entry:
+/// - the CLI's own response to a `requestApproval` it saw normally
+///   (`CliToAppServer`, matching JSON-RPC id);
+/// - `serverRequest/resolved`, observed ~2ms after a Broker-held request is
+///   answered (KO-2 §4);
+/// - `turn/completed`, a ~2.8s-later safety net for any request the first
+///   two signals missed (KO-2 §4).
+fn resolve_codex_approval(
+    pending_approvals: &PendingApprovalStore,
+    approval_turns: &mut HashMap<(String, String, String), Vec<ApprovalKey>>,
+    connection_id: &str,
+    direction: BrokerDirection,
+    metadata: &JsonRpcMetadata,
+) {
+    match direction {
+        BrokerDirection::CliToAppServer => {
+            if metadata.kind == JsonRpcKind::Response {
+                if let Some(id) = metadata.id.as_ref() {
+                    pending_approvals.resolve(&codex_key(connection_id, id));
+                }
+            }
+        }
+        BrokerDirection::AppServerToCli => match metadata.method.as_deref() {
+            Some("serverRequest/resolved") => {
+                if let Some(request_id) = metadata.request_id.as_ref() {
+                    pending_approvals.resolve(&codex_key(connection_id, request_id));
+                }
+            }
+            Some("turn/completed") => {
+                if let (Some(thread_id), Some(turn_id)) =
+                    (metadata.thread_id.as_deref(), metadata.turn_id.as_deref())
+                {
+                    let map_key = (
+                        connection_id.to_string(),
+                        thread_id.to_string(),
+                        turn_id.to_string(),
+                    );
+                    if let Some(keys) = approval_turns.remove(&map_key) {
+                        for key in keys {
+                            pending_approvals.resolve(&key);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        },
     }
 }
 
@@ -1491,6 +1639,7 @@ fn initial_revision() -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pending_approval::PendingApprovalContent;
 
     const THREAD_A: &str = "thread-a";
     const THREAD_B: &str = "thread-b";
@@ -2758,5 +2907,252 @@ mod tests {
             snapshots[1].state.activity_state,
             AiActivityState::Available
         );
+    }
+
+    fn ko2_body() -> CodexApprovalRequestBody {
+        CodexApprovalRequestBody {
+            command_actions: vec!["mkdir ko2-test".to_string()],
+            command: Some(
+                "\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -Command 'mkdir ko2-test'"
+                    .to_string(),
+            ),
+            reason: Some("ワークスペース内に ko2-test ディレクトリを作成してよいですか？".to_string()),
+            cwd: Some("C:\\01.keyboards\\OriginalKeyboards\\02.SW\\Keylink-Studio".to_string()),
+            kind: Some("command".to_string()),
+            available_decisions: vec![
+                Value::String("accept".to_string()),
+                serde_json::json!({"acceptWithExecpolicyAmendment": {"execpolicy_amendment": ["mkdir"]}}),
+                Value::String("cancel".to_string()),
+            ],
+            thread_id: Some(THREAD_A.to_string()),
+            turn_id: Some(TURN_A.to_string()),
+            item_id: Some("exec-882ac982".to_string()),
+        }
+    }
+
+    #[test]
+    fn ingest_codex_approval_normalizes_the_ko2_body_and_keeps_decisions_opaque() {
+        let store = PendingApprovalStore::new();
+        let mut approval_turns = HashMap::new();
+        let request_id = Value::from(0);
+        ingest_codex_approval(
+            &store,
+            &mut approval_turns,
+            "connection-1",
+            &request_id,
+            ko2_body(),
+        );
+
+        let key = codex_key("connection-1", &request_id);
+        let snapshot = store.get(&key).expect("entry inserted");
+        match snapshot.content {
+            PendingApprovalContent::Body(body) => {
+                assert_eq!(body.primary_text.as_deref(), Some("mkdir ko2-test"));
+                assert_eq!(
+                    body.full_command.as_deref(),
+                    Some(
+                        "\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -Command 'mkdir ko2-test'"
+                    )
+                );
+                assert_eq!(
+                    body.reason.as_deref(),
+                    Some("ワークスペース内に ko2-test ディレクトリを作成してよいですか？")
+                );
+                assert_eq!(body.kind.as_deref(), Some("command"));
+                let decisions = body.available_decisions.expect("decisions present");
+                assert_eq!(decisions.len(), 3);
+                assert_eq!(decisions[0], Value::String("accept".to_string()));
+                assert_eq!(
+                    decisions[1],
+                    serde_json::json!({"acceptWithExecpolicyAmendment": {"execpolicy_amendment": ["mkdir"]}})
+                );
+                assert_eq!(decisions[2], Value::String("cancel".to_string()));
+            }
+            PendingApprovalContent::Oversized => panic!("unexpected oversized marker"),
+        }
+        assert_eq!(
+            approval_turns
+                .get(&(
+                    "connection-1".to_string(),
+                    THREAD_A.to_string(),
+                    TURN_A.to_string()
+                ))
+                .map(Vec::len),
+            Some(1)
+        );
+    }
+
+    #[test]
+    fn resolve_codex_approval_via_cli_response_discards_the_entry() {
+        let store = PendingApprovalStore::new();
+        let mut approval_turns = HashMap::new();
+        let request_id = Value::from(0);
+        ingest_codex_approval(
+            &store,
+            &mut approval_turns,
+            "connection-1",
+            &request_id,
+            ko2_body(),
+        );
+        let key = codex_key("connection-1", &request_id);
+        assert!(store.get(&key).is_some());
+
+        let response = crate::codex_broker::classify_json_rpc(
+            r#"{"jsonrpc":"2.0","id":0,"result":{"decision":"accept"}}"#,
+        );
+        resolve_codex_approval(
+            &store,
+            &mut approval_turns,
+            "connection-1",
+            BrokerDirection::CliToAppServer,
+            &response,
+        );
+        assert!(store.get(&key).is_none());
+    }
+
+    #[test]
+    fn resolve_codex_approval_via_server_request_resolved_discards_the_entry() {
+        let store = PendingApprovalStore::new();
+        let mut approval_turns = HashMap::new();
+        let request_id = Value::from(0);
+        ingest_codex_approval(
+            &store,
+            &mut approval_turns,
+            "connection-1",
+            &request_id,
+            ko2_body(),
+        );
+        let key = codex_key("connection-1", &request_id);
+
+        let resolved = crate::codex_broker::classify_json_rpc(
+            r#"{"jsonrpc":"2.0","method":"serverRequest/resolved","params":{"requestId":0}}"#,
+        );
+        resolve_codex_approval(
+            &store,
+            &mut approval_turns,
+            "connection-1",
+            BrokerDirection::AppServerToCli,
+            &resolved,
+        );
+        assert!(store.get(&key).is_none());
+    }
+
+    #[test]
+    fn resolve_codex_approval_via_turn_completed_is_a_safety_net() {
+        let store = PendingApprovalStore::new();
+        let mut approval_turns = HashMap::new();
+        let request_id = Value::from(0);
+        ingest_codex_approval(
+            &store,
+            &mut approval_turns,
+            "connection-1",
+            &request_id,
+            ko2_body(),
+        );
+        let key = codex_key("connection-1", &request_id);
+        // Neither the CLI response nor `serverRequest/resolved` arrived
+        // (e.g. a Broker-held request answered without either signal
+        // reaching this connection) -- `turn/completed` must still clear
+        // it, per docs/ai-approval-hud-design.md §9.1.
+        let completed = crate::codex_broker::classify_json_rpc(&format!(
+            r#"{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"{THREAD_A}","turnId":"{TURN_A}","turn":{{"status":"completed"}}}}}}"#
+        ));
+        resolve_codex_approval(
+            &store,
+            &mut approval_turns,
+            "connection-1",
+            BrokerDirection::AppServerToCli,
+            &completed,
+        );
+        assert!(store.get(&key).is_none());
+        assert!(approval_turns.is_empty());
+    }
+
+    /// KO-2 observed `serverRequest/resolved` arriving before
+    /// `turn/completed`, but nothing here should depend on that order:
+    /// `PendingApprovalStore::resolve` is idempotent, so whichever signal
+    /// arrives first clears the entry (and, for `turn/completed`, the
+    /// `approval_turns` tracking) and the second is a harmless no-op.
+    /// Covers both orders explicitly rather than relying on that being an
+    /// accident of the implementation.
+    #[test]
+    fn resolution_signals_are_order_independent() {
+        for reverse_order in [false, true] {
+            let store = PendingApprovalStore::new();
+            let mut approval_turns = HashMap::new();
+            let request_id = Value::from(0);
+            ingest_codex_approval(
+                &store,
+                &mut approval_turns,
+                "connection-1",
+                &request_id,
+                ko2_body(),
+            );
+            let key = codex_key("connection-1", &request_id);
+
+            let resolved = crate::codex_broker::classify_json_rpc(
+                r#"{"jsonrpc":"2.0","method":"serverRequest/resolved","params":{"requestId":0}}"#,
+            );
+            let completed = crate::codex_broker::classify_json_rpc(&format!(
+                r#"{{"jsonrpc":"2.0","method":"turn/completed","params":{{"threadId":"{THREAD_A}","turnId":"{TURN_A}","turn":{{"status":"completed"}}}}}}"#
+            ));
+            let mut signals = [
+                (BrokerDirection::AppServerToCli, resolved),
+                (BrokerDirection::AppServerToCli, completed),
+            ];
+            if reverse_order {
+                signals.reverse();
+            }
+            for (direction, metadata) in signals {
+                resolve_codex_approval(
+                    &store,
+                    &mut approval_turns,
+                    "connection-1",
+                    direction,
+                    &metadata,
+                );
+            }
+
+            assert!(
+                store.get(&key).is_none(),
+                "reverse_order={reverse_order}: entry must be resolved regardless of signal order"
+            );
+            assert!(
+                approval_turns.is_empty(),
+                "reverse_order={reverse_order}: turn tracking must be cleaned up either way"
+            );
+        }
+    }
+
+    #[test]
+    fn client_disconnected_discards_only_that_connections_pending_approvals() {
+        let store = Arc::new(PendingApprovalStore::new());
+        let store_a = store.clone();
+        let request_id = Value::from(0);
+        let mut approval_turns = HashMap::new();
+        ingest_codex_approval(
+            &store_a,
+            &mut approval_turns,
+            "connection-a",
+            &request_id,
+            ko2_body(),
+        );
+        ingest_codex_approval(
+            &store_a,
+            &mut approval_turns,
+            "connection-b",
+            &request_id,
+            ko2_body(),
+        );
+        let key_a = codex_key("connection-a", &request_id);
+        let key_b = codex_key("connection-b", &request_id);
+
+        store.clear_owner(&ApprovalOwner::Codex {
+            connection_id: "connection-a".to_string(),
+        });
+        approval_turns.retain(|(owner, _, _), _| owner != "connection-a");
+
+        assert!(store.get(&key_a).is_none());
+        assert!(store.get(&key_b).is_some());
     }
 }

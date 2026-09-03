@@ -10,6 +10,10 @@ use crate::{
     claude_hook_event::{ClaudeHookEvent, ClaudeObserverEvent},
     next_ai_session_registration_order,
     packet::{AiActivityState, AiWorkPhase},
+    pending_approval::{
+        claude_key, ApprovalClient, ApprovalOwner, PendingApprovalBody, PendingApprovalContent,
+        PendingApprovalStore,
+    },
 };
 
 pub const CLAUDE_DETAIL_STALE_TIMEOUT: Duration = Duration::from_secs(120);
@@ -157,6 +161,137 @@ impl ClaudeEventAdapter {
             "SessionEnd" => Ok(Some(ClaudeCanonicalEvent::SessionEnd)),
             _ => Ok(None),
         }
+    }
+}
+
+/// Reads unresolved-approval bodies out of Claude Code hook events and
+/// keeps `PendingApprovalStore` in sync with them.
+///
+/// This is deliberately a sibling of `ClaudeEventAdapter`/
+/// `ClaudeSessionReducer`, not a part of them: the doc comment on
+/// `ClaudeEventAdapter` above states that it "does not retain answer text,
+/// compact summaries, credentials, or other raw payload fields," and that
+/// invariant is exactly what this type must not disturb. This consumer
+/// reads `hook.body` -- the one place in the crate allowed to do so for
+/// approval content -- and only ever hands it to `PendingApprovalStore`. It
+/// holds no `AiActivityState` of its own and never feeds back into
+/// `ClaudeSessionRegistry`.
+///
+/// Call `ingest` alongside (not instead of) `ClaudeSessionRegistry::apply`
+/// for the same event; the two are independent observers of the same
+/// stream.
+#[derive(Debug, Default)]
+pub struct ClaudeApprovalBodyConsumer;
+
+impl ClaudeApprovalBodyConsumer {
+    pub fn ingest(&self, store: &PendingApprovalStore, event: &ClaudeObserverEvent) {
+        match event {
+            ClaudeObserverEvent::Hook(hook) => self.ingest_hook(store, hook),
+            // A wrapper ending takes every session of that launch down with
+            // it, even ones this consumer never saw a SessionStart for.
+            ClaudeObserverEvent::WrapperExited(exit) => store.clear_claude_launch(&exit.launch_id),
+        }
+    }
+
+    fn ingest_hook(&self, store: &PendingApprovalStore, hook: &ClaudeHookEvent) {
+        let Some(session_id) = hook.session_id.as_deref() else {
+            return;
+        };
+        match hook.hook_event_name.as_str() {
+            // The real captured body
+            // (`docs/claude-permission-hook-gate-results.md` §4) has no
+            // `tool_use_id`, so the key here is `(launch_id, session_id)`,
+            // not a per-tool id (see `claude_key`). One session holds at
+            // most one unresolved request: a new `PermissionRequest`
+            // overwrites whatever was pending for this session, per
+            // `PendingApprovalStore::insert`'s overwrite semantics.
+            "PermissionRequest" => {
+                let owner = ApprovalOwner::ClaudeSession {
+                    launch_id: hook.launch_id.clone(),
+                    session_id: session_id.to_string(),
+                };
+                store.insert(
+                    claude_key(&hook.launch_id, session_id),
+                    ApprovalClient::ClaudeCode,
+                    owner,
+                    claude_approval_body(&hook.body),
+                );
+            }
+            // PermissionDenied is Claude's explicit denial; PostToolUse
+            // fires once the tool has actually run, which for an approved
+            // tool is the resolution (Notification/permission_prompt is
+            // deliberately not a trigger here, mirroring
+            // ClaudeEventAdapter's own treatment of it above).
+            //
+            // Since the key no longer names a specific tool, use the
+            // stored entry's `tool_use_id` (when both it and this event
+            // have one) purely to avoid clearing a still-pending request
+            // because an unrelated concurrent tool finished -- see
+            // `pending_approval_has_priority_over_later_tool_activity` in
+            // `ClaudeSessionReducer`'s own tests for that scenario. When
+            // either side lacks a `tool_use_id` (the common case per the
+            // real capture above), resolve unconditionally: with at most
+            // one pending entry per session there is nothing more precise
+            // to check against.
+            "PermissionDenied" | "PostToolUse" => {
+                let key = claude_key(&hook.launch_id, session_id);
+                let event_tool_use_id = required_string(&hook.body, "tool_use_id");
+                let should_resolve = match store.get(&key).map(|snapshot| snapshot.content) {
+                    Some(PendingApprovalContent::Body(stored)) => {
+                        match (stored.tool_use_id, event_tool_use_id) {
+                            (Some(stored_id), Some(event_id)) => stored_id == event_id,
+                            _ => true,
+                        }
+                    }
+                    Some(PendingApprovalContent::Oversized) => true,
+                    None => false,
+                };
+                if should_resolve {
+                    store.resolve(&key);
+                }
+            }
+            // The turn (or session) ending leaves nothing left to answer,
+            // even if no explicit resolution for a given request arrived.
+            "Stop" | "SessionEnd" => {
+                store.clear_owner(&ApprovalOwner::ClaudeSession {
+                    launch_id: hook.launch_id.clone(),
+                    session_id: session_id.to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Builds the normalized body for one Claude Code `PermissionRequest`. See
+/// the comparison table in `docs/ai-approval-hud-design.md` §7.2: Claude
+/// Code has no `reason` and no `availableDecisions` in the hook body --
+/// options are just allow/deny, which a HUD normalizes on the Host side in
+/// a later phase (`docs/claude-permission-hook-gate-results.md` §4 notes
+/// the choices shown in the terminal aren't even present in this body).
+fn claude_approval_body(body: &Value) -> PendingApprovalBody {
+    let tool_input = body.get("tool_input");
+    let command = tool_input
+        .and_then(|input| input.get("command"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let primary_text = command.clone().or_else(|| {
+        tool_input.map(|input| {
+            serde_json::to_string(input).unwrap_or_else(|_| "<tool_input>".to_string())
+        })
+    });
+    PendingApprovalBody {
+        primary_text,
+        full_command: command,
+        reason: None,
+        cwd: required_string(body, "cwd"),
+        kind: required_string(body, "tool_name"),
+        available_decisions: None,
+        // Auxiliary only -- see the doc comments on these fields in
+        // `pending_approval.rs`. Absent in the real capture (§4), present
+        // when Claude Code happens to include it.
+        tool_use_id: required_string(body, "tool_use_id"),
+        prompt_id: required_string(body, "prompt_id"),
     }
 }
 
@@ -1309,5 +1444,303 @@ mod tests {
         assert!(registry
             .mark_launch_desynchronized("other-launch")
             .is_empty());
+    }
+
+    /// The real `PermissionRequest` hook body captured in
+    /// `docs/claude-permission-hook-gate-results.md` §4. Note it has no
+    /// `tool_use_id` -- see
+    /// `permission_request_without_tool_use_id_is_still_stored_and_keyed_by_session`
+    /// below for what that means for this consumer.
+    fn ko3_hook_body() -> Value {
+        serde_json::json!({
+            "session_id": "c21f2516-0000-0000-0000-000000000000",
+            "transcript_path": "C:\\Users\\example\\session.jsonl",
+            "cwd": "C:\\Users\\example\\keylink-claude-permission-probe-8",
+            "scratchpad_dir": "C:\\Users\\example\\scratchpad",
+            "prompt_id": "ad630989-0000-0000-0000-000000000000",
+            "permission_mode": "acceptEdits",
+            "effort": {"level": "high"},
+            "hook_event_name": "PermissionRequest",
+            "tool_name": "PowerShell",
+            "tool_input": {
+                "command": "New-Item -ItemType Directory ko3-test8",
+                "description": "Create ko3-test8 directory"
+            },
+            "permission_suggestions": [
+                {
+                    "type": "addRules",
+                    "rules": [
+                        {"toolName": "PowerShell", "ruleContent": "New-Item -ItemType Directory ko3-test8"}
+                    ],
+                    "behavior": "allow",
+                    "destination": "localSettings"
+                }
+            ]
+        })
+    }
+
+    #[test]
+    fn claude_approval_body_extracts_the_real_ko3_fields() {
+        let extracted = claude_approval_body(&ko3_hook_body());
+        assert_eq!(
+            extracted.full_command.as_deref(),
+            Some("New-Item -ItemType Directory ko3-test8")
+        );
+        assert_eq!(
+            extracted.primary_text.as_deref(),
+            Some("New-Item -ItemType Directory ko3-test8")
+        );
+        assert_eq!(
+            extracted.cwd.as_deref(),
+            Some("C:\\Users\\example\\keylink-claude-permission-probe-8")
+        );
+        assert_eq!(extracted.kind.as_deref(), Some("PowerShell"));
+        // Claude Code has no `reason` and no `availableDecisions` field.
+        assert_eq!(extracted.reason, None);
+        assert_eq!(extracted.available_decisions, None);
+        // The real capture has no `tool_use_id`, but does carry `prompt_id`.
+        assert_eq!(extracted.tool_use_id, None);
+        assert_eq!(
+            extracted.prompt_id.as_deref(),
+            Some("ad630989-0000-0000-0000-000000000000")
+        );
+    }
+
+    #[test]
+    fn claude_approval_body_falls_back_to_a_tool_input_summary_without_command() {
+        let body = serde_json::json!({"tool_input": {"file_path": "notes.md"}});
+        let extracted = claude_approval_body(&body);
+        assert_eq!(extracted.full_command, None);
+        assert!(extracted
+            .primary_text
+            .as_deref()
+            .is_some_and(|text| text.contains("notes.md")));
+    }
+
+    #[test]
+    fn consumer_inserts_on_permission_request_and_resolves_on_permission_denied() {
+        let store = PendingApprovalStore::new();
+        let consumer = ClaudeApprovalBodyConsumer;
+        let key = claude_key("launch-1", "session-1");
+
+        consumer.ingest(
+            &store,
+            &hook(
+                "PermissionRequest",
+                serde_json::json!({"tool_use_id": "tool-a", "cwd": "C:\\work", "tool_name": "Bash"}),
+            ),
+        );
+        assert!(store.get(&key).is_some());
+
+        consumer.ingest(
+            &store,
+            &hook(
+                "PermissionDenied",
+                serde_json::json!({"tool_use_id": "tool-a"}),
+            ),
+        );
+        assert!(store.get(&key).is_none());
+    }
+
+    #[test]
+    fn consumer_resolves_on_post_tool_use() {
+        let store = PendingApprovalStore::new();
+        let consumer = ClaudeApprovalBodyConsumer;
+        let key = claude_key("launch-1", "session-1");
+        consumer.ingest(
+            &store,
+            &hook(
+                "PermissionRequest",
+                serde_json::json!({"tool_use_id": "tool-a"}),
+            ),
+        );
+        consumer.ingest(
+            &store,
+            &hook("PostToolUse", serde_json::json!({"tool_use_id": "tool-a"})),
+        );
+        assert!(store.get(&key).is_none());
+    }
+
+    /// The correlation key is `(launch_id, session_id)`, not `tool_use_id`
+    /// -- but a stored `tool_use_id` (when present) is still used to avoid
+    /// clearing a genuinely still-pending request just because some other,
+    /// concurrently running tool in the same session finished. This
+    /// mirrors the scenario `ClaudeSessionReducer`'s own
+    /// `pending_approval_has_priority_over_later_tool_activity` test
+    /// covers for activity state.
+    #[test]
+    fn consumer_does_not_resolve_when_a_different_tools_post_tool_use_arrives() {
+        let store = PendingApprovalStore::new();
+        let consumer = ClaudeApprovalBodyConsumer;
+        let key = claude_key("launch-1", "session-1");
+        consumer.ingest(
+            &store,
+            &hook(
+                "PermissionRequest",
+                serde_json::json!({"tool_use_id": "approval-tool"}),
+            ),
+        );
+        // An unrelated, concurrently running tool completes.
+        consumer.ingest(
+            &store,
+            &hook(
+                "PostToolUse",
+                serde_json::json!({"tool_use_id": "search-tool"}),
+            ),
+        );
+        assert!(
+            store.get(&key).is_some(),
+            "an unrelated tool's completion must not clear a still-pending approval"
+        );
+
+        // The approval's own tool finishing does resolve it.
+        consumer.ingest(
+            &store,
+            &hook(
+                "PostToolUse",
+                serde_json::json!({"tool_use_id": "approval-tool"}),
+            ),
+        );
+        assert!(store.get(&key).is_none());
+    }
+
+    #[test]
+    fn consumer_clears_the_session_on_stop_and_session_end() {
+        let store = PendingApprovalStore::new();
+        let consumer = ClaudeApprovalBodyConsumer;
+        let key = claude_key("launch-1", "session-1");
+        consumer.ingest(
+            &store,
+            &hook(
+                "PermissionRequest",
+                serde_json::json!({"tool_use_id": "tool-a"}),
+            ),
+        );
+        consumer.ingest(&store, &hook("Stop", serde_json::json!({})));
+        assert!(store.get(&key).is_none());
+
+        consumer.ingest(
+            &store,
+            &hook(
+                "PermissionRequest",
+                serde_json::json!({"tool_use_id": "tool-b"}),
+            ),
+        );
+        consumer.ingest(&store, &hook("SessionEnd", serde_json::json!({})));
+        assert!(store.get(&key).is_none());
+    }
+
+    #[test]
+    fn a_new_permission_request_overwrites_the_sessions_previous_pending_request() {
+        let store = PendingApprovalStore::new();
+        let consumer = ClaudeApprovalBodyConsumer;
+        let key = claude_key("launch-1", "session-1");
+        consumer.ingest(
+            &store,
+            &hook(
+                "PermissionRequest",
+                serde_json::json!({"tool_use_id": "tool-a", "tool_name": "Bash"}),
+            ),
+        );
+        consumer.ingest(
+            &store,
+            &hook(
+                "PermissionRequest",
+                serde_json::json!({"tool_use_id": "tool-b", "tool_name": "Write"}),
+            ),
+        );
+        assert_eq!(store.len(), 1);
+        match store.get(&key).expect("entry present").content {
+            PendingApprovalContent::Body(body) => {
+                assert_eq!(body.tool_use_id.as_deref(), Some("tool-b"));
+                assert_eq!(body.kind.as_deref(), Some("Write"));
+            }
+            PendingApprovalContent::Oversized => panic!("unexpected oversized marker"),
+        }
+    }
+
+    #[test]
+    fn consumer_clears_every_session_of_a_launch_on_wrapper_exit() {
+        let store = PendingApprovalStore::new();
+        let consumer = ClaudeApprovalBodyConsumer;
+        let key_a = claude_key("launch-1", "session-1");
+        let key_b = claude_key("launch-1", "session-2");
+        consumer.ingest(
+            &store,
+            &hook_for_session(
+                "session-1",
+                "PermissionRequest",
+                serde_json::json!({"tool_use_id": "tool-a"}),
+            ),
+        );
+        consumer.ingest(
+            &store,
+            &hook_for_session(
+                "session-2",
+                "PermissionRequest",
+                serde_json::json!({"tool_use_id": "tool-b"}),
+            ),
+        );
+
+        consumer.ingest(
+            &store,
+            &ClaudeObserverEvent::WrapperExited(ClaudeWrapperExited {
+                launch_id: "launch-1".to_string(),
+                exit_code: 0,
+            }),
+        );
+
+        assert!(store.get(&key_a).is_none());
+        assert!(store.get(&key_b).is_none());
+    }
+
+    #[test]
+    fn wrapper_exit_only_clears_its_own_launch() {
+        let store = PendingApprovalStore::new();
+        let consumer = ClaudeApprovalBodyConsumer;
+        let key_other_launch = claude_key("launch-2", "session-2");
+        consumer.ingest(
+            &store,
+            &hook_for_launch_session(
+                "launch-2",
+                "session-2",
+                "PermissionRequest",
+                serde_json::json!({"tool_use_id": "tool-b"}),
+            ),
+        );
+        consumer.ingest(
+            &store,
+            &ClaudeObserverEvent::WrapperExited(ClaudeWrapperExited {
+                launch_id: "launch-1".to_string(),
+                exit_code: 0,
+            }),
+        );
+        assert!(store.get(&key_other_launch).is_some());
+    }
+
+    /// The coordinator's original correlation-key spec (`session_id` /
+    /// `tool_use_id`) was based on an older design document, not the real
+    /// capture. The real `PermissionRequest` body in
+    /// `docs/claude-permission-hook-gate-results.md` §4 has no
+    /// `tool_use_id` at all -- confirmed here by feeding that exact body
+    /// through the consumer and checking it is still stored, keyed by
+    /// `(launch_id, session_id)` alone.
+    #[test]
+    fn permission_request_without_tool_use_id_is_still_stored_and_keyed_by_session() {
+        let store = PendingApprovalStore::new();
+        let consumer = ClaudeApprovalBodyConsumer;
+        let key = claude_key("launch-1", "session-1");
+        consumer.ingest(&store, &hook("PermissionRequest", ko3_hook_body()));
+        let snapshot = store.get(&key).expect("stored despite missing tool_use_id");
+        match snapshot.content {
+            PendingApprovalContent::Body(body) => {
+                assert_eq!(
+                    body.full_command.as_deref(),
+                    Some("New-Item -ItemType Directory ko3-test8")
+                );
+                assert_eq!(body.tool_use_id, None);
+            }
+            PendingApprovalContent::Oversized => panic!("unexpected oversized marker"),
+        }
     }
 }

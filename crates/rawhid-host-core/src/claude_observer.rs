@@ -536,6 +536,68 @@ mod tests {
         });
     }
 
+    /// Exercises the same path `rawhid-host-tauri`'s
+    /// `drain_claude_state_changes` wires up: a `PermissionRequest` hook
+    /// delivered over the real HTTP receiver (not a hand-built event) ends
+    /// up in `PendingApprovalStore` once `ClaudeApprovalBodyConsumer`
+    /// ingests it. Uses the real captured body shape from
+    /// `docs/claude-permission-hook-gate-results.md` §4 -- no
+    /// `tool_use_id` -- to confirm the whole pipeline, not just the
+    /// consumer in isolation, accumulates a body for it.
+    #[test]
+    fn claude_approval_consumer_accumulates_a_body_delivered_through_the_real_receiver() {
+        use crate::{
+            claude_activity::ClaudeApprovalBodyConsumer,
+            pending_approval::{claude_key, PendingApprovalContent, PendingApprovalStore},
+        };
+
+        runtime().block_on(async {
+            let token = "0123456789abcdef0123456789abcdef";
+            let (receiver, mut events) = ClaudeObserverReceiver::bind(
+                ClaudeObserverReceiverOptions::loopback("launch-1", token),
+            )
+            .await
+            .unwrap();
+            let client = reqwest::Client::new();
+            let response = client
+                .post(&receiver.config().endpoint)
+                .bearer_auth(token)
+                .json(&serde_json::json!({
+                    "hook_event_name": "PermissionRequest",
+                    "session_id": "session-1",
+                    "cwd": "C:\\work\\keylink-claude-permission-probe-8",
+                    "tool_name": "PowerShell",
+                    "tool_input": {
+                        "command": "New-Item -ItemType Directory ko3-test8",
+                        "description": "Create ko3-test8 directory"
+                    }
+                }))
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::NO_CONTENT);
+            let event = events.recv().await.unwrap();
+
+            let store = PendingApprovalStore::new();
+            ClaudeApprovalBodyConsumer.ingest(&store, &event);
+
+            let key = claude_key("launch-1", "session-1");
+            let snapshot = store.get(&key).expect("body accumulated in the store");
+            match snapshot.content {
+                PendingApprovalContent::Body(body) => {
+                    assert_eq!(
+                        body.full_command.as_deref(),
+                        Some("New-Item -ItemType Directory ko3-test8")
+                    );
+                    assert_eq!(body.tool_use_id, None);
+                }
+                PendingApprovalContent::Oversized => panic!("unexpected oversized marker"),
+            }
+
+            receiver.shutdown().await.unwrap();
+        });
+    }
+
     #[test]
     fn receiver_rejects_wrong_token_without_queueing() {
         runtime().block_on(async {

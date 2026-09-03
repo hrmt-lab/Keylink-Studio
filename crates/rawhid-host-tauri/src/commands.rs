@@ -16,7 +16,7 @@ use rawhid_host_core::hid::DeviceInfo;
 use rawhid_host_core::{
     active_app::SystemActiveAppProvider,
     ai_usage::{AiUsageRefreshError, AiUsageRuntime, AiUsageShared},
-    claude_activity::{ClaudeSessionSnapshot, ClaudeStateChange},
+    claude_activity::{ClaudeApprovalBodyConsumer, ClaudeSessionSnapshot, ClaudeStateChange},
     claude_hooks::{write_claude_observer_plugin, ClaudePluginOptions},
     claude_observer::{ClaudeObserverReceiver, ClaudeObserverReceiverOptions},
     codex_activity::{
@@ -35,6 +35,7 @@ use rawhid_host_core::{
         EncoderBindingSource, EncoderGetBindings, EncoderGetInfo, UplinkPacket,
         CAPABILITY_AI_CLIENT_DISPLAY_SLOT,
     },
+    pending_approval::PendingApprovalStore,
     runner::{uplink_device_key, RunEvent, Runner},
     stats::{KeyStatsSummary, SharedKeyStatsStore, StatsPeriod},
     studio::{
@@ -4390,6 +4391,7 @@ fn claude_as_ai_snapshot(snapshot: Option<ClaudeSessionSnapshot>) -> AiClientSta
 
 fn drain_claude_state_changes(
     integration: &Arc<Mutex<Option<ClaudeIntegration>>>,
+    pending_approvals: &PendingApprovalStore,
     now: Instant,
 ) -> (
     Vec<ClaudeSessionSnapshot>,
@@ -4401,8 +4403,14 @@ fn drain_claude_state_changes(
         return (Vec::new(), Vec::new(), BTreeMap::new());
     };
     let mut claude_changes: Vec<ClaudeStateChange> = Vec::new();
+    // Wiring only: this reads each event before handing it to the registry
+    // below, exactly like the existing loop already does with counters and
+    // `mark_launch_desynchronized`. It does not alter what the registry
+    // receives or how it reacts.
+    let approval_consumer = ClaudeApprovalBodyConsumer;
     for launch in integration.launches.values_mut() {
         while let Ok(event) = launch.events.try_recv() {
+            approval_consumer.ingest(pending_approvals, &event);
             if let Ok(mut changes) = integration.registry.apply(event, now) {
                 claude_changes.append(&mut changes);
             }
@@ -5143,8 +5151,15 @@ fn run_monitor_loop(
         let now = Instant::now();
         let codex_snapshots = extras.codex_activity.snapshots();
         let codex_changes = drain_codex_state_changes(&extras.codex_activity);
+        // Both clients' pending-approval bodies live in the one store Codex
+        // already owns (`CodexActivityRuntime`), so a future HUD reads a
+        // single source regardless of which AI it is showing.
         let (claude_snapshots, claude_changes, claude_terminal_targets) =
-            drain_claude_state_changes(&extras.claude_integration, now);
+            drain_claude_state_changes(
+                &extras.claude_integration,
+                &extras.codex_activity.pending_approvals(),
+                now,
+            );
         let (ai_snapshot, ai_changes, selected_codex_thread, retired_slots, extra_slots) = {
             let mut selection = extras.ai_display_slots.lock().unwrap();
             let (snapshot, changes) = selected_ai_output_with_targets(

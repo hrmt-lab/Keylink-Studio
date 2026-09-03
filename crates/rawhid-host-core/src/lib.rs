@@ -19,6 +19,7 @@ pub mod codex_broker;
 pub mod config;
 pub mod hid;
 pub mod packet;
+pub mod pending_approval;
 pub mod runner;
 pub mod stats;
 pub mod studio;
@@ -30,8 +31,9 @@ pub use ai_usage::{
 };
 pub use app_match::{LayerAction, RuleMatch};
 pub use claude_activity::{
-    ClaudeAdapterDiagnostic, ClaudeEventAdapter, ClaudeSessionReducer, ClaudeSessionRegistry,
-    ClaudeSessionSnapshot, ClaudeStateChange, ClaudeStateChangeReason, CLAUDE_DETAIL_STALE_TIMEOUT,
+    ClaudeAdapterDiagnostic, ClaudeApprovalBodyConsumer, ClaudeEventAdapter, ClaudeSessionReducer,
+    ClaudeSessionRegistry, ClaudeSessionSnapshot, ClaudeStateChange, ClaudeStateChangeReason,
+    CLAUDE_DETAIL_STALE_TIMEOUT,
 };
 pub use claude_hook_event::{ClaudeHookEvent, ClaudeObserverEvent, ClaudeWrapperExited};
 pub use claude_hook_helper::run_claude_hook_helper;
@@ -50,7 +52,8 @@ pub use codex_activity::{
     CodexStateChange, MAX_CODEX_SESSIONS,
 };
 pub use codex_broker::{
-    BrokerDirection, CodexAppServerRuntime, CodexBrokerConfig, CodexBrokerError, CodexBrokerEvent,
+    extract_command_approval_body, BrokerDirection, CodexAppServerRuntime,
+    CodexApprovalRequestBody, CodexBrokerConfig, CodexBrokerError, CodexBrokerEvent,
     CodexBrokerManager, CodexBrokerPhase, CodexBrokerStatus, CodexClientLaunchInfo, JsonRpcKind,
     JsonRpcMetadata, MAX_CODEX_CLIENTS, SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256,
 };
@@ -74,6 +77,11 @@ pub use packet::{
     CAPABILITY_HOST_ACTION, CAPABILITY_KEY_STATS, CAPABILITY_LAYER_STATE, CAPABILITY_THEME,
     CAPABILITY_TIME_SYNC, COMBO_ITEM_LEN, COMBO_MAX_KEYS, COMBO_MAX_SLOTS, COMBO_NAME_LEN,
     FEATURE_AI_CLIENT, FEATURE_SYSTEM, PACKET_SIZE, REPORT_SIZE,
+};
+pub use pending_approval::{
+    claude_key, codex_key, ApprovalClient, ApprovalKey, ApprovalOwner, PendingApprovalBody,
+    PendingApprovalContent, PendingApprovalSnapshot, PendingApprovalStore, MAX_ENTRIES,
+    MAX_PENDING_APPROVAL_BODY_BYTES,
 };
 pub use runner::{
     uplink_device_key, DeviceBatterySource, DeviceBatteryStatus, DeviceLayerState, RunEvent,

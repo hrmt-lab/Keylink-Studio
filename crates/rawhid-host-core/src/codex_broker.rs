@@ -274,6 +274,18 @@ pub enum CodexBrokerEvent {
         direction: BrokerDirection,
         metadata: Box<JsonRpcMetadata>,
     },
+    /// The full body of one `item/commandExecution/requestApproval`
+    /// request, carried on a path separate from `Message` so that
+    /// `Message`'s metadata-only shape -- and every existing consumer of
+    /// it -- stays untouched. Emitted only for that one method (see
+    /// `extract_command_approval_body`), never for the high-frequency
+    /// frames Codex CLI otherwise emits (KO-2 observed 640k+ frames in one
+    /// run; only requestApproval frames are worth this cost).
+    ApprovalRequestBody {
+        connection_id: String,
+        request_id: Value,
+        body: Box<CodexApprovalRequestBody>,
+    },
     Error {
         component: &'static str,
         detail: String,
@@ -1372,11 +1384,112 @@ fn emit_message_metadata(
         },
         _ => return,
     };
+    // Command approval requests are the one frame whose body a future HUD
+    // needs (see docs/ai-approval-hud-design.md §7.2). This is a second,
+    // independent parse of the same text -- `classify_json_rpc` above is
+    // never touched to make this possible, and every other frame (Codex
+    // CLI emits these at high frequency) skips this branch entirely.
+    if direction == BrokerDirection::AppServerToCli
+        && metadata.kind == JsonRpcKind::Request
+        && metadata.method.as_deref() == Some("item/commandExecution/requestApproval")
+    {
+        if let Message::Text(text) = message {
+            if let Some(body) = extract_command_approval_body(text.as_str()) {
+                let _ = event_tx.send(CodexBrokerEvent::ApprovalRequestBody {
+                    connection_id: connection_id.to_string(),
+                    request_id: metadata.id.clone().unwrap_or(Value::Null),
+                    body: Box::new(body),
+                });
+            }
+        }
+    }
     let _ = event_tx.send(CodexBrokerEvent::Message {
         connection_id: connection_id.to_string(),
         direction,
         metadata: Box::new(metadata),
     });
+}
+
+/// The body of a Codex `item/commandExecution/requestApproval` request,
+/// captured verbatim from the wire (see the real example in
+/// `docs/codex-approval-proxy-gate-results.md` §5). Nothing here is
+/// reconstructed or summarized: `available_decisions` in particular is
+/// kept exactly as received, opaque-element by opaque-element (§5.1 of
+/// that document -- elements mix plain strings and objects, and the set
+/// changes per request).
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CodexApprovalRequestBody {
+    /// `params.commandActions[].command`, in order. This is the primary
+    /// display text -- `params.command` is the full wrapped invocation
+    /// (e.g. a `powershell.exe -Command '...'` shell wrapper) and buries
+    /// the point.
+    pub command_actions: Vec<String>,
+    pub command: Option<String>,
+    pub reason: Option<String>,
+    pub cwd: Option<String>,
+    pub kind: Option<String>,
+    pub available_decisions: Vec<Value>,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+    pub item_id: Option<String>,
+}
+
+/// Extracts the full body of a `item/commandExecution/requestApproval`
+/// request from its raw JSON-RPC text. Returns `None` for anything that is
+/// not a well-formed request of that shape (e.g. missing `params`). Callers
+/// are expected to check the method first (see `emit_message_metadata`);
+/// this function does not check it itself.
+pub fn extract_command_approval_body(text: &str) -> Option<CodexApprovalRequestBody> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let params = value.get("params")?.as_object()?;
+    let command_actions = params
+        .get("commandActions")
+        .and_then(Value::as_array)
+        .map(|actions| {
+            actions
+                .iter()
+                .filter_map(|action| action.get("command").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    let available_decisions = params
+        .get("availableDecisions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    Some(CodexApprovalRequestBody {
+        command_actions,
+        command: params
+            .get("command")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        reason: params
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        cwd: params
+            .get("cwd")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        kind: params
+            .get("kind")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        available_decisions,
+        thread_id: params
+            .get("threadId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        turn_id: params
+            .get("turnId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        item_id: params
+            .get("itemId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
 }
 
 struct UpgradeRequest {
@@ -2066,12 +2179,13 @@ fn complete_reconnect_grace(
 mod tests {
     use super::{
         classify_json_rpc, compatible_codex_versions, compatible_schema_sha256,
-        complete_reconnect_grace, schema_is_compatible, select_codex_executable,
-        try_acquire_client_slot, BrokerRuntimeArgs, CodexBrokerEvent, CodexBrokerPhase,
-        CodexBrokerStatus, JsonRpcKind, MAX_CODEX_CLIENTS, SUPPORTED_CODEX_VERSION,
-        SUPPORTED_SCHEMA_SHA256,
+        complete_reconnect_grace, extract_command_approval_body, schema_is_compatible,
+        select_codex_executable, std_mpsc, try_acquire_client_slot, BrokerDirection,
+        BrokerRuntimeArgs, CodexBrokerEvent, CodexBrokerPhase, CodexBrokerStatus, JsonRpcKind,
+        MAX_CODEX_CLIENTS, SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256,
     };
     use futures_util::{SinkExt, StreamExt};
+    use serde_json::Value;
     use tokio::{net::TcpListener, sync::oneshot, time};
     use tokio_tungstenite::{
         accept_async, connect_async,
@@ -2155,6 +2269,146 @@ mod tests {
 
         assert_eq!(metadata.item_id.as_deref(), Some("item-a"));
         assert_eq!(metadata.item_type.as_deref(), Some("webSearch"));
+    }
+
+    /// The real `item/commandExecution/requestApproval` request captured in
+    /// `docs/codex-approval-proxy-gate-results.md` §5. Also exercises §5.1:
+    /// `availableDecisions` mixes plain strings and an object variant, and
+    /// must round-trip through extraction with values unchanged -- never
+    /// reconstructed.
+    const KO2_REQUEST_APPROVAL_JSON: &str = r#"{
+        "id": 0,
+        "method": "item/commandExecution/requestApproval",
+        "params": {
+            "availableDecisions": [
+                "accept",
+                { "acceptWithExecpolicyAmendment": { "execpolicy_amendment": ["mkdir"] } },
+                "cancel"
+            ],
+            "command": "\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -Command 'mkdir ko2-test'",
+            "commandActions": [ { "command": "mkdir ko2-test", "type": "unknown" } ],
+            "cwd": "C:\\01.keyboards\\OriginalKeyboards\\02.SW\\Keylink-Studio",
+            "environmentId": "local",
+            "itemId": "exec-882ac982-...",
+            "kind": "command",
+            "proposedExecpolicyAmendment": ["mkdir"],
+            "reason": "ワークスペース内に ko2-test ディレクトリを作成してよいですか？",
+            "startedAtMs": 1788429792762,
+            "threadId": "01a066b8-5269-71b2-9c8a-d7e64a8302a1",
+            "turnId": "01a066b8-e33a-7861-8334-256907f36ccc"
+        }
+    }"#;
+
+    #[test]
+    fn extracts_command_approval_body_from_the_real_ko2_request() {
+        let body = extract_command_approval_body(KO2_REQUEST_APPROVAL_JSON)
+            .expect("well-formed requestApproval body");
+
+        assert_eq!(body.command_actions, vec!["mkdir ko2-test".to_string()]);
+        assert_eq!(
+            body.command.as_deref(),
+            Some(
+                "\"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\" -Command 'mkdir ko2-test'"
+            )
+        );
+        assert_eq!(
+            body.reason.as_deref(),
+            Some("ワークスペース内に ko2-test ディレクトリを作成してよいですか？")
+        );
+        assert_eq!(
+            body.cwd.as_deref(),
+            Some("C:\\01.keyboards\\OriginalKeyboards\\02.SW\\Keylink-Studio")
+        );
+        assert_eq!(body.kind.as_deref(), Some("command"));
+        assert_eq!(
+            body.thread_id.as_deref(),
+            Some("01a066b8-5269-71b2-9c8a-d7e64a8302a1")
+        );
+        assert_eq!(
+            body.turn_id.as_deref(),
+            Some("01a066b8-e33a-7861-8334-256907f36ccc")
+        );
+        assert_eq!(body.item_id.as_deref(), Some("exec-882ac982-..."));
+
+        // §5.1: the set is 3 elements, mixing a bare string, an object
+        // variant, and another bare string. Extraction must keep each
+        // element exactly as received.
+        assert_eq!(body.available_decisions.len(), 3);
+        assert_eq!(
+            body.available_decisions[0],
+            Value::String("accept".to_string())
+        );
+        assert_eq!(
+            body.available_decisions[1],
+            serde_json::json!({"acceptWithExecpolicyAmendment": {"execpolicy_amendment": ["mkdir"]}})
+        );
+        assert_eq!(
+            body.available_decisions[2],
+            Value::String("cancel".to_string())
+        );
+    }
+
+    #[test]
+    fn extract_command_approval_body_rejects_non_matching_shapes() {
+        assert!(extract_command_approval_body("not json").is_none());
+        assert!(extract_command_approval_body(r#"{"id":1,"method":"other"}"#).is_none());
+        assert!(extract_command_approval_body(r#"{"jsonrpc":"2.0"}"#).is_none());
+    }
+
+    #[test]
+    fn emit_message_metadata_carries_the_body_only_for_request_approval() {
+        let (tx, rx) = std_mpsc::channel();
+        let approval = Message::Text(KO2_REQUEST_APPROVAL_JSON.into());
+        super::emit_message_metadata(
+            &tx,
+            "connection-1",
+            BrokerDirection::AppServerToCli,
+            &approval,
+        );
+        let first = rx.recv().expect("body event sent first");
+        match first {
+            CodexBrokerEvent::ApprovalRequestBody {
+                connection_id,
+                request_id,
+                body,
+            } => {
+                assert_eq!(connection_id, "connection-1");
+                assert_eq!(request_id, Value::from(0));
+                assert_eq!(body.command_actions, vec!["mkdir ko2-test".to_string()]);
+            }
+            other => panic!("expected ApprovalRequestBody, got {other:?}"),
+        }
+        let second = rx.recv().expect("message event sent second");
+        assert!(matches!(second, CodexBrokerEvent::Message { .. }));
+        assert!(rx.try_recv().is_err());
+
+        // A high-frequency, unrelated frame must not produce a body event.
+        let unrelated = Message::Text(
+            r#"{"jsonrpc":"2.0","method":"item/started","params":{"threadId":"t","turnId":"u","item":{"id":"i","type":"commandExecution"}}}"#
+                .into(),
+        );
+        super::emit_message_metadata(
+            &tx,
+            "connection-1",
+            BrokerDirection::AppServerToCli,
+            &unrelated,
+        );
+        let only = rx.recv().expect("message event sent");
+        assert!(matches!(only, CodexBrokerEvent::Message { .. }));
+        assert!(rx.try_recv().is_err());
+
+        // The same request text arriving in the CLI->AppServer direction
+        // (i.e. not the request itself, but hypothetically mis-routed)
+        // must not be treated as a body-bearing frame either.
+        super::emit_message_metadata(
+            &tx,
+            "connection-1",
+            BrokerDirection::CliToAppServer,
+            &approval,
+        );
+        let cli_direction = rx.recv().expect("message event sent");
+        assert!(matches!(cli_direction, CodexBrokerEvent::Message { .. }));
+        assert!(rx.try_recv().is_err());
     }
 
     #[test]

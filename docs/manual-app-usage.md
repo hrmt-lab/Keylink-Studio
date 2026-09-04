@@ -275,7 +275,7 @@ Keylink StudioはWSL、Codex CLI、Windows Terminalのインストールや`.wsl
 > `Codex CLIバージョンチェック`は既定でOFFです。OFFではCLI versionを制限せず、起動前に生成した
 > App Server schemaが検証済みschemaと一致する場合だけ起動します。ONではversion／schemaの正しい組み合わせも要求します。
 > OFFでもschema確認は省略されず、未知schemaやschema生成失敗では安全のため起動しません。
-> 2026-08-30時点の現行基準は`codex-cli 0.151.0`です。検証済みの`0.150.1`、`0.149.1`、`0.149.0`、`0.147.0`、`0.146.0`も継続対応します。
+> 2026-09-04時点の現行基準は`codex-cli 0.153.2`です。検証済みの`0.151.0`、`0.150.1`、`0.149.1`、`0.149.0`、`0.147.0`、`0.146.0`も継続対応します。
 > 詳細と確認項目は
 > `docs/codex-launcher-wsl-runtime-plan.md`を参照してください。
 

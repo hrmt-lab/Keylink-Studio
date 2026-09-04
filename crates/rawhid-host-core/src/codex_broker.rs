@@ -37,11 +37,15 @@ use tokio_tungstenite::{
     WebSocketStream,
 };
 
-pub const SUPPORTED_CODEX_VERSION: &str = "codex-cli 0.151.0";
+pub const SUPPORTED_CODEX_VERSION: &str = "codex-cli 0.153.2";
 pub const SUPPORTED_SCHEMA_SHA256: &str =
-    "31AE67BEB2C94CC9509F6A71968600062DC8C6D7FE45437ED3A9129838F4D2D9";
+    "B06F77062369D481A59CC70720C12B89CB9DD49C385863923262102D3AD6C978";
 const COMPATIBLE_CODEX_RELEASES: &[(&str, &str)] = &[
     (SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256),
+    (
+        "codex-cli 0.151.0",
+        "31AE67BEB2C94CC9509F6A71968600062DC8C6D7FE45437ED3A9129838F4D2D9",
+    ),
     (
         "codex-cli 0.150.1",
         "E9BAD0A20736E7D3ABA18C0F04BEF59856FB212AE21049FE17D786682203CFAE",
@@ -2199,6 +2203,10 @@ mod tests {
             Some(SUPPORTED_SCHEMA_SHA256)
         );
         assert_eq!(
+            compatible_schema_sha256("codex-cli 0.151.0"),
+            Some("31AE67BEB2C94CC9509F6A71968600062DC8C6D7FE45437ED3A9129838F4D2D9")
+        );
+        assert_eq!(
             compatible_schema_sha256("codex-cli 0.150.1"),
             Some("E9BAD0A20736E7D3ABA18C0F04BEF59856FB212AE21049FE17D786682203CFAE")
         );
@@ -2223,7 +2231,7 @@ mod tests {
         assert_eq!(compatible_schema_sha256("codex-cli 0.145.0"), None);
         assert_eq!(
             compatible_codex_versions(),
-            "codex-cli 0.151.0, codex-cli 0.150.1, codex-cli 0.149.1, codex-cli 0.149.0, codex-cli 0.147.0, codex-cli 0.146.0"
+            "codex-cli 0.153.2, codex-cli 0.151.0, codex-cli 0.150.1, codex-cli 0.149.1, codex-cli 0.149.0, codex-cli 0.147.0, codex-cli 0.146.0"
         );
     }
 

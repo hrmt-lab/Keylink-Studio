@@ -2,7 +2,7 @@
 
 - 記録日: 2026-08-02
 - 対象: Keylink Studioの`Codexを開く`からWSL版Codex CLIを起動する経路
-- 状態: runtime選択・WSL App Server起動・WSL preflightを実装。実機E2EはCodex CLI互換性ゲートで保留。
+- 状態: runtime選択・WSL App Server起動・WSL preflightを実装。Windows側Codex CLI 0.153.2の実Broker E2Eは合格。WSL側0.153.2と実ScreenKeyは未検証。
 
 ## 2026-08-02の実装・確認結果
 
@@ -22,6 +22,22 @@ Keylink Studioが使用するThread／Turn／item、approval、input、`serverRe
 
 互換性ゲートはWindows側0.147.0を現行基準とし、検証済みのWSL側0.146.0もversionとschema hashの正しい組み合わせに限り受理する。
 versionだけ、または別versionのschema hashだけが一致する組み合わせは引き続き拒否する。
+
+## 2026-09-04: Codex CLI 0.153.2対応
+
+Codex CLI `0.153.2`からexperimental App Server schemaを再生成した。SHA-256は
+`B06F77062369D481A59CC70720C12B89CB9DD49C385863923262102D3AD6C978`である。
+0.151.0との差分は新規API／variant／任意fieldの追加で、Keylink Studioが使用する
+初期化、Thread／Turn、item、approval／input、`serverRequest/resolved`の既存method／必須fieldに
+破壊的変更はない。Broker／Adapterの処理変更は不要と判断した。
+
+互換性ゲートは0.153.2を現行基準とし、検証済み旧版の0.151.0、0.150.1、0.149.1、0.149.0、
+0.147.0、WSL側0.146.0も正しいversion／schema hashペアに限り受理する。未知schemaは引き続き拒否する。
+
+Windows側の実Brokerと0.153.2 App Serverを使い、version／schema preflight、capability-token認証、
+`initialize`／`initialized`、`thread/start`、Plan Turnの`item/tool/requestUserInput`と応答、Default Turnの
+`item/commandExecution/requestApproval`と応答、`turn/completed(completed)`を確認した。停止後は検証用listener
+`4560`／`4561`と一時token directoryが解放された。WSL側0.153.2および実ScreenKeyは未検証である。
 
 ## 2026-08-30: Codex CLI 0.151.0対応
 

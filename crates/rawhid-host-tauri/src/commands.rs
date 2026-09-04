@@ -4512,7 +4512,26 @@ fn selected_ai_output_with_targets(
     let changes = match selected_target {
         Some(AiDisplayTarget::Codex { terminal_target_id }) => codex_changes
             .into_iter()
-            .filter(|change| change.terminal_target_id == terminal_target_id)
+            .filter(|change| {
+                // `terminal_target_id` is per-CLI, not per-thread: Codex CLI
+                // spawns a second, throwaway thread right after the first
+                // user message (to generate the conversation title) that
+                // shares the same terminal. Without also checking that the
+                // change's thread is still the connection's display target,
+                // that throwaway thread's transitions (e.g. its own
+                // `TurnCompleted`) would flash onto the slot showing a
+                // different, still-active thread. Mirrors the candidate
+                // filter above so a non-display thread's changes are simply
+                // dropped -- if the display thread itself ends, the
+                // candidate set changes, the selection epoch advances, and
+                // the branch above resends a full snapshot.
+                change.terminal_target_id == terminal_target_id
+                    && codex_snapshots.iter().any(|snapshot| {
+                        snapshot.state.session_active
+                            && snapshot.is_display_target
+                            && snapshot.thread_id == change.thread_id
+                    })
+            })
             .map(|change| AiClientStateChange {
                 state: change.state,
                 reason: change.reason,
@@ -5226,7 +5245,21 @@ fn run_monitor_loop(
                         let changes = match entry.assigned.as_ref() {
                             Some(AiDisplayTarget::Codex { terminal_target_id }) => codex_changes
                                 .iter()
-                                .filter(|change| change.terminal_target_id == *terminal_target_id)
+                                .filter(|change| {
+                                    // Same fix as `selected_ai_output_with_targets`:
+                                    // a `terminal_target_id` match alone also
+                                    // admits the throwaway title-generation
+                                    // thread Codex CLI spawns after the first
+                                    // user message, so also require the change's
+                                    // thread to still be this connection's
+                                    // display target.
+                                    change.terminal_target_id == *terminal_target_id
+                                        && codex_snapshots.iter().any(|snapshot| {
+                                            snapshot.state.session_active
+                                                && snapshot.is_display_target
+                                                && snapshot.thread_id == change.thread_id
+                                        })
+                                })
                                 .map(|change| AiClientStateChange {
                                     state: change.state,
                                     reason: change.reason,
@@ -5781,6 +5814,87 @@ mod tests {
             &mut epoch,
         );
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn codex_changes_from_a_non_display_thread_never_reach_the_slot() {
+        // Regression test: Codex CLI spawns a second, throwaway thread right
+        // after the first user message (to auto-generate the conversation
+        // title). That thread shares the same `terminal_target_id` (same
+        // CLI/terminal) as the real session but is never the display
+        // target. Before this fix, filtering changes by
+        // `terminal_target_id` alone let that throwaway thread's
+        // transitions (e.g. its own `TurnCompleted`) flash onto the slot
+        // that should keep showing the real, still-active session.
+        let display = codex_session("thread-1", AiActivityState::Working, 1);
+        let mut hidden = codex_session("thread-2", AiActivityState::Working, 2);
+        hidden.terminal_target_id = display.terminal_target_id.clone();
+        hidden.is_display_target = false;
+
+        let mut selection = AiDisplaySelection::default();
+        let mut epoch = 0;
+        selected_ai_output(
+            vec![display.clone(), hidden.clone()],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            &mut selection,
+            &mut epoch,
+        );
+
+        let (_, changes) = selected_ai_output(
+            vec![display, hidden.clone()],
+            vec![CodexStateChange {
+                thread_id: hidden.thread_id,
+                terminal_target_id: hidden.terminal_target_id,
+                state: ai_state(AiActivityState::Completed, 3),
+                reason: rawhid_host_core::AiClientStateChangeReason::TurnCompleted,
+            }],
+            Vec::new(),
+            Vec::new(),
+            &mut selection,
+            &mut epoch,
+        );
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn codex_changes_from_the_display_thread_still_reach_the_slot() {
+        // Companion to the regression test above: make sure the fix doesn't
+        // over-filter -- changes from the thread actually being displayed
+        // must still come through even while a hidden, same-terminal thread
+        // exists alongside it.
+        let display = codex_session("thread-1", AiActivityState::Working, 1);
+        let mut hidden = codex_session("thread-2", AiActivityState::Working, 2);
+        hidden.terminal_target_id = display.terminal_target_id.clone();
+        hidden.is_display_target = false;
+
+        let mut selection = AiDisplaySelection::default();
+        let mut epoch = 0;
+        selected_ai_output(
+            vec![display.clone(), hidden.clone()],
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            &mut selection,
+            &mut epoch,
+        );
+
+        let (_, changes) = selected_ai_output(
+            vec![display.clone(), hidden],
+            vec![CodexStateChange {
+                thread_id: display.thread_id,
+                terminal_target_id: display.terminal_target_id,
+                state: ai_state(AiActivityState::Completed, 3),
+                reason: rawhid_host_core::AiClientStateChangeReason::TurnCompleted,
+            }],
+            Vec::new(),
+            Vec::new(),
+            &mut selection,
+            &mut epoch,
+        );
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].state.activity_state, AiActivityState::Completed);
     }
 
     fn ai_change(state: AiClientStateSnapshot) -> AiClientStateChange {

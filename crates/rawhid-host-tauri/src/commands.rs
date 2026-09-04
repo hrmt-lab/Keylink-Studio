@@ -83,6 +83,46 @@ struct AiClientStateSendTracker {
     last_device_generation: Option<u64>,
     last_sent_at: Option<Instant>,
     last_slot_epoch: Option<u64>,
+    /// De-dup key for the last wire-send diagnostic actually recorded for
+    /// this slot (see `AiWireSend`), so a heartbeat resend that repeats the
+    /// exact same content is not logged again. A change-caused send, and any
+    /// `DeviceGeneration`-caused send, is always recorded regardless of
+    /// this -- a device-generation bump means a device was lost/regained
+    /// (`hid.rs`'s `forget_device` increments it on a failed write), which is
+    /// exactly the kind of transition this diagnostic exists to catch, even
+    /// when the state/phase/revision otherwise look unchanged. `devices` is
+    /// part of the key so a send that reaches a different number of devices
+    /// is never treated as a repeat. See `push_wire_send`.
+    last_logged_send: Option<(AiClientType, AiActivityState, AiWorkPhase, u16, bool, usize)>,
+}
+
+impl AiClientStateSendTracker {
+    /// Appends `send` to `sends` unless it repeats -- same client type,
+    /// activity state, work phase, revision, partial-send flag, and device
+    /// count -- the last diagnostic entry recorded for this slot AND its
+    /// cause is `Heartbeat`. Change-caused and `DeviceGeneration`-caused
+    /// sends are always appended: a device-generation bump signals a device
+    /// was lost or regained, which must never be swallowed by de-dup. This
+    /// only gates the diagnostic record: the wire send itself already
+    /// happened before this is called. Keeps the shared, unexported,
+    /// 200-entry app log (`MAX_LOG_ENTRIES`) usable across a session even
+    /// though heartbeats fire on every slot every 5s.
+    fn push_wire_send(&mut self, sends: &mut Vec<AiWireSend>, send: AiWireSend) {
+        let key = (
+            send.client_type,
+            send.activity_state,
+            send.work_phase,
+            send.revision,
+            send.work_phase_only,
+            send.devices,
+        );
+        let is_periodic = matches!(send.cause, AiWireSendCause::Heartbeat);
+        if is_periodic && self.last_logged_send == Some(key) {
+            return;
+        }
+        self.last_logged_send = Some(key);
+        sends.push(send);
+    }
 }
 
 const AI_CLIENT_STATE_RESEND_INTERVAL: Duration = Duration::from_secs(5);
@@ -4617,11 +4657,64 @@ fn sync_ai_client_state<T>(
     changes: impl IntoIterator<Item = AiClientStateChange>,
     tracker: &mut AiClientStateSendTracker,
     now: Instant,
-) -> Result<(), String>
+) -> Result<Vec<AiWireSend>, String>
 where
     T: AiClientStateTransport,
 {
     sync_ai_client_state_slot(transport, 0, snapshot, changes, tracker, now)
+}
+
+/// Why a wire send happened. Diagnostic-only, kept to enum names and
+/// numbers -- never AI-generated content (docs/spec.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AiWireSendCause {
+    Change(rawhid_host_core::AiClientStateChangeReason),
+    Heartbeat,
+    DeviceGeneration,
+}
+
+impl AiWireSendCause {
+    fn log_label(self) -> String {
+        match self {
+            Self::Change(reason) => format!("change/{reason:?}"),
+            Self::Heartbeat => "heartbeat".to_string(),
+            Self::DeviceGeneration => "device-generation".to_string(),
+        }
+    }
+}
+
+/// One `transport.send_ai_client_state` call, recorded so the monitor loop
+/// can log it. Diagnostic for the reported "waiting-approval flashes green
+/// first" / "yellow blink stalls then resumes" bugs: enum names, numbers,
+/// and the slot only -- never request bodies (docs/spec.md).
+#[derive(Debug, Clone)]
+struct AiWireSend {
+    slot: u8,
+    client_type: AiClientType,
+    activity_state: AiActivityState,
+    work_phase: AiWorkPhase,
+    revision: u16,
+    cause: AiWireSendCause,
+    work_phase_only: bool,
+    /// `transport.send_ai_client_state`'s return value: how many devices the
+    /// packet actually reached. This was previously discarded; zero here
+    /// while the caller believed a device was capable is one of the things
+    /// this diagnostic exists to surface.
+    devices: usize,
+}
+
+fn format_ai_wire_send(send: &AiWireSend) -> String {
+    format!(
+        "ai wire slot={} client={:?} state={:?} phase={:?} rev={} cause={} partial={} devices={}",
+        send.slot,
+        send.client_type,
+        send.activity_state,
+        send.work_phase,
+        send.revision,
+        send.cause.log_label(),
+        send.work_phase_only,
+        send.devices
+    )
 }
 
 fn sync_ai_client_state_slot<T>(
@@ -4631,12 +4724,13 @@ fn sync_ai_client_state_slot<T>(
     changes: impl IntoIterator<Item = AiClientStateChange>,
     tracker: &mut AiClientStateSendTracker,
     now: Instant,
-) -> Result<(), String>
+) -> Result<Vec<AiWireSend>, String>
 where
     T: AiClientStateTransport,
 {
     let device_generation = transport.device_generation();
     let mut sent_change = false;
+    let mut sends = Vec::new();
 
     for change in changes {
         let packet = ai_client_state_packet_for_slot(change.state, display_slot)?;
@@ -4645,24 +4739,53 @@ where
             tracker.last_sent_at = None;
             continue;
         }
-        transport.send_ai_client_state(
-            packet,
-            change.reason == rawhid_host_core::AiClientStateChangeReason::WorkPhaseChanged,
-        )?;
+        let work_phase_only =
+            change.reason == rawhid_host_core::AiClientStateChangeReason::WorkPhaseChanged;
+        let devices = transport.send_ai_client_state(packet, work_phase_only)?;
+        tracker.push_wire_send(
+            &mut sends,
+            AiWireSend {
+                slot: display_slot,
+                client_type: packet.client_type,
+                activity_state: packet.activity_state,
+                work_phase: packet.work_phase,
+                revision: packet.revision,
+                cause: AiWireSendCause::Change(change.reason),
+                work_phase_only,
+                devices,
+            },
+        );
         sent_change = true;
     }
 
     let periodic_due = tracker.last_sent_at.is_none_or(|last_sent| {
         now.saturating_duration_since(last_sent) >= AI_CLIENT_STATE_RESEND_INTERVAL
     });
+    let device_generation_changed = tracker.last_device_generation != Some(device_generation);
     if !sent_change
-        && (tracker.last_device_generation != Some(device_generation) || periodic_due)
+        && (device_generation_changed || periodic_due)
         && transport.has_ai_client_state_device(snapshot.client_type)
     {
-        transport.send_ai_client_state(
-            ai_client_state_packet_for_slot(snapshot, display_slot)?,
-            false,
-        )?;
+        let packet = ai_client_state_packet_for_slot(snapshot, display_slot)?;
+        let devices = transport.send_ai_client_state(packet, false)?;
+        let cause = if device_generation_changed {
+            AiWireSendCause::DeviceGeneration
+        } else {
+            AiWireSendCause::Heartbeat
+        };
+        tracker.push_wire_send(
+            &mut sends,
+            AiWireSend {
+                slot: display_slot,
+                client_type: packet.client_type,
+                activity_state: packet.activity_state,
+                work_phase: packet.work_phase,
+                revision: packet.revision,
+                cause,
+                work_phase_only: false,
+                devices,
+            },
+        );
         sent_change = true;
     }
 
@@ -4675,7 +4798,7 @@ where
         tracker.last_device_generation = None;
         tracker.last_sent_at = None;
     }
-    Ok(())
+    Ok(sends)
 }
 
 fn ai_client_state_packet_for_slot(
@@ -5078,6 +5201,12 @@ fn run_monitor_loop(
     let mut uplink_interval = Duration::from_millis(config.polling.uplink_interval_ms.max(5));
     let mut ai_client_state_send = BTreeMap::<u8, AiClientStateSendTracker>::new();
     let mut last_ai_selection_epoch = 0;
+    // Diagnostic for the reported ScreenKey display glitches: records the
+    // label/epoch this loop last saw for each slot (slot 0 included) so a
+    // reassignment can be logged once instead of every tick. IDs come from
+    // `AiDisplayTarget::label`, which already truncates to a masked
+    // fragment (docs/spec.md: no raw identifiers).
+    let mut last_ai_slot_assignment: BTreeMap<u8, (Option<String>, u64)> = BTreeMap::new();
 
     loop {
         let mut should_stop = false;
@@ -5234,7 +5363,14 @@ fn run_monitor_loop(
                 &extras.codex_activity.pending_approvals(),
                 now,
             );
-        let (ai_snapshot, ai_changes, selected_codex_thread, retired_slots, extra_slots) = {
+        let (
+            ai_snapshot,
+            ai_changes,
+            selected_codex_thread,
+            retired_slots,
+            extra_slots,
+            slot_assignment_logs,
+        ) = {
             let mut selection = extras.ai_display_slots.lock().unwrap();
             let (snapshot, changes) = selected_ai_output_with_targets(
                 codex_snapshots.clone(),
@@ -5305,14 +5441,49 @@ fn run_monitor_loop(
                         (entry.slot, snapshot, changes, entry.epoch)
                     })
                     .collect();
+            // Diagnostic for the reported ScreenKey display glitches: log a
+            // slot's assignment only when its target or epoch actually
+            // changed since the loop last saw it, covering slot 0 too
+            // (`extra_slots` above only tracks slot != 0). Built while the
+            // lock is held, logged after it is released below.
+            let slot_assignment_logs: Vec<String> = selection
+                .slots()
+                .iter()
+                .filter_map(|entry| {
+                    let label = entry.assigned.as_ref().map(AiDisplayTarget::label);
+                    let key = (label.clone(), entry.epoch);
+                    let unchanged = last_ai_slot_assignment.get(&entry.slot) == Some(&key);
+                    last_ai_slot_assignment.insert(entry.slot, key);
+                    if unchanged {
+                        None
+                    } else {
+                        // `label()` returns a display string with a space
+                        // (e.g. "Codex 1A2B"), so quote it -- otherwise the
+                        // key=value shape of the line breaks when read next
+                        // to `format_ai_wire_send`'s output.
+                        let assign = match &label {
+                            Some(label) => format!("\"{label}\""),
+                            None => "none".to_string(),
+                        };
+                        Some(format!(
+                            "ai slot={} assign={} epoch={}",
+                            entry.slot, assign, entry.epoch
+                        ))
+                    }
+                })
+                .collect();
             (
                 snapshot,
                 changes,
                 selected_codex_thread,
                 retired_slots,
                 extra_slots,
+                slot_assignment_logs,
             )
         };
+        for message in slot_assignment_logs {
+            tracing::debug!(target: AI_DISPLAY_LOG_TARGET, "{message}");
+        }
         extras
             .codex_activity
             .set_selected_thread(selected_codex_thread);
@@ -5323,20 +5494,27 @@ fn run_monitor_loop(
         if let Some(hud) = extras.hud.lock().unwrap().as_ref() {
             hud.update(&app, &extras.codex_activity.pending_approvals());
         }
-        if let Err(error) = sync_ai_client_state(
+        match sync_ai_client_state(
             &mut runner,
             ai_snapshot,
             ai_changes,
             ai_client_state_send.entry(0).or_default(),
             now,
         ) {
-            let msg = format!("AI client state send error: {error}");
-            let entry = add_log(&log_entries, &log_counter, "error", &msg);
-            update_status(&app, &status, |s| s.last_error = Some(msg));
-            let _ = app.emit("log-added", entry);
+            Ok(sends) => {
+                for send in sends {
+                    tracing::debug!(target: AI_DISPLAY_LOG_TARGET, "{}", format_ai_wire_send(&send));
+                }
+            }
+            Err(error) => {
+                let msg = format!("AI client state send error: {error}");
+                let entry = add_log(&log_entries, &log_counter, "error", &msg);
+                update_status(&app, &status, |s| s.last_error = Some(msg));
+                let _ = app.emit("log-added", entry);
+            }
         }
         for slot in retired_slots {
-            if let Err(error) = sync_ai_client_state_slot(
+            match sync_ai_client_state_slot(
                 &mut runner,
                 slot,
                 inactive_ai_snapshot(),
@@ -5347,17 +5525,24 @@ fn run_monitor_loop(
                 ai_client_state_send.entry(slot).or_default(),
                 now,
             ) {
-                tracing::warn!(slot, "AI display slot clear error: {error}");
+                Ok(sends) => {
+                    for send in sends {
+                        tracing::debug!(target: AI_DISPLAY_LOG_TARGET, "{}", format_ai_wire_send(&send));
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(slot, "AI display slot clear error: {error}");
+                }
             }
             ai_client_state_send.remove(&slot);
         }
         for (slot, snapshot, changes, epoch) in extra_slots {
             let tracker = ai_client_state_send.entry(slot).or_default();
             let assignment_changed = tracker.last_slot_epoch != Some(epoch);
-            if assignment_changed && changes.is_empty() {
+            let result = if assignment_changed && changes.is_empty() {
                 // A slot assignment may have happened without a state transition.
                 // Sending its full snapshot immediately avoids waiting for heartbeat.
-                if let Err(error) = sync_ai_client_state_slot(
+                sync_ai_client_state_slot(
                     &mut runner,
                     slot,
                     snapshot,
@@ -5367,17 +5552,20 @@ fn run_monitor_loop(
                     }],
                     tracker,
                     now,
-                ) {
-                    tracing::warn!(slot, "AI display slot send error: {error}");
-                } else {
+                )
+            } else {
+                sync_ai_client_state_slot(&mut runner, slot, snapshot, changes, tracker, now)
+            };
+            match result {
+                Ok(sends) => {
+                    for send in sends {
+                        tracing::debug!(target: AI_DISPLAY_LOG_TARGET, "{}", format_ai_wire_send(&send));
+                    }
                     tracker.last_slot_epoch = Some(epoch);
                 }
-            } else if let Err(error) =
-                sync_ai_client_state_slot(&mut runner, slot, snapshot, changes, tracker, now)
-            {
-                tracing::warn!(slot, "AI display slot send error: {error}");
-            } else {
-                tracker.last_slot_epoch = Some(epoch);
+                Err(error) => {
+                    tracing::warn!(slot, "AI display slot send error: {error}");
+                }
             }
         }
 

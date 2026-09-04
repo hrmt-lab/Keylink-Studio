@@ -1,10 +1,10 @@
 # ScreenKey と HUD による AI 承認・回答 設計
 
-- 状態: 設計確定（実装未着手）。3つのノックアウト要因はすべて実機検証済み
+- 状態: 段階1は実装・実機確認済み。段階2は`race`実機検証を反映して設計確定、実装未着手
 - 作成日: 2026-09-03
 - 対象: Keylink Studio Host、Codex Broker、Claude Code Observer、Tauri UI、Firmware 描画
 - 対象ハードウェア: ScreenKey 4個（0.85インチ / 128×128 / ST7735）、通常キー 7個、エンコーダ 1個
-- 基準環境: `codex-cli 0.151.0`、Claude Code `2.1.259`、Windows 11 Pro `10.0.26200.9278`
+- 基準環境: `codex-cli 0.153.2`、Claude Code `2.1.259`、Windows 11 Pro `10.0.26200.9278`
 
 ## 本書が置き換える文書
 
@@ -108,13 +108,14 @@ HUD が出ているならマウスでクリックすればよい、とはなら�
 |---|---|---|
 | KO-1 | HUD は表示・反復・更新でフォーカスを奪わないか | ✅ 2つの独立した計測器でイベント0件。最大化ウィンドウより前面、Alt+Tab・タスクバーに出ない、DPI 150%/200%、マルチモニタで確認 |
 | KO-3 | Claude Code へ回答を注入できるか | ✅ `PermissionRequest` hook の decision で承認・拒否が通る。拒否理由がモデルに届く |
-| KO-2 | Codex へ代理応答できるか | ✅ **保持方式**。CLI へ転送せず Broker が応答すると、TUI にプロンプトが出ず turn が正常完了する |
+| KO-2 | Codex へ代理応答できるか | ✅ **保持・同時転送（`race`）とも成立**。`race`ではHUD/CLIの先着回答だけで要求が解決し、遅着回答で再実行もJSON-RPCエラーも起きない |
 
 ### 4.1 どちらのクライアントもフォールバックが自動的に存在する
 
 - **Claude Code**: hook の応答を待たずに約3秒でターミナルにもプロンプトが出る。
   Studio が落ちていれば、いつもどおりターミナルで答えられる。固まらない
-- **Codex**: 保持した要求を一定時間後に CLI へ転送すれば、通常どおり TUI が訊く
+- **Codex**: 要求を最初から CLI へ転送する。HUDとTUIのどちらでも直ちに回答でき、片方が
+  使えなくてももう片方を待つ必要がない
 
 **HUD は「あれば速い」便利層であり、無くても何も壊れない。** 当初の懸念（Studio 停止時に
 AI クライアントが固まる）は実測で否定された。
@@ -288,21 +289,31 @@ HUD にフォーカスを渡す理由が構造的に存在しない。
 
 ## 9. 回答経路
 
-### 9.1 Codex（保持方式）
+### 9.1 Codex（同時転送＋first-wins方式）
 
-**Broker が `item/commandExecution/requestApproval` を CLI へ転送せず保持する。**
+**Broker は `item/commandExecution/requestApproval` を記録しつつCLIへ転送する。HUDとTUIを
+同時に生かし、先に確定した回答だけをApp Serverへ送る。**
 
 ```text
-App Server ──requestApproval──> [Broker: 保持] ──✗──> CLI
-                                     │
-                                     │ HUD で回答
-                                     ▼
-App Server <──response(decision)── [Broker]
+App Server ──requestApproval──> [Broker: Pending] ──requestApproval──> CLI/TUI
+                                     │                         │
+                                     └──────> HUD               │
+                                               │                │
+                               先に回答した側 ─┴────────────────┘
+                                               │
+App Server <────────────response(decision)─────┘
 ```
 
-KO-2 で実測したとおり、App Server は代理応答を受理し、`serverRequest/resolved` を発行し、
-turn は `status = completed` で正常終了する。**CLI は要求を一度も見ないため TUI にプロンプトが
-出ず、二重配送も起こらない。**
+2026-09-05のKO-2追加検証では、`race`モードでHUD相当の回答が先着するとTUIの承認画面が
+自動的に閉じ、コマンド結果は1回だけ表示された。CLIの`accept`が先着したランでは、要求から
+約1.94秒後にCLIが応答し、1ms後に`serverRequest/resolved`、約3.28秒後に
+`turn/completed(status=completed)`を観測した。さらに約8秒後、検証用プローブが意図的に
+重複`accept`を送ってもJSON-RPCエラーと再実行は起きなかった。CLI先行`cancel`でも、遅着した
+プローブの`accept`で実行へ反転せず、turnは`interrupted`のままだった。
+
+プローブは重複耐性を測るため遅着responseも意図的に送ったが、**製品実装はその耐性へ依存しない。**
+要求ごとにfirst-winsの排他制御を置き、先着回答を転送した後のHUD操作／CLI responseは破棄する。
+App Serverの`serverRequest/resolved`を観測した時点でもHUDを閉じ、要求を`Resolved`へ進める。
 
 - `decision` は `availableDecisions` の要素を**そのまま不透明値として**返す。
   文字列とオブジェクトが混在するため、再構築してはならない
@@ -311,7 +322,8 @@ turn は `status = completed` で正常終了する。**CLI は要求を一度�
   含まれていなかった。Host が固定の選択肢集合を持ってはならない
 - `availableDecisions` が無い／空なら HUD からの回答を有効にせず、そのまま CLI へ転送する
 
-**代理応答方式（要求を転送したうえで Broker も応答する）は実装しない。**
+保持方式は技術的な縮退候補として残すが、通常経路には採用しない。要求をCLIへ見せないため、
+HUDが使えない場合に遅延転送タイマーが必要となり、ユーザーが回答できるまで不要に待たされるためである。
 
 ### 9.2 Claude Code（hook decision）
 
@@ -348,10 +360,11 @@ Codex で提供する場合も **`Fn` 併用必須**とし、単押しでは出�
 **ターミナルと HUD の両方が生きているため、先に確定したほう1件だけを採用する排他制御が要る。**
 
 - 要求ごとに状態を持ち、`Pending → Resolving → Resolved` を1回だけ通す
-- Codex: 保持中の要求に対して HUD から回答が来たら、`Resolving` を確保してから応答を送る
+- Codex: HUD/CLIのどちらから回答が来ても、`Pending`を先に`Resolving`へ変えた側だけをApp Serverへ
+  転送する。遅着responseは記録したうえで破棄する
+- Codex: `serverRequest/resolved`を受信したら、未処理のHUD操作を無効化してHUDを閉じる
 - Claude Code: hook の応答を返す直前に、ターミナル側で既に解決していないかを確認する
-- Codex の未回答フォールバックとして、**一定時間（既定30秒）内に回答されなければ
-  保持していた要求を CLI へ転送する**。転送後の要求へは HUD から回答しない
+- Codexは最初からCLIへ転送するため、**30秒後の遅延転送は設けない**
 
 ---
 
@@ -417,10 +430,10 @@ Codex で提供する場合も **`Fn` 併用必須**とし、単押しでは出�
 | 段階 | 内容 | 得られる体験 |
 |---|---|---|
 | **1** | HUD ウィンドウ（表示のみ・回答なし）。Codex / Claude Code の要求内容を表示 | **これだけで価値がある。** 画面を切り替えずに「何を聞かれているか」が分かる |
-| **2** | Codex の保持＋代理応答。✅ / ❌ とエンコーダ選択 | Codex が手元で完結する |
-| **3** | Claude Code の decision 経路。二重回答の調停 | 両クライアントが揃う |
+| **2** | Codex の同時転送＋first-wins代理応答。✅ / ❌ とエンコーダ選択 | HUDとターミナルのどちらからでも直ちに回答できる |
+| **3** | Claude Code の decision 経路とfirst-wins調停 | 両クライアントが揃う |
 | **4** | ScreenKey の 9バイト拡張と種別アイコン、`APP_LAYER` 切替 | 気づきやすさと誤爆防止 |
-| **5** | 未回答フォールバック（Codex の遅延転送）、監査ログ、Settings | 実運用に耐える |
+| **5** | 異常時のターミナル縮退、監査ログ、Settings | 実運用に耐える |
 
 **段階1が単独で意味を持つ**のが良いところで、回答機能の是非を決める前に価値を確認できる。
 
@@ -431,12 +444,11 @@ Codex で提供する場合も **`Fn` 併用必須**とし、単押しでは出�
 1. **本番フル構成での HUD 再測定。** KO-1 のプローブは最小の `tauri::Builder` であり、
    トレイ・多数のコマンド・監視スレッドを持つ本番構成ではない
 2. **HUD のモニタ選択。** 現在の実装はプライマリモニタ右下固定
-3. Codex の未回答フォールバック（保持した要求の遅延転送）の実機検証
-4. Claude Code の hook `timeout` の上限値
-5. `item/fileChange/requestApproval` / `item/permissions/requestApproval` /
+3. Claude Code の hook `timeout` の上限値
+4. `item/fileChange/requestApproval` / `item/permissions/requestApproval` /
    `item/tool/requestUserInput` の各要求の扱い（本書は command approval を初期対象とする）
-6. Codex の `proposedExecpolicyAmendment` を適用したときの永続範囲
-7. 複数 thread / 複数 connection が同時に承認待ちになる場合
+5. Codex の `proposedExecpolicyAmendment` を適用したときの永続範囲
+6. 複数 thread / 複数 connection が同時に承認待ちになる場合
 
 ---
 
@@ -447,7 +459,6 @@ Codex で提供する場合も **`Fn` 併用必須**とし、単押しでは出�
 - テキスト入力を伴う回答（Codex の「拒否して指示を伝える」、`isOther` の自由記述）
 - MCP elicitation
 - Keylink Studio 外から起動されたセッションへの回答
-- Codex の代理応答方式（`race`）の実装
 - 転送プレビューウィンドウの仕様（`ai-response-transfer-design.md` が正本。
   ただしウィンドウ層は §7.1 を共有する）
 

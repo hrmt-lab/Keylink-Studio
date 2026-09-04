@@ -1,14 +1,14 @@
 # Codex 代理承認 Gate (KO-2) 結果
 
 - 状態: 完了
-- 実施日: 2026-09-03
-- 最終判定: **KO-2 成立**（保持方式。CLIへ転送せずBrokerが代理応答できる）
-- 対象 Codex CLI: `codex-cli 0.151.0`
-- App Server schema SHA-256: `31AE67BEB2C94CC9509F6A71968600062DC8C6D7FE45437ED3A9129838F4D2D9`
-  （`codex_broker.rs` の `SUPPORTED_SCHEMA_SHA256` と**一致**）
+- 実施日: 2026-09-03（保持）、2026-09-05（`race`追加検証）
+- 最終判定: **KO-2 成立**（保持・`race`とも成立。製品方針は同時転送＋first-wins）
+- 対象 Codex CLI: `codex-cli 0.151.0`（保持）、`codex-cli 0.153.2`（`race`）
+- 現行 App Server schema SHA-256: `B06F77062369D481A59CC70720C12B89CB9DD49C385863923262102D3AD6C978`
+  （`codex_broker.rs` の現行`SUPPORTED_SCHEMA_SHA256`と一致）
 - 実行環境: Windows 11 Pro `10.0.26200.9278`
 - 検証コード: `crates/rawhid-host-core/examples/codex_approval_probe.rs`
-- 実行: `cargo run --example codex_approval_probe -p rawhid-host-core -- --mode hold --delay-seconds 10`
+- 実行: `hold`と`race`の各モード（`race`確定ランは`--delay-seconds 10`）
 
 ---
 
@@ -42,7 +42,7 @@ Studio 本体には一切手を入れていない。KO-3 と同じく、
 
 ## 2. 判定
 
-**保持方式（`hold`）が完全に成立した。**
+**保持方式（`hold`）と代理応答方式（`race`）がともに成立した。**
 
 | 確認点 | 結果 |
 |---|---|
@@ -52,7 +52,9 @@ Studio 本体には一切手を入れていない。KO-3 と同じく、
 | turn が正しく完了するか | ✅ **`turn/completed` / `turn.status = completed`** |
 | CLI からの遅延・重複 response | ✅ **無し**（CLI は要求を一度も見ていない） |
 
-**代理応答方式（`race`）は実施していない。** 理由は §6。
+2026-09-05に`race`を追加検証した。HUD相当回答が先着する経路、CLIの`cancel`が先着する経路、
+CLIの`accept`が先着する経路で、先着回答が要求を解決し、遅着responseによる再実行や
+JSON-RPCエラーが起きないことを確認した。詳細は§4.1、採用判断は§6。
 
 ---
 
@@ -117,6 +119,36 @@ shutdown reason: settled (response observed at +90749ms,
 要求受信から10秒後（`--delay-seconds 10`）にプローブが `accept` を送信し、
 2ms後に `serverRequest/resolved`、約2.8秒後に `turn/completed` が流れた。
 その間、**Codex CLI の TUI には承認プロンプトが一切表示されなかった**（実機目視）。
+
+### 4.1 `race`追加検証（2026-09-05）
+
+`codex-cli 0.153.2`と現行schemaを使い、requestApprovalをCLIへ転送したまま、プローブからも
+遅延responseを送った。
+
+| 先着回答 | 結果 |
+|---|---|
+| HUD相当の`accept` | TUIに承認画面が表示された後、プローブ回答で自動的に閉じた。コマンド結果は実機目視で1回だけ表示 |
+| CLIの`cancel` | `serverRequest/resolved`後にturnは`interrupted`。遅着したプローブの`accept`で実行へ反転せず、JSON-RPCエラーなし |
+| CLIの`accept` | 1ms後に`serverRequest/resolved`、約3.28秒後にturnは`completed`。約8秒後の重複`accept`でもJSON-RPCエラーなし |
+
+CLI先行`accept`の確定ランは次のとおり。
+
+```text
+=== SUMMARY: 1 requestApproval occurrence(s) observed ===
+id=0 (received at +90980ms)
+    note: race: forwarded to CLI + probe response scheduled
+    observation outcome: settled (+99534ms)
+    probe response: sent=true decision=accept (+100990ms)
+    CLI response: seen=true (+92920ms) body={"decision":"accept"}
+    duplicate (both probe and CLI answered this id): true
+    serverRequest/resolved observed: true (+92921ms)
+    turn/completed observed: true turn.status=completed (+96200ms)
+    JSON-RPC error response observed for this id: false
+=== END SUMMARY ===
+```
+
+このプローブは重複耐性を測るため、要求解決後も意図的にresponseを送る。実測上は無害だったが、
+**製品実装は重複responseを送らず、先着回答を採用した時点で他方を抑止する。**
 
 ---
 
@@ -201,33 +233,29 @@ KO-3 では「キーボードからの常に許可は提供しない」と決め
 
 ---
 
-## 6. 代理応答方式（`race`）を実施しない理由
+## 6. 製品方式を`race`＋first-winsへ変更する理由
 
-保持方式が成立したため、**代理応答方式を検証する必要そのものが消えた**。
+2026-09-03時点では保持方式を採用したが、2026-09-05に実際の利用体験を再検討し、
+**HUDとターミナルの両方へ最初から表示するほうがよい**と判断して`race`を検証した。
 
-- CLI は要求を一度も受け取らないので、**TUI にプロンプトが出ない**。
-  「出たプロンプトが閉じるか」という当初最大の懸念が発生しない
-- CLI が response を送らないので、**二重配送も起こらない**
-- `serverRequest/resolved` が正しく流れており、App Server 側の状態とも整合している
+- 保持方式はHUDが使えないとき、CLIへ要求を見せるまで遅延転送タイマーが必要になる
+- `race`ならHUD/TUIのどちらからも直ちに答えられ、普段のCodex操作も失われない
+- 実測で、HUD先行時にTUIプロンプトが閉じ、CLI先行時も正常完了することが確認できた
+- 重複responseは現行App Serverで無害だったが、製品ではfirst-wins制御により送信自体を抑止できる
 
-`race` モードはプローブに実装済みであり、将来必要になれば実行できる。
-
-### ターミナルへのフォールバック
-
-保持方式でも、**一定時間内に HUD で回答されなければ要求を CLI へ転送すればよい**。
-転送は保持していたフレームをそのまま流すだけであり、その時点で通常どおり TUI が
-ユーザーに訊く。この経路は本Gateでは未検証だが、介入を伴わない単なる遅延転送である。
+保持方式は技術的に成立しているため縮退候補として残すが、通常経路には採用しない。
+30秒後のCLI遅延転送も不要になった。
 
 ---
 
 ## 7. 設計への影響
 
 1. **HUD 方式は Codex・Claude Code の両方で成立する。** 3つのノックアウト要因がすべて解消した
-2. **Codex 側の実装方針は「保持」で確定。** Broker が `requestApproval` を保持し、
-   HUD で回答されたら代理応答する。`race` は実装しない
+2. **Codex 側は`race`＋first-wins。** Brokerは要求をCLIへ転送しつつHUDにも提示し、
+   HUD/CLIの先着回答だけをApp Serverへ送る
 3. **`availableDecisions` を読んで HUD に提示する。** 選択肢の集合を Host が固定しない
 4. **HUD の主表示は `commandActions[].command` と `reason`。** `command` 全文は副次的に
-5. **未回答時のフォールバックとして、保持していた要求を CLI へ遅延転送する経路を用意する**
+5. **CLIは最初から表示する。** 未回答時の30秒遅延転送は作らない
 6. Codex の「常に許可」（`proposedExecpolicyAmendment`）は Claude Code より実効性がある。
    提供するかは別途判断する
 
@@ -279,8 +307,6 @@ npm の `.cmd` シムであり、`codex.exe` は存在しない。Rust の `Comm
 
 ## 9. 非対象
 
-- 代理応答方式（`race`）の実機検証（§6）
-- 保持した要求を CLI へ遅延転送するフォールバック経路
 - `hold-forever` による App Server 側タイムアウトの有無
 - `item/fileChange/requestApproval` / `item/permissions/requestApproval` /
   `item/tool/requestUserInput` の各要求
@@ -295,7 +321,7 @@ npm の `.cmd` シムであり、`codex.exe` は存在しない。Rust の `Comm
 |---|---|---|---|
 | KO-1 | HUD は作業中のウィンドウからフォーカスを奪わないか | ✅ 成立 | `hud-focus-gate-results.md` |
 | KO-3 | Claude Code へ回答を注入できるか | ✅ 成立 | `claude-permission-hook-gate-results.md` |
-| KO-2 | Codex へ代理応答できるか | ✅ 成立（保持方式） | 本書 |
+| KO-2 | Codex へ代理応答できるか | ✅ 成立（保持・`race`。製品は`race`＋first-wins） | 本書 |
 
 **「読むのはモニタの HUD、決めるのはキーボード、ScreenKey は気づくため」という設計の前提は、
 すべて実機で裏付けられた。** 実装フェーズへ進める。

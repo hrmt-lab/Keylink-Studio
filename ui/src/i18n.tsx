@@ -650,6 +650,10 @@ const T = {
     "settings.app.launch_at_login": "Windows ログイン時に起動",
     "settings.app.launch_at_login.desc": "サインイン時に Keylink Studio を自動起動します（トレイ常駐）",
     "settings.app.hex_invalid": "0x0000〜0xFFFF の範囲で入力してください",
+    "settings.debug.section": "デバッグ",
+    "settings.debug.file_log": "ファイルログを有効化",
+    "settings.debug.file_log.desc":
+      "不具合の原因切り分け用のログをファイルに出力します。既定は無効です。出力先は実行ファイル（.exe）と同じフォルダの logs サブフォルダで固定です。keylink-studio-debug.<日付>.log として1日ごとにローテーションし、直近7日分を保持します。",
     "settings.codex.section": "Codex 連携",
     "settings.codex.start": "連携を開始",
     "settings.codex.stop": "連携を停止",
@@ -1362,6 +1366,10 @@ const T = {
     "settings.app.launch_at_login": "Launch at Windows login",
     "settings.app.launch_at_login.desc": "Start Keylink Studio automatically at sign-in (runs in the tray)",
     "settings.app.hex_invalid": "Enter a value between 0x0000 and 0xFFFF",
+    "settings.debug.section": "Debug",
+    "settings.debug.file_log": "Enable file log",
+    "settings.debug.file_log.desc":
+      "Writes a log file for troubleshooting. Disabled by default. Always written to a fixed logs subfolder next to the .exe, rotating daily as keylink-studio-debug.<date>.log and keeping the most recent 7 days.",
     "settings.codex.section": "Codex integration",
     "settings.codex.start": "Start integration",
     "settings.codex.stop": "Stop integration",

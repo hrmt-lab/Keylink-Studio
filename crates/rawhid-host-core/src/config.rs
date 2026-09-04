@@ -21,6 +21,7 @@ pub struct AppConfig {
     pub studio: StudioConfig,
     pub stats: StatsConfig,
     pub actions: ActionsConfig,
+    pub debug_log: DebugLogConfig,
 }
 
 impl Default for AppConfig {
@@ -36,6 +37,7 @@ impl Default for AppConfig {
             studio: StudioConfig::default(),
             stats: StatsConfig::default(),
             actions: ActionsConfig::default(),
+            debug_log: DebugLogConfig::default(),
         }
     }
 }
@@ -219,6 +221,17 @@ impl Default for ActionBinding {
             match_exe: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(default)]
+pub struct DebugLogConfig {
+    /// Write WARN-and-above tracing events (plus DEBUG for the AI display
+    /// diagnostics target) to a daily-rotating `keylink-studio-debug.<date>.log`
+    /// in a `logs` subfolder next to the running executable, keeping the most
+    /// recent 7 files. Disabled by default; toggled from Settings. The output
+    /// location is fixed (no file picker).
+    pub enabled: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -662,6 +675,14 @@ periodic_sync_sec = 60
 enabled = true
 flush_interval_sec = 60
 
+[debug_log]
+# Write WARN-and-above tracing events (plus DEBUG for the AI display
+# diagnostics target) to a daily-rotating keylink-studio-debug.<date>.log in a
+# logs subfolder next to the running executable, keeping the most recent 7
+# files. Disabled by default; toggle from Settings. The output location is
+# fixed: there is no file picker.
+enabled = false
+
 [actions]
 # Execute HOST_ACTION packets sent from the keyboard. Disabled by default.
 enabled = false
@@ -770,6 +791,7 @@ mod tests {
         assert_eq!(config.stats.flush_interval_sec, 60);
         assert!(!config.actions.enabled);
         assert!(config.actions.devices.is_empty());
+        assert!(!config.debug_log.enabled);
         assert!(!config.time.enabled);
         assert_eq!(config.time.format_hint, TimeFormatHint::TimeHm);
         assert_eq!(config.time.clock_mode, ClockMode::TwentyFourHour);
@@ -1013,6 +1035,34 @@ keymap_read_timeout_ms = 5000
         assert_eq!(config.studio.probe_timeout_ms, 250);
         assert_eq!(config.studio.keymap_read_timeout_ms, 5000);
     }
+    #[test]
+    fn debug_log_config_defaults_to_disabled() {
+        let config = AppConfig::default();
+        assert!(!config.debug_log.enabled);
+
+        let config: AppConfig = toml::from_str("").unwrap();
+        assert!(!config.debug_log.enabled);
+    }
+
+    #[test]
+    fn parses_debug_log_config() {
+        let config: AppConfig = toml::from_str(
+            r#"
+[debug_log]
+enabled = true
+"#,
+        )
+        .unwrap();
+
+        assert!(config.debug_log.enabled);
+        let encoded = toml::to_string(&config).unwrap();
+        assert!(encoded.contains("[debug_log]"));
+        assert!(encoded.contains("enabled = true"));
+
+        let roundtripped: AppConfig = toml::from_str(&encoded).unwrap();
+        assert_eq!(roundtripped, config);
+    }
+
     #[test]
     fn explicit_path_is_selected_even_when_missing() {
         let paths = ConfigPaths {

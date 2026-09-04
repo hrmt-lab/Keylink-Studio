@@ -306,6 +306,22 @@ export default function Settings({ config, setConfig, status }: Props) {
         </SettingRow>
       </SectionCard>
 
+      {/* Debug */}
+      <SectionCard title={t("settings.debug.section")}>
+        <SettingRow
+          label={t("settings.debug.file_log")}
+          description={t("settings.debug.file_log.desc")}
+        >
+          <Toggle
+            checked={draft.debug_log.enabled}
+            onChange={(v) =>
+              setDraft({ ...draft, debug_log: { ...draft.debug_log, enabled: v } })
+            }
+            label={t("settings.debug.file_log")}
+          />
+        </SettingRow>
+      </SectionCard>
+
       <div className="rounded-card bg-plate px-4 py-3 text-xs text-muted space-y-1">
         <div>
           {t("settings.note1", { file: "keylink-studio.toml" })}

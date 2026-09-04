@@ -4,6 +4,7 @@ mod app_launch;
 mod claude_launcher;
 mod codex_launcher;
 mod commands;
+mod debug_log;
 mod explorer;
 mod foreground;
 mod hud_coordinator;
@@ -13,17 +14,33 @@ mod icon;
 mod startup;
 mod state;
 
-use state::AppState;
+use state::{add_log, AppState};
 use tauri::{
     menu::{MenuBuilder, MenuItemBuilder},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    Manager, WindowEvent,
+    Emitter, Manager, WindowEvent,
 };
 
 pub fn run() {
-    let (config, config_path) = commands::load_initial_config();
+    let (mut config, config_path) = commands::load_initial_config();
     let start_on_launch = config.app.start_monitoring_on_launch;
-    let app_state = AppState::new(config, config_path);
+    // The `tracing` subscriber backing the `[debug_log]` file sink is
+    // installed exactly once here, regardless of whether it starts enabled —
+    // see `debug_log`'s module doc for why it must never be re-initialized
+    // when the Settings toggle flips later.
+    let (debug_log, debug_log_error) = debug_log::init(config.debug_log.enabled);
+    if debug_log_error.is_some() {
+        // docs/spec.md: an unopenable output destination shows an error in
+        // the UI and disables file logging -- that applies at startup too,
+        // not only when the Settings toggle is flipped later. Keep the
+        // in-memory config's flag in sync with the sink's actual (disabled)
+        // state so the Settings toggle isn't shown as on for a sink that
+        // isn't running; the on-disk toml is left untouched, so a later save
+        // reconciles it. The error itself is logged to the UI log below,
+        // once an `AppHandle` exists to emit "log-added" with.
+        config.debug_log.enabled = false;
+    }
+    let app_state = AppState::new(config, config_path, debug_log);
 
     tauri::Builder::default()
         // Single-instance must be the first plugin registered.
@@ -109,6 +126,11 @@ pub fn run() {
             setup_hud(app)?;
             let handle = app.handle().clone();
             let state = app.state::<AppState>();
+            if let Some(error) = &debug_log_error {
+                let message = format!("Debug file log could not be enabled: {error}");
+                let entry = add_log(&state.log_entries, &state.log_counter, "error", &message);
+                let _ = handle.emit("log-added", entry);
+            }
             commands::start_host_link_worker(handle, state.inner(), start_on_launch)
                 .map_err(std::io::Error::other)?;
             Ok(())

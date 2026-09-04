@@ -52,6 +52,7 @@ use rawhid_host_core::{
 };
 use tauri::{AppHandle, Emitter, State};
 
+use crate::debug_log::AI_DISPLAY_LOG_TARGET;
 use crate::foreground::ForegroundWatcher;
 use crate::hud_coordinator::HudCoordinator;
 use crate::state::{
@@ -324,6 +325,15 @@ pub fn save_config(config: AppConfig, state: State<AppState>) -> Result<(), Stri
 }
 
 fn persist_config(config: AppConfig, state: &AppState) -> Result<(), String> {
+    // Reflect a `debug_log.enabled` change onto the running file sink before
+    // writing anything to disk. If enabling fails (e.g. the exe's directory
+    // isn't writable), the whole save is rejected and `enabled` stays at its
+    // previous value in both the config file and `state.config` — it never
+    // becomes `true` without the sink actually being active.
+    if state.debug_log.is_enabled() != config.debug_log.enabled {
+        state.debug_log.set_enabled(config.debug_log.enabled)?;
+    }
+
     let toml_str = toml::to_string_pretty(&config).map_err(|e| e.to_string())?;
 
     let path = {
@@ -354,10 +364,24 @@ fn persist_config(config: AppConfig, state: &AppState) -> Result<(), String> {
 }
 
 #[tauri::command]
-pub fn reload_config(state: State<AppState>) -> Result<AppConfig, String> {
-    let (config, path) =
+pub fn reload_config(app: AppHandle, state: State<AppState>) -> Result<AppConfig, String> {
+    let (mut config, path) =
         load_config(preferred_existing_config_path()).map_err(|e| e.to_string())?;
     ensure_codex_config_editable(&state, &config)?;
+
+    if state.debug_log.is_enabled() != config.debug_log.enabled {
+        if let Err(error) = state.debug_log.set_enabled(config.debug_log.enabled) {
+            // Same handling as a `debug_log::init` startup failure: log the
+            // error to the UI log and fall back to disabled in memory rather
+            // than failing the whole reload. The on-disk toml (just read
+            // above) is left as-is; the next save reconciles it.
+            let message = format!("Debug file log could not be enabled: {error}");
+            let entry = add_log(&state.log_entries, &state.log_counter, "error", &message);
+            let _ = app.emit("log-added", entry);
+            config.debug_log.enabled = false;
+        }
+    }
+
     *state.config.lock().unwrap() = config.clone();
     *state.config_path.lock().unwrap() = path;
     restart_ai_usage_runtime(&state, &config);
@@ -5176,31 +5200,30 @@ fn run_monitor_loop(
         // Diagnostic for the reported "first approval flashes yellow then
         // turns green while the request is still unanswered": records every
         // Codex activity transition alongside how many approvals the store
-        // still holds, so a Completed state arriving with a non-zero count
-        // is visible in the app's log without reproducing under a debugger.
-        // IDs and counts only -- no request bodies (docs/spec.md: the UI log
-        // carries sanitized text only).
+        // still holds, without needing to reproduce under a debugger. An
+        // earlier version escalated this to `warn` when a Completed state
+        // arrived with a non-zero `pending_approvals` count, on the
+        // hypothesis that it meant an unresolved approval; that hypothesis
+        // was wrong (the real cause -- another thread's state change leaking
+        // into this display slot -- was already fixed elsewhere), and
+        // `pending_approvals` counts the whole store, so it is routinely
+        // non-zero for threads unrelated to this one even in normal
+        // operation. Always `debug!` now, under the same
+        // `AI_DISPLAY_LOG_TARGET` as the AI wire-send / slot-assignment
+        // diagnostics, so this lives in the `[debug_log]` file sink instead
+        // of the in-memory UI log. IDs and counts only -- no request bodies
+        // (docs/spec.md's sanitized-output rule for the UI log applies here
+        // too).
         for change in &codex_changes {
             let pending = extras.codex_activity.pending_approvals().len();
-            let level = if change.state.activity_state == AiActivityState::Completed && pending > 0
-            {
-                "warn"
-            } else {
-                "info"
-            };
-            let entry = add_log(
-                &log_entries,
-                &log_counter,
-                level,
-                &format!(
-                    "codex activity thread={} state={:?} reason={:?} pending_approvals={}",
-                    thread_tag(&change.thread_id),
-                    change.state.activity_state,
-                    change.reason,
-                    pending
-                ),
+            tracing::debug!(
+                target: AI_DISPLAY_LOG_TARGET,
+                "codex activity thread={} state={:?} reason={:?} pending_approvals={}",
+                thread_tag(&change.thread_id),
+                change.state.activity_state,
+                change.reason,
+                pending
             );
-            let _ = app.emit("log-added", entry);
         }
         // Both clients' pending-approval bodies live in the one store Codex
         // already owns (`CodexActivityRuntime`), so a future HUD reads a

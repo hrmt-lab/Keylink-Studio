@@ -272,6 +272,10 @@ export interface ActionsConfig {
   devices: Record<string, DeviceActionsConfig>;
 }
 
+export interface DebugLogConfig {
+  enabled: boolean;
+}
+
 export interface AppConfig {
   app: AppBehaviorConfig;
   ai_client: AiClientConfig;
@@ -282,6 +286,7 @@ export interface AppConfig {
   ai_usage: AiUsageConfig;
   studio: StudioConfig;
   actions: ActionsConfig;
+  debug_log: DebugLogConfig;
 }
 
 // 笏笏笏 Runtime Types 笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏笏

@@ -53,10 +53,9 @@ Tauri debug build では、プロジェクトルートの `keylink-studio.toml` 
 ```toml
 [debug_log]
 enabled = false
-path = "keylink-studio-debug.log"
 ```
 
-`[debug_log]` はデバッグ用のファイルログ設定です。既定では無効です。有効時、`path` が相対 path の場合は実行中の `.exe` と同じディレクトリからの相対 path として解決します。`path` が絶対 path の場合はその path へ出力します。`path` が未設定または空の場合は `.exe` と同じディレクトリの `keylink-studio-debug.log` を使います。Settings から有効 / 無効の切り替えと出力先ファイル選択を行えます。出力先を開けない場合は UI にエラーを表示し、ファイルログは無効化します。
+`[debug_log]` はデバッグ用のファイルログ設定です。既定では無効です。出力先は固定で、実行中の `.exe` と同じディレクトリの `logs` サブフォルダに書き込みます（出力先の変更はできません）。ファイル名には日付が入り、`keylink-studio-debug.<日付>.log` の形式でローテーションします（1日1ファイル、直近7ファイルを保持。削除はファイル数ベースで、経過日数ベースではありません。新しいファイルが作られた時点で古いものから間引かれます）。出力レベルは WARN 以上のみで、AI 表示の診断ログ用の target に限り DEBUG まで出力します。ユーザーに見せるレベル設定はありません。Settings では有効 / 無効の切り替えのみ行えます。出力先を開けない場合は UI にエラーを表示し、ファイルログは無効化します。
 
 ファイルログは原因切り分け用で、既存の in-memory log / UI log とは別の sink として扱います。access token、credentials JSON、Authorization header、HTTP request / response body、raw parse error、ユーザーが読み込んだ keymap backup JSON の本文は出力しません。Host Link / Config RPC のログは raw packet 全体ではなく、packet type、feature、op、status、seq、対象 id、timeout / retry / disconnect などの summary を出力します。
 
@@ -68,7 +67,6 @@ path = "keylink-studio-debug.log"
 | `hid.usage` | `0x61` |
 | `hid.hello_timeout_ms` | `500` |
 | `debug_log.enabled` | `false` |
-| `debug_log.path` | `"keylink-studio-debug.log"` |
 | `layer_switch.enabled` | `true` |
 | `time.enabled` | `false` |
 | `time.format_hint` | `time_hm` |

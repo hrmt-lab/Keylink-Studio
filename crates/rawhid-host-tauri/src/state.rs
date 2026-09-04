@@ -23,6 +23,7 @@ use rawhid_host_core::{
     ClaudeObserverCounters, ClaudeObserverEvents, ClaudeObserverReceiver, ClaudeSessionRegistry,
 };
 
+use crate::debug_log::DebugLogHandle;
 use crate::hud_coordinator::HudCoordinator;
 
 pub const MAX_LOG_ENTRIES: usize = 200;
@@ -90,6 +91,11 @@ pub struct AppState {
     /// available. `None` only for the brief window between `AppState::new`
     /// and that `setup()` callback running.
     pub hud: Arc<Mutex<Option<HudCoordinator>>>,
+    /// `[debug_log]` file sink. Installed once at startup (`lib.rs::run`);
+    /// `commands::persist_config` flips `enabled` on it when the Settings
+    /// toggle changes. See `debug_log`'s module doc for why this is a
+    /// toggleable handle rather than a subscriber re-initialized per save.
+    pub debug_log: DebugLogHandle,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -478,7 +484,7 @@ pub enum HostLinkResponse {
 }
 
 impl AppState {
-    pub fn new(config: AppConfig, config_path: Option<PathBuf>) -> Self {
+    pub fn new(config: AppConfig, config_path: Option<PathBuf>, debug_log: DebugLogHandle) -> Self {
         let display_slot_count = config.ai_client.display.slot_count;
         let codex_broker = CodexBrokerManager::new();
         let codex_activity = Arc::new(CodexActivityRuntime::start(codex_broker.clone()));
@@ -513,6 +519,7 @@ impl AppState {
             studio_edit: Arc::new(Mutex::new(None)),
             encoder_restore_rollbacks: Arc::new(Mutex::new(HashMap::new())),
             hud: Arc::new(Mutex::new(None)),
+            debug_log,
         }
     }
 }

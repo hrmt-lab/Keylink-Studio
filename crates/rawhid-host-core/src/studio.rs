@@ -422,6 +422,10 @@ pub enum EditBehavior {
     Bootloader,
     StudioUnlock,
     GraveEscape,
+    // Custom aipad-only behavior: press sends action_id/value to the host,
+    // which decides what they mean (see Settings -> Actions). Key positions
+    // only; not supported for encoders or Combos (see `key_role_display_name`).
+    HostAction { action_id: u32, value: u32 },
 }
 
 #[derive(Debug, Error)]
@@ -764,6 +768,25 @@ fn combo_role_display_name(behavior: &EditBehavior) -> &'static str {
         EditBehavior::Bootloader => "Bootloader",
         EditBehavior::StudioUnlock => "Studio Unlock",
         EditBehavior::GraveEscape => "Grave/Escape",
+        // Unreachable: resolve_combo() rejects HostAction before calling this
+        // (Combo support is out of scope; see `key_role_display_name`).
+        EditBehavior::HostAction { .. } => "host_action",
+    }
+}
+
+/// Maps `EditBehavior` roles that need a ZMK Studio catalog lookup when writing
+/// a keymap key position to the connected firmware's `display_name` for that
+/// role. Every other keymap-editor behavior (`&kp`, `&mo`, `&bt`, ...) is
+/// resolved by the zmk-studio-api crate's own built-in role catalog inside
+/// `set_key_at` (see `behavior_to_zmk`) instead; this is only for behaviors
+/// with no equivalent there. Currently that is just `HostAction`, a custom
+/// aipad-only behavior: `host_action.dtsi` sets neither `display-name` nor
+/// `label`, so ZMK falls back to the devicetree node name and its ZMK Studio
+/// RPC `display_name` is exactly `"host_action"`.
+fn key_role_display_name(behavior: &EditBehavior) -> Option<&'static str> {
+    match behavior {
+        EditBehavior::HostAction { .. } => Some("host_action"),
+        _ => None,
     }
 }
 
@@ -867,6 +890,11 @@ impl BehaviorResolver {
         &self,
         behavior: &EditBehavior,
     ) -> Result<EncoderBinding, EncoderResolveError> {
+        // HostAction is a keymap-key-position-only addition (see `resolve_key`);
+        // Combo Config RPC support is out of scope for now.
+        if matches!(behavior, EditBehavior::HostAction { .. }) {
+            return Err(EncoderResolveError::Ineligible);
+        }
         let display_name = combo_role_display_name(behavior);
         let mut matches = self
             .catalog
@@ -903,11 +931,48 @@ impl BehaviorResolver {
             | EditBehavior::Bootloader
             | EditBehavior::StudioUnlock
             | EditBehavior::GraveEscape => (0, 0),
+            // Should be unreachable: rejected by the Ineligible guard above.
+            // Returns an error instead of panicking so a gap in that guard
+            // can never poison the shared Mutex this crate relies on
+            // (`.lock().unwrap()` throughout).
+            EditBehavior::HostAction { .. } => return Err(EncoderResolveError::Ineligible),
         };
         Ok(EncoderBinding {
             behavior_id,
             param1,
             param2,
+        })
+    }
+
+    /// Resolves an `EditBehavior` that needs a catalog lookup for a keymap key
+    /// position write (see `key_role_display_name`). Unlike `resolve`/`resolve_combo`,
+    /// which cover the whole keymap-editor behavior set, this currently only
+    /// accepts `HostAction`: every other behavior is written via `behavior_to_zmk`
+    /// and the zmk-studio-api crate's own built-in role catalog instead.
+    fn resolve_key(&self, behavior: &EditBehavior) -> Result<EncoderBinding, EncoderResolveError> {
+        let display_name =
+            key_role_display_name(behavior).ok_or(EncoderResolveError::Ineligible)?;
+        let mut matches = self
+            .catalog
+            .iter()
+            .filter(|entry| entry.display_name == display_name);
+        let entry = match (matches.next(), matches.next()) {
+            (Some(entry), None) => entry,
+            _ => return Err(EncoderResolveError::UnsupportedByFirmware),
+        };
+        let behavior_id =
+            u16::try_from(entry.id).map_err(|_| EncoderResolveError::UnsupportedByFirmware)?;
+        let EditBehavior::HostAction { action_id, value } = behavior else {
+            // Should be unreachable: `key_role_display_name` only returns
+            // `Some` for `HostAction`. Returns an error instead of panicking
+            // so a gap in that invariant can never poison the shared Mutex
+            // this crate relies on (`.lock().unwrap()` throughout).
+            return Err(EncoderResolveError::Ineligible);
+        };
+        Ok(EncoderBinding {
+            behavior_id,
+            param1: *action_id,
+            param2: *value,
         })
     }
 }
@@ -1672,6 +1737,23 @@ impl StudioEditSession {
             .resolve_combo(behavior)
     }
 
+    /// Resolves a keymap-key-position behavior that needs a catalog lookup
+    /// (currently only `HostAction`) into the raw binding `set_binding` writes.
+    /// Shares the same session-cached behavior catalog as
+    /// `resolve_encoder_binding` / `resolve_combo_binding`.
+    fn resolve_key_binding(
+        &mut self,
+        behavior: &EditBehavior,
+    ) -> Result<EncoderBinding, EncoderResolveError> {
+        if self.encoder_resolver.is_none() {
+            self.encoder_resolver = Some(BehaviorResolver::build(&mut self.client)?);
+        }
+        self.encoder_resolver
+            .as_ref()
+            .expect("encoder_resolver was just initialized")
+            .resolve_key(behavior)
+    }
+
     pub fn snapshot(&mut self) -> Result<StudioKeymapSnapshot, StudioError> {
         let keymap = self
             .client
@@ -1759,8 +1841,23 @@ impl StudioEditSession {
         position: i32,
         behavior: EditBehavior,
     ) -> Result<StudioKeymapSnapshot, StudioError> {
+        // HostAction has no equivalent in the zmk-studio-api crate's `Behavior`
+        // enum, so its behavior_id must be resolved from the firmware catalog
+        // ourselves (see `resolve_key_binding`) and written as `Behavior::Unknown`.
+        let zmk_behavior = if matches!(behavior, EditBehavior::HostAction { .. }) {
+            let binding = self
+                .resolve_key_binding(&behavior)
+                .map_err(map_encoder_resolve_to_studio_error)?;
+            Behavior::Unknown {
+                behavior_id: i32::from(binding.behavior_id),
+                param1: binding.param1,
+                param2: binding.param2,
+            }
+        } else {
+            behavior_to_zmk(behavior)
+        };
         self.client
-            .set_key_at(layer_id, position, behavior_to_zmk(behavior))
+            .set_key_at(layer_id, position, zmk_behavior)
             .map_err(map_client_to_studio_error)?;
         self.snapshot()
     }
@@ -2573,6 +2670,11 @@ fn binding_labels(behavior: &str, param1: u32, param2: u32) -> BindingLabels {
         "mouse key press" | "mouse_key_press" | "mkp" => Some(mouse_button_labels(param1)),
         "mouse move" | "mouse_move" | "mmv" => Some(mouse_move_labels(param1)),
         "mouse scroll" | "mouse_scroll" | "msc" => Some(mouse_scroll_labels(param1)),
+        "host_action" => Some((
+            format!("host_action {} {}", param1, param2),
+            String::new(),
+            format!("&host_action {} {}", param1, param2),
+        )),
         "transparent" => Some(("&trans".to_string(), String::new(), "&trans".to_string())),
         "none" => Some((String::new(), String::new(), "&none".to_string())),
         "caps word" | "caps_word" => Some((
@@ -2985,6 +3087,25 @@ fn behavior_to_zmk(behavior: EditBehavior) -> Behavior {
         EditBehavior::Bootloader => Behavior::Bootloader,
         EditBehavior::StudioUnlock => Behavior::StudioUnlock,
         EditBehavior::GraveEscape => Behavior::GraveEscape,
+        // Unreachable: `set_binding` resolves HostAction itself (via
+        // `resolve_key_binding`) and never reaches this function with it.
+        EditBehavior::HostAction { .. } => {
+            unreachable!("HostAction is resolved via BehaviorResolver, not behavior_to_zmk")
+        }
+    }
+}
+
+/// Maps a `BehaviorResolver` failure onto the same `StudioError` a regular
+/// key-position write already surfaces when the connected firmware lacks a
+/// given behavior (`StudioError::MissingBehaviorRole`, via
+/// `ClientError::MissingBehaviorRole` inside `set_key_at`), so the UI's
+/// existing "this firmware doesn't support that binding" handling covers
+/// catalog-resolved key behaviors (currently just `HostAction`) too.
+fn map_encoder_resolve_to_studio_error(error: EncoderResolveError) -> StudioError {
+    match error {
+        EncoderResolveError::Ineligible => StudioError::InvalidBehavior,
+        EncoderResolveError::UnsupportedByFirmware => StudioError::MissingBehaviorRole,
+        EncoderResolveError::Studio(error) => error,
     }
 }
 
@@ -4896,6 +5017,23 @@ mod tests {
     }
 
     #[test]
+    fn host_action_behavior_uses_raw_param_label() {
+        let names = BTreeMap::from([(30, "host_action".to_string())]);
+        let view = binding_to_view(
+            6,
+            zmk::keymap::BehaviorBinding {
+                behavior_id: 30,
+                param1: 2,
+                param2: 7,
+            },
+            &names,
+        );
+        assert_eq!(view.primary_label, "host_action 2 7");
+        assert_eq!(view.secondary_label, "");
+        assert_eq!(view.full_label, "&host_action 2 7");
+    }
+
+    #[test]
     fn client_error_mapping_preserves_edit_specific_codes() {
         assert!(matches!(
             map_client_to_studio_error(ClientError::SetLayerBindingFailed(
@@ -5297,5 +5435,117 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, EncoderResolveError::Ineligible));
+    }
+
+    #[test]
+    fn encoder_resolver_rejects_host_action() {
+        // Encoder overrides are out of scope for HostAction; see `resolve_key`.
+        let resolver = BehaviorResolver {
+            catalog: vec![behavior_details(40, "host_action", vec![])],
+        };
+        let err = resolver
+            .resolve(&EditBehavior::HostAction {
+                action_id: 2,
+                value: 7,
+            })
+            .unwrap_err();
+        assert!(matches!(err, EncoderResolveError::Ineligible));
+    }
+
+    #[test]
+    fn combo_resolver_rejects_host_action() {
+        // Combo is out of scope for HostAction; see `resolve_key`.
+        let resolver = BehaviorResolver {
+            catalog: vec![behavior_details(40, "host_action", vec![])],
+        };
+        let err = resolver
+            .resolve_combo(&EditBehavior::HostAction {
+                action_id: 2,
+                value: 7,
+            })
+            .unwrap_err();
+        assert!(matches!(err, EncoderResolveError::Ineligible));
+    }
+
+    #[test]
+    fn key_resolver_resolves_host_action() {
+        let resolver = BehaviorResolver {
+            catalog: vec![behavior_details(40, "host_action", vec![])],
+        };
+        let binding = resolver
+            .resolve_key(&EditBehavior::HostAction {
+                action_id: 2,
+                value: 7,
+            })
+            .unwrap();
+        assert_eq!(binding.behavior_id, 40);
+        assert_eq!(binding.param1, 2);
+        assert_eq!(binding.param2, 7);
+    }
+
+    #[test]
+    fn key_resolver_rejects_non_host_action_roles() {
+        let resolver = BehaviorResolver { catalog: vec![] };
+        let err = resolver.resolve_key(&EditBehavior::None).unwrap_err();
+        assert!(matches!(err, EncoderResolveError::Ineligible));
+    }
+
+    #[test]
+    fn key_resolver_rejects_missing_or_ambiguous_host_action_role() {
+        let missing = BehaviorResolver { catalog: vec![] };
+        assert!(matches!(
+            missing.resolve_key(&EditBehavior::HostAction {
+                action_id: 0,
+                value: 0,
+            }),
+            Err(EncoderResolveError::UnsupportedByFirmware)
+        ));
+
+        let ambiguous = BehaviorResolver {
+            catalog: vec![
+                behavior_details(40, "host_action", vec![]),
+                behavior_details(41, "host_action", vec![]),
+            ],
+        };
+        assert!(matches!(
+            ambiguous.resolve_key(&EditBehavior::HostAction {
+                action_id: 0,
+                value: 0,
+            }),
+            Err(EncoderResolveError::UnsupportedByFirmware)
+        ));
+    }
+
+    #[test]
+    fn key_resolver_does_not_match_display_name_case_insensitively() {
+        // The Studio RPC display_name for host_action.dtsi is exactly
+        // "host_action" (falls back to DEVICE_DT_NAME); a differently-cased
+        // catalog entry must not match.
+        let resolver = BehaviorResolver {
+            catalog: vec![behavior_details(40, "Host_Action", vec![])],
+        };
+        let err = resolver
+            .resolve_key(&EditBehavior::HostAction {
+                action_id: 0,
+                value: 0,
+            })
+            .unwrap_err();
+        assert!(matches!(err, EncoderResolveError::UnsupportedByFirmware));
+    }
+
+    #[test]
+    fn maps_encoder_resolve_error_to_studio_error_like_missing_behavior_role() {
+        assert!(matches!(
+            map_encoder_resolve_to_studio_error(EncoderResolveError::UnsupportedByFirmware),
+            StudioError::MissingBehaviorRole
+        ));
+        assert!(matches!(
+            map_encoder_resolve_to_studio_error(EncoderResolveError::Ineligible),
+            StudioError::InvalidBehavior
+        ));
+        assert!(matches!(
+            map_encoder_resolve_to_studio_error(EncoderResolveError::Studio(StudioError::Timeout)),
+            StudioError::Timeout
+        ));
     }
 }

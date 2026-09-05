@@ -625,7 +625,8 @@ export type EditBehavior =
   | { kind: "reset" }
   | { kind: "bootloader" }
   | { kind: "studio_unlock" }
-  | { kind: "grave_escape" };
+  | { kind: "grave_escape" }
+  | { kind: "host_action"; action_id: number; value: number };
 
 export interface EncoderInfoDto {
   layer_count: number;

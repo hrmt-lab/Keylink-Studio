@@ -2011,6 +2011,10 @@ pub enum EditBehaviorDto {
     Bootloader,
     StudioUnlock,
     GraveEscape,
+    HostAction {
+        action_id: u32,
+        value: u32,
+    },
 }
 
 impl From<EditBehaviorDto> for EditBehavior {
@@ -2059,6 +2063,9 @@ impl From<EditBehaviorDto> for EditBehavior {
             EditBehaviorDto::Bootloader => EditBehavior::Bootloader,
             EditBehaviorDto::StudioUnlock => EditBehavior::StudioUnlock,
             EditBehaviorDto::GraveEscape => EditBehavior::GraveEscape,
+            EditBehaviorDto::HostAction { action_id, value } => {
+                EditBehavior::HostAction { action_id, value }
+            }
         }
     }
 }

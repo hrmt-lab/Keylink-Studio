@@ -308,6 +308,7 @@ function AppInner() {
             snapshotsByDeviceId={keymapSnapshotsByDeviceId}
             setSnapshotsByDeviceId={setKeymapSnapshotsByDeviceId}
             status={status}
+            config={config}
             onRegisterNavigationGuard={registerKeymapNavigationGuard}
           />
         )}

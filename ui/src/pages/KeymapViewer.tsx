@@ -36,6 +36,8 @@ import { KeymapCanvas } from "../components/KeymapCanvas";
 import { friendlyError } from "../lib/errors";
 import { useLang, type TranslationKey } from "../i18n";
 import type {
+  ActionBinding,
+  AppConfig,
   DeviceInfo,
   DeviceLayerState,
   DiscardChangesDto,
@@ -72,6 +74,8 @@ interface KeymapViewerProps {
   snapshotsByDeviceId: Record<string, StudioKeymapSnapshot>;
   setSnapshotsByDeviceId: Dispatch<SetStateAction<Record<string, StudioKeymapSnapshot>>>;
   status: MonitorStatus;
+  /** Used only for the optional host_action reference label (Settings -> Actions bindings). */
+  config: AppConfig | null;
   onRegisterNavigationGuard?: (guard: KeymapNavigationGuard | null) => void;
 }
 
@@ -419,6 +423,12 @@ function optimisticLabelsForBehavior(
       return commandLabel("studio unlock", "&studio_unlock", [0, 0]);
     case "grave_escape":
       return commandLabel("grave/escape", "&gresc", [0, 0]);
+    case "host_action":
+      return commandLabel(
+        "host_action",
+        `&host_action ${behavior.action_id} ${behavior.value}`,
+        [behavior.action_id, behavior.value],
+      );
   }
 }
 
@@ -524,6 +534,7 @@ export default function KeymapViewer({
   snapshotsByDeviceId,
   setSnapshotsByDeviceId,
   status,
+  config,
   onRegisterNavigationGuard,
 }: KeymapViewerProps) {
   const { t } = useLang();
@@ -631,6 +642,10 @@ export default function KeymapViewer({
     [selected, status.host_link_devices]
   );
   const hostLinkUid = hostLinkDevice?.device_uid_hash ?? null;
+  // Reference-only lookup for the host_action editor: which Settings -> Actions
+  // binding (if any) already claims a given action_id. Independent of Config RPC.
+  const hostActionBindings: ActionBinding[] =
+    (hostLinkUid && config?.actions.devices[hostLinkUid]?.bindings) || [];
   const configRpcCapable =
     hostLinkDevice !== null &&
     (hostLinkDevice.capabilities & CONFIG_RPC_CAPABILITY) !== 0;
@@ -2018,6 +2033,8 @@ export default function KeymapViewer({
           rect={picker.rect}
           busy={editState.operation !== "idle"}
           scrollValue={scrollValue}
+          allowHostAction
+          hostActionBindings={hostActionBindings}
           onClose={() => setPicker(null)}
           onSelect={(behavior) => void setKey(picker.key, picker.layer, behavior)}
         />
@@ -3110,6 +3127,12 @@ function toggleIn(id: string, setter: Dispatch<SetStateAction<string[]>>) {
   );
 }
 
+/** Clamps a host_action param (action_id / value) to the u8 range the firmware
+ *  and host binding both use. */
+function clampByte(value: number): number {
+  return Math.max(0, Math.min(255, Math.trunc(value) || 0));
+}
+
 /** A row of modifier toggle buttons (LCtrl..RGUI), shared by the key /
  *  tap-key / sticky-key catalogs and the Mod-Tap hold-modifier picker. */
 function ModifierToggleRow({ label, selectedIds, onToggle, busy }: {
@@ -3146,7 +3169,7 @@ function ModifierToggleRow({ label, selectedIds, onToggle, busy }: {
   );
 }
 
-function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant = "key", scrollValue = 10, allowInputTwoAxis = false }: {
+function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant = "key", scrollValue = 10, allowInputTwoAxis = false, allowHostAction = false, hostActionBindings = [] }: {
   catalog: KeyCatalogEntry[];
   layers: StudioLayer[];
   rect: PickerRect;
@@ -3160,11 +3183,18 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant
   scrollValue?: number;
   /** Combo and encoder Config RPCs permit behaviors without ZMK Studio metadata. */
   allowInputTwoAxis?: boolean;
+  /** host_action is only meaningful for keymap key positions, not encoders or Combos. */
+  allowHostAction?: boolean;
+  /** Host-configured bindings for the connected device (Settings -> Actions), used
+   *  only to show a reference label next to the action_id field; never required. */
+  hostActionBindings?: ActionBinding[];
 }) {
   const { t } = useLang();
   const isEncoder = variant === "encoder";
   const inputTwoAxisUnavailable = !isEncoder && !allowInputTwoAxis;
   const [tab, setTab] = useState<PickerTab>("key");
+  const [hostActionId, setHostActionId] = useState(0);
+  const [hostActionValue, setHostActionValue] = useState(0);
   const [layerBehavior, setLayerBehavior] = useState<LayerBehaviorKind | null>(null);
   const [tapHoldBehavior, setTapHoldBehavior] = useState<TapHoldBehaviorKind | null>(null);
   const [selectedModifierIds, setSelectedModifierIds] = useState<string[]>([]);
@@ -3597,6 +3627,65 @@ function BindingPicker({ catalog, layers, rect, busy, onClose, onSelect, variant
           <>
             {renderSearch(true)}
             <div className="mt-3 min-h-0 flex-1 space-y-4 overflow-y-auto pr-1">
+            {allowHostAction && (
+              <div>
+                <div
+                  className="mb-1.5 text-xs font-medium uppercase text-faint"
+                  title={t("keymap.edit.host_action_tooltip")}
+                >
+                  {t("keymap.edit.host_action")}
+                </div>
+                <div className="flex flex-wrap items-end gap-3">
+                  <div>
+                    <label className="mb-1 block text-[11px] text-faint">
+                      {t("keymap.edit.host_action_action_id")}
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={255}
+                      value={hostActionId}
+                      disabled={busy}
+                      onChange={(e) => setHostActionId(clampByte(Number(e.target.value)))}
+                      className="input !w-20 !bg-background font-mono text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="mb-1 block text-[11px] text-faint">
+                      {t("keymap.edit.host_action_value")}
+                    </label>
+                    <input
+                      type="number"
+                      min={0}
+                      max={255}
+                      value={hostActionValue}
+                      disabled={busy}
+                      onChange={(e) => setHostActionValue(clampByte(Number(e.target.value)))}
+                      className="input !w-20 !bg-background font-mono text-sm"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => onSelect({ kind: "host_action", action_id: hostActionId, value: hostActionValue })}
+                    className="rounded-md bg-background px-3 py-1.5 text-sm font-medium text-ink ring-1 ring-border hover:bg-plate disabled:opacity-50"
+                  >
+                    {t("keymap.edit.host_action_apply")}
+                  </button>
+                </div>
+                {(() => {
+                  const matched = hostActionBindings.find((binding) => binding.action_id === hostActionId);
+                  if (!matched) return null;
+                  return (
+                    <div className="mt-1.5 text-xs text-faint">
+                      {t("keymap.edit.host_action_reference", {
+                        name: t(`actions.kind.${matched.action}` as TranslationKey),
+                      })}
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
             <div>
               <div className="mb-1.5 text-xs font-medium uppercase text-faint">
                 {t("keymap.edit.mouse")}

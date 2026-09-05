@@ -325,6 +325,13 @@ App Serverの`serverRequest/resolved`を観測した時点でもHUDを閉じ、�
 保持方式は技術的な縮退候補として残すが、通常経路には採用しない。要求をCLIへ見せないため、
 HUDが使えない場合に遅延転送タイマーが必要となり、ユーザーが回答できるまで不要に待たされるためである。
 
+2026-09-05 に `host_approval_lifecycle_e2e_uses_real_broker_and_selected_thread_only` を通した。
+localhost の mock App Server は上流だけを代替し、製品の Broker WebSocket 転送、
+`CodexActivityRuntime` / `PendingApprovalStore`、HUD の純粋選択状態、Host response dispatcher を
+実際に接続した。同一 connection の2 threadから ScreenKey の表示対象 thread だけを選び、400 ms
+guard 後の decision、Host先行／CLI先行のfirst-wins、`decline` と `cancel` の分離、切断時の pending
+解放を自動確認した。実 Codex CLI プロセス、Tauri GUI、実HIDはこのテスト範囲外である。
+
 ### 9.2 Claude Code（hook decision）
 
 **`claude_observer.rs:323` の 204 応答を、`PermissionRequest` に限り decision へ差し替える。**
@@ -448,7 +455,7 @@ Codex で提供する場合も **`Fn` 併用必須**とし、単押しでは出�
 4. `item/fileChange/requestApproval` / `item/permissions/requestApproval` /
    `item/tool/requestUserInput` の各要求の扱い（本書は command approval を初期対象とする）
 5. Codex の `proposedExecpolicyAmendment` を適用したときの永続範囲
-6. 複数 thread / 複数 connection が同時に承認待ちになる場合
+6. 複数 connection が同時に承認待ちになる本番GUI／実HIDでの操作性（同一 connection の2 thread選択は自動E2E済み）
 
 ---
 

@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 
+[features]
+# Compiles local-WebSocket Broker harnesses for downstream crate tests. The
+# production dependency leaves this off, so the harness is not part of the
+# application binary.
+test-support = []
+
 [dependencies]
 chrono.workspace = true
 directories.workspace = true

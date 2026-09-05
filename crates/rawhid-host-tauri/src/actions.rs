@@ -276,29 +276,56 @@ fn dispatch_hud_response(
             // A duplicate press or a CLI-first response is expected to lose the
             // Broker first-wins race. The monitor already recorded dispatch, and
             // there is no safe recovery action for a stale physical packet.
-            let _ = respond_to_codex_approval_internal(
-                &pending,
-                &broker,
-                dispatch.selection.key.token(),
-                dispatch.selection.decision_index,
-            );
+            let _ = dispatch_hud_response_selection(&pending, &broker, &dispatch.selection);
         });
 }
 
+/// The response half of a physical HUD action after the coordinator has
+/// atomically chosen one exact pending request. Keeping this separate from
+/// the thread spawn lets tests exercise the same Host dispatcher without a
+/// Tauri window or a physical HID packet.
+pub(crate) fn dispatch_hud_response_selection(
+    pending: &rawhid_host_core::pending_approval::PendingApprovalStore,
+    broker: &rawhid_host_core::codex_broker::CodexBrokerManager,
+    selection: &crate::hud_coordinator::HudApprovalSelection,
+) -> Result<bool, String> {
+    respond_to_codex_approval_internal(
+        pending,
+        broker,
+        selection.key.token(),
+        selection.decision_index,
+    )
+}
+
+#[cfg(test)]
 fn spawn_response_task(task: impl FnOnce() + Send + 'static) {
     std::thread::spawn(task);
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, time::Duration};
-
-    use rawhid_host_core::{
-        codex_activity::{AiClientStateSnapshot, CodexSessionSnapshot},
-        packet::{AiActivityState, AiClientType, AiClientVariant, AiWorkPhase},
+    use std::{
+        sync::mpsc,
+        time::{Duration, Instant},
     };
 
-    use crate::state::AiDisplayTarget;
+    use futures_util::{SinkExt, StreamExt};
+    use rawhid_host_core::{
+        codex_activity::{AiClientStateSnapshot, CodexActivityRuntime, CodexSessionSnapshot},
+        codex_broker::{test_support::BrokerHarness, CodexApprovalResponseOutcome},
+        packet::{AiActivityState, AiClientType, AiClientVariant, AiWorkPhase},
+    };
+    use serde_json::{json, Value};
+    use tokio::{net::TcpListener, time};
+    use tokio_tungstenite::{
+        accept_async, connect_async,
+        tungstenite::{client::IntoClientRequest, Message},
+    };
+
+    use crate::{
+        hud_coordinator::{response_selection_from_state, HudInteractionState, HUD_CONFIRM_GUARD},
+        state::AiDisplayTarget,
+    };
 
     fn codex_snapshot(
         connection_id: &str,
@@ -376,5 +403,283 @@ mod tests {
             target,
             Some(("connection-a".to_string(), "thread-a".to_string()))
         );
+    }
+
+    async fn receive_json<Stream>(socket: &mut tokio_tungstenite::WebSocketStream<Stream>) -> Value
+    where
+        Stream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    {
+        let message = time::timeout(Duration::from_secs(2), socket.next())
+            .await
+            .expect("WebSocket frame timed out")
+            .expect("WebSocket closed")
+            .expect("WebSocket read failed");
+        serde_json::from_str(message.to_text().expect("text JSON-RPC frame").as_ref())
+            .expect("valid JSON-RPC")
+    }
+
+    async fn wait_until(description: &str, predicate: impl Fn() -> bool) {
+        time::timeout(Duration::from_secs(2), async {
+            while !predicate() {
+                time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {description}"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn host_approval_lifecycle_e2e_uses_real_broker_and_selected_thread_only() {
+        // The local App Server below is the sole mock.  Everything between it
+        // and the simulated HOST_ACTION is production code: the WebSocket
+        // Broker, event reducer/PendingApprovalStore, HUD pure state, and the
+        // same response dispatcher called by `actions::execute`.
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let harness = BrokerHarness::start(
+            format!("ws://{upstream_addr}"),
+            &[("client-token", "screenkey-terminal")],
+        )
+        .await
+        .unwrap();
+        let manager = harness.manager();
+        let activity = CodexActivityRuntime::start(manager.clone());
+        let upstream = tokio::spawn(async move {
+            let (upstream_socket, _) = upstream_listener.accept().await.unwrap();
+            accept_async(upstream_socket).await.unwrap()
+        });
+
+        let mut request = format!("ws://{}", harness.broker_addr())
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("authorization", "Bearer client-token".parse().unwrap());
+        let (mut cli, _) = connect_async(request).await.unwrap();
+        let mut app_server = upstream.await.unwrap();
+
+        // Establish two owned threads on one Broker connection, then put both
+        // in WaitingApproval. Thread B is the display target because it is the
+        // current Codex focus; the Host must not answer thread A instead.
+        for (rpc_id, thread_id, turn_id) in [(1, "thread-a", "turn-a"), (2, "thread-b", "turn-b")] {
+            cli.send(Message::Text(
+                json!({
+                    "jsonrpc": "2.0", "id": rpc_id, "method": "thread/start", "params": {}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+            assert_eq!(receive_json(&mut app_server).await["id"], rpc_id);
+            app_server
+                .send(Message::Text(
+                    json!({
+                        "jsonrpc": "2.0", "id": rpc_id,
+                        "result": { "thread": { "id": thread_id } }
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .unwrap();
+            let _ = receive_json(&mut cli).await;
+            app_server.send(Message::Text(json!({
+                "jsonrpc": "2.0", "method": "turn/started",
+                "params": { "threadId": thread_id, "turn": { "id": turn_id, "status": "inProgress" } }
+            }).to_string().into())).await.unwrap();
+            let _ = receive_json(&mut cli).await;
+        }
+
+        let approval = |id, thread_id, turn_id, decisions: Value| {
+            json!({
+                "jsonrpc": "2.0", "id": id,
+                "method": "item/commandExecution/requestApproval",
+                "params": {
+                    "threadId": thread_id, "turnId": turn_id,
+                    "item": { "id": format!("item-{id}") },
+                    "commandActions": [{ "command": format!("echo {thread_id}") }],
+                    "availableDecisions": decisions
+                }
+            })
+        };
+        for frame in [
+            approval(101, "thread-a", "turn-a", json!(["approve-a", "cancel"])),
+            approval(
+                102,
+                "thread-b",
+                "turn-b",
+                json!(["approve-b", "decline", "cancel"]),
+            ),
+        ] {
+            app_server
+                .send(Message::Text(frame.to_string().into()))
+                .await
+                .unwrap();
+            let _ = receive_json(&mut cli).await;
+        }
+
+        let pending = activity.pending_approvals();
+        wait_until("both pending approvals", || pending.len() == 2).await;
+        wait_until("thread-b display target", || {
+            activity.snapshots().iter().any(|snapshot| {
+                snapshot.thread_id == "thread-b"
+                    && snapshot.is_display_target
+                    && snapshot.state.activity_state == AiActivityState::WaitingApproval
+            })
+        })
+        .await;
+        let (connection_id, display_thread_id) = super::codex_target_for_slot(
+            Some(AiDisplayTarget::Codex {
+                terminal_target_id: "screenkey-terminal".to_string(),
+            }),
+            activity.snapshots(),
+        )
+        .expect("ScreenKey slot resolves its exact Codex display target");
+        assert_eq!(display_thread_id, "thread-b");
+        let (selected_key, selected_snapshot) = pending
+            .latest_codex_for_connection_and_thread(&connection_id, &display_thread_id)
+            .expect("display thread has its own pending approval");
+        assert_eq!(
+            selected_snapshot.client,
+            rawhid_host_core::ApprovalClient::Codex
+        );
+
+        let shown_at = Instant::now();
+        let mut hud_state = HudInteractionState::default();
+        hud_state.sync_target(Some(&selected_key), 3, shown_at);
+        assert!(response_selection_from_state(
+            &hud_state,
+            &pending,
+            false,
+            shown_at + HUD_CONFIRM_GUARD - Duration::from_nanos(1)
+        )
+        .is_none());
+        let selection = response_selection_from_state(
+            &hud_state,
+            &pending,
+            false,
+            shown_at + HUD_CONFIRM_GUARD,
+        )
+        .expect("400 ms guard releases the selected exact decision");
+        assert_eq!(selection.key, selected_key);
+        assert_eq!(selection.decision_index, 0);
+        assert!(super::dispatch_hud_response_selection(&pending, &manager, &selection).unwrap());
+        let host_response = receive_json(&mut app_server).await;
+        assert_eq!(host_response["id"], 102);
+        assert_eq!(host_response["result"]["decision"], "approve-b");
+        assert!(pending.get(&selected_key).is_none());
+
+        // HUD/Host won; the later CLI response cannot make a second upstream
+        // delivery. Thread A remains pending and was never answered.
+        cli.send(Message::Text(
+            json!({
+                "jsonrpc": "2.0", "id": 102, "result": { "decision": "cancel" }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        assert!(time::timeout(Duration::from_millis(100), app_server.next())
+            .await
+            .is_err());
+        assert!(pending
+            .latest_codex_for_connection_and_thread(&connection_id, "thread-a")
+            .is_some());
+
+        // CLI wins request 103. The real manager's Host route then reports
+        // AlreadyResolved and does not emit a second JSON-RPC response.
+        let cli_first = approval(103, "thread-b", "turn-b", json!(["approve", "cancel"]));
+        app_server
+            .send(Message::Text(cli_first.to_string().into()))
+            .await
+            .unwrap();
+        let _ = receive_json(&mut cli).await;
+        cli.send(Message::Text(
+            json!({
+                "jsonrpc": "2.0", "id": 103, "result": { "decision": "cancel" }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let cli_response = receive_json(&mut app_server).await;
+        assert_eq!(cli_response["result"]["decision"], "cancel");
+        assert_eq!(
+            manager
+                .respond_to_approval(&connection_id, json!(103), json!("approve"))
+                .unwrap(),
+            CodexApprovalResponseOutcome::AlreadyResolved
+        );
+        assert!(time::timeout(Duration::from_millis(100), app_server.next())
+            .await
+            .is_err());
+
+        // Reject is intentionally different from cancel: only an exact
+        // `decline` option can be selected by the Host.
+        let decline = approval(104, "thread-b", "turn-b", json!(["cancel", "decline"]));
+        app_server
+            .send(Message::Text(decline.to_string().into()))
+            .await
+            .unwrap();
+        let _ = receive_json(&mut cli).await;
+        wait_until("decline request in pending store", || pending.len() >= 2).await;
+        let (decline_key, _) = pending
+            .latest_codex_for_connection_and_thread(&connection_id, "thread-b")
+            .unwrap();
+        hud_state.sync_target(Some(&decline_key), 2, Instant::now());
+        let reject =
+            response_selection_from_state(&hud_state, &pending, true, Instant::now()).unwrap();
+        assert_eq!(reject.decision_index, 1);
+        assert!(super::dispatch_hud_response_selection(&pending, &manager, &reject).unwrap());
+        let decline_response = receive_json(&mut app_server).await;
+        assert_eq!(decline_response["id"], 104);
+        assert_eq!(decline_response["result"]["decision"], "decline");
+
+        let cancel_only = approval(105, "thread-b", "turn-b", json!(["approve", "cancel"]));
+        app_server
+            .send(Message::Text(cancel_only.to_string().into()))
+            .await
+            .unwrap();
+        let _ = receive_json(&mut cli).await;
+        wait_until("cancel-only request in pending store", || {
+            pending.len() >= 2
+        })
+        .await;
+        let (cancel_key, _) = pending
+            .latest_codex_for_connection_and_thread(&connection_id, "thread-b")
+            .unwrap();
+        hud_state.sync_target(Some(&cancel_key), 2, Instant::now());
+        assert!(
+            response_selection_from_state(&hud_state, &pending, true, Instant::now()).is_none()
+        );
+        assert!(time::timeout(Duration::from_millis(100), app_server.next())
+            .await
+            .is_err());
+        cli.send(Message::Text(
+            json!({
+                "jsonrpc": "2.0", "id": 105, "result": { "decision": "cancel" }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            receive_json(&mut app_server).await["result"]["decision"],
+            "cancel"
+        );
+
+        // A stale pure HUD target is harmless after disconnect: the runtime
+        // clears every pending request owned by that Broker connection.
+        cli.close(None).await.unwrap();
+        wait_until("disconnect clears pending approvals", || pending.is_empty()).await;
+        assert!(
+            response_selection_from_state(&hud_state, &pending, false, Instant::now()).is_none()
+        );
+        drop(activity);
+        harness.shutdown().await.unwrap();
     }
 }

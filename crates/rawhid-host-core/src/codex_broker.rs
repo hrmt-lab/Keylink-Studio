@@ -445,6 +445,8 @@ enum ManagerCommand {
 
 struct ManagerInner {
     command_tx: mpsc::UnboundedSender<ManagerCommand>,
+    #[cfg(feature = "test-support")]
+    event_tx: std_mpsc::Sender<CodexBrokerEvent>,
     event_rx: Mutex<std_mpsc::Receiver<CodexBrokerEvent>>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     status: Arc<RwLock<CodexBrokerStatus>>,
@@ -460,6 +462,9 @@ impl CodexBrokerManager {
     pub fn new() -> Self {
         let (command_tx, command_rx) = mpsc::unbounded_channel();
         let (event_tx, event_rx) = std_mpsc::channel();
+        let worker_event_tx = event_tx.clone();
+        #[cfg(not(feature = "test-support"))]
+        let _ = event_tx;
         let status = Arc::new(RwLock::new(CodexBrokerStatus::default()));
         let worker_status = status.clone();
         let approval_routes = Arc::new(Mutex::new(HashMap::new()));
@@ -475,7 +480,7 @@ impl CodexBrokerManager {
                 match runtime {
                     Ok(runtime) => runtime.block_on(manager_loop(
                         command_rx,
-                        event_tx,
+                        worker_event_tx,
                         worker_status.clone(),
                         worker_approval_routes,
                     )),
@@ -488,6 +493,8 @@ impl CodexBrokerManager {
             .expect("failed to create Codex Broker manager thread");
         let inner = Arc::new(ManagerInner {
             command_tx,
+            #[cfg(feature = "test-support")]
+            event_tx,
             event_rx: Mutex::new(event_rx),
             worker: Mutex::new(Some(worker)),
             status,
@@ -595,6 +602,102 @@ impl CodexBrokerManager {
 impl Default for CodexBrokerManager {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Test-only support for downstream integration tests. It starts the real
+/// Broker forwarding task against a caller-provided local WebSocket App
+/// Server, without launching or validating a Codex executable. This module
+/// is feature-gated and is deliberately absent from production builds.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support {
+    use std::{
+        path::PathBuf,
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
+
+    use tokio::{net::TcpListener, sync::oneshot, task::JoinHandle};
+
+    use super::{
+        BrokerRuntimeArgs, CodexBrokerManager, CodexBrokerStatus, ManagedCredential,
+        ManagedCredentialState, ManagedLaunchRegistry, LOOPBACK,
+    };
+
+    /// A real Broker task paired with its manager-facing response routes.
+    /// The App Server is intentionally supplied by the test so it remains the
+    /// only mock boundary.
+    pub struct BrokerHarness {
+        manager: CodexBrokerManager,
+        broker_addr: std::net::SocketAddr,
+        shutdown_tx: Option<oneshot::Sender<()>>,
+        task: JoinHandle<Result<(), super::CodexBrokerError>>,
+    }
+
+    impl BrokerHarness {
+        pub async fn start(
+            upstream_url: String,
+            clients: &[(&str, &str)],
+        ) -> std::io::Result<Self> {
+            let manager = CodexBrokerManager::new();
+            let listener = TcpListener::bind((LOOPBACK, 0)).await?;
+            let broker_addr = listener.local_addr()?;
+            let managed_launches = Arc::new(Mutex::new(ManagedLaunchRegistry {
+                entries: clients
+                    .iter()
+                    .enumerate()
+                    .map(|(index, (token, terminal_target_id))| ManagedCredential {
+                        token: (*token).to_string(),
+                        token_path: PathBuf::from(format!("test-broker-{index}.token")),
+                        terminal_target_id: (*terminal_target_id).to_string(),
+                        display_name: "Broker E2E test client".to_string(),
+                        state: ManagedCredentialState::Pending,
+                        deadline: None,
+                        remove_at: None,
+                    })
+                    .collect(),
+            }));
+            let (shutdown_tx, shutdown_rx) = oneshot::channel();
+            let task = tokio::spawn(super::run_broker(
+                listener,
+                shutdown_rx,
+                BrokerRuntimeArgs {
+                    upstream_url,
+                    app_server_token: "test-upstream-token".to_string(),
+                    upstream_timeout: Duration::from_secs(2),
+                    event_tx: manager.inner.event_tx.clone(),
+                    status: manager.inner.status.clone(),
+                    managed_launches,
+                    approval_routes: manager.inner.approval_routes.clone(),
+                },
+            ));
+            Ok(Self {
+                manager,
+                broker_addr,
+                shutdown_tx: Some(shutdown_tx),
+                task,
+            })
+        }
+
+        pub fn manager(&self) -> CodexBrokerManager {
+            self.manager.clone()
+        }
+
+        pub fn broker_addr(&self) -> std::net::SocketAddr {
+            self.broker_addr
+        }
+
+        pub async fn shutdown(mut self) -> Result<(), super::CodexBrokerError> {
+            let _ = self.shutdown_tx.take().map(|sender| sender.send(()));
+            self.task.await.map_err(|error| {
+                super::CodexBrokerError::Broker(format!("test Broker task failed: {error}"))
+            })?
+        }
+
+        pub fn status(&self) -> CodexBrokerStatus {
+            self.manager.status()
+        }
     }
 }
 

@@ -198,17 +198,6 @@ impl HudInteractionState {
         }
     }
 
-    /// Backwards-compatible name for the initial latest-request policy.
-    /// Explicit physical selection uses [`Self::sync_target`] instead.
-    pub fn sync_latest(
-        &mut self,
-        latest: Option<&ApprovalKey>,
-        decision_count: usize,
-        now: Instant,
-    ) {
-        self.sync_target(latest, decision_count, now);
-    }
-
     fn target(&self) -> Option<&ApprovalKey> {
         self.target.as_ref()
     }
@@ -316,7 +305,7 @@ fn replace_shown(
     true
 }
 
-fn response_selection_from_state(
+pub(crate) fn response_selection_from_state(
     interaction: &HudInteractionState,
     pending: &PendingApprovalStore,
     reject: bool,
@@ -649,7 +638,7 @@ mod tests {
         let shown_at = Instant::now();
         let mut state = HudInteractionState::default();
 
-        state.sync_latest(Some(&key), 2, shown_at);
+        state.sync_target(Some(&key), 2, shown_at);
 
         assert_eq!(state.selected_decision_index(2), Some(0));
         assert_eq!(state.shown_at(), Some(shown_at));
@@ -664,13 +653,13 @@ mod tests {
         let key = ApprovalKey::new("approval-a");
         let shown_at = Instant::now();
         let mut state = HudInteractionState::default();
-        state.sync_latest(Some(&key), 3, shown_at);
+        state.sync_target(Some(&key), 3, shown_at);
         assert_eq!(
             state.move_selection(3, HudSelectionDirection::Previous),
             Some(2)
         );
 
-        state.sync_latest(Some(&key), 3, shown_at + Duration::from_secs(1));
+        state.sync_target(Some(&key), 3, shown_at + Duration::from_secs(1));
 
         assert_eq!(state.selected_decision_index(3), Some(2));
         assert_eq!(state.shown_at(), Some(shown_at));
@@ -683,13 +672,13 @@ mod tests {
         let first_shown_at = Instant::now();
         let second_shown_at = first_shown_at + Duration::from_millis(400);
         let mut state = HudInteractionState::default();
-        state.sync_latest(Some(&first), 2, first_shown_at);
+        state.sync_target(Some(&first), 2, first_shown_at);
         assert_eq!(
             state.move_selection(2, HudSelectionDirection::Next),
             Some(1)
         );
 
-        state.sync_latest(Some(&second), 2, second_shown_at);
+        state.sync_target(Some(&second), 2, second_shown_at);
 
         assert_eq!(state.selected_decision_index(2), Some(0));
         assert_eq!(state.shown_at(), Some(second_shown_at));
@@ -704,9 +693,9 @@ mod tests {
         let key = ApprovalKey::new("approval-a");
         let shown_at = Instant::now();
         let mut state = HudInteractionState::default();
-        state.sync_latest(Some(&key), 1, shown_at);
+        state.sync_target(Some(&key), 1, shown_at);
 
-        state.sync_latest(None, 0, shown_at + Duration::from_millis(1));
+        state.sync_target(None, 0, shown_at + Duration::from_millis(1));
 
         assert_eq!(state.selected_decision_index(1), None);
         assert_eq!(state.selected_approval(1), None);
@@ -719,7 +708,7 @@ mod tests {
         let shown_at = Instant::now();
         let mut state = HudInteractionState::default();
 
-        state.sync_latest(Some(&key), 0, shown_at);
+        state.sync_target(Some(&key), 0, shown_at);
 
         assert_eq!(state.selected_decision_index(0), None);
         assert_eq!(state.move_selection(0, HudSelectionDirection::Next), None);

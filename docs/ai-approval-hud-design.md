@@ -1,6 +1,6 @@
 # ScreenKey と HUD による AI 承認・回答 設計
 
-- 状態: 段階1は実装・実機確認済み。段階2のHost側はBrokerのfirst-wins調停、HUD操作状態、物理`HOST_ACTION`接続、自動BrokerライフサイクルE2Eまで実装済み。実Codex CLI＋本番Tauri GUI、物理キー／エンコーダ／ScreenKeyによる実機確認は未完了
+- 状態: 段階1は実装・実機確認済み。段階2のHost側はBrokerのfirst-wins調停、HUD操作状態、物理`HOST_ACTION`接続、自動BrokerライフサイクルE2Eまで実装済み。2026-09-05、実Codex CLI（`codex-cli 0.153.2`）＋本番Tauri GUIでHUD表示・回答・turn完了・HUD掃除・CLI先着時のfirst-winsのライフサイクル確認まで完了。残るのは実HID（物理キー・エンコーダ・ScreenKey表示・400 ms guard・短押しReject・長押し中断）の実機確認
 - 作成日: 2026-09-03
 - 対象: Keylink Studio Host、Codex Broker、Claude Code Observer、Tauri UI、Firmware 描画
 - 対象ハードウェア: ScreenKey 4個（0.85インチ / 128×128 / ST7735）、通常キー 7個、エンコーダ 1個
@@ -458,8 +458,14 @@ Codex で提供する場合も **`Fn` 併用必須**とし、単押しでは出�
 
 **段階1が単独で意味を持つ**のが良いところで、回答機能の是非を決める前に価値を確認できる。
 
-2026-09-05現在、段階2はHost側実装と自動E2Eまで完了した。次は実Codex CLI＋本番Tauri GUIで
-Brokerライフサイクルを確認し、その後に実HIDでキー、エンコーダ、ScreenKey表示を確認する。
+2026-09-05、実Codex CLI（`codex-cli 0.153.2`）＋本番Tauri GUIでBrokerライフサイクルを確認した。
+HUDへの要求表示、`respond_to_codex_approval`によるaccept回答（`true`）、App Serverの
+`serverRequest/resolved`をBrokerがワイヤー上で観測したことを示す`reason=RequestResolved`を経た
+turn完了、HUD掃除（`pending_approvals=0`への復帰）、CLI先着＋devtools遅着のfirst-wins
+（遅着回答が`PendingApprovalStore`照会の時点で`Err`となりBrokerへ到達しないこと、TUI側の
+コマンド実行が1回のみだったこと）を確認した。ただしこの検証経路は`respond_to_codex_approval`の
+直接invokeであり、**400 ms guardと物理キー（HUD_CONFIRM_GUARD、Confirm/Reject）の経路は
+通っていない**。次は実HIDでキー、エンコーダ、ScreenKey表示、400 ms guardを確認する。
 
 ---
 
@@ -473,6 +479,13 @@ Brokerライフサイクルを確認し、その後に実HIDでキー、エン�
    `item/tool/requestUserInput` の各要求の扱い（本書は command approval を初期対象とする）
 5. Codex の `proposedExecpolicyAmendment` を適用したときの永続範囲
 6. 複数 connection が同時に承認待ちになる本番GUI／実HIDでの操作性（同一 connection の2 thread選択は自動E2E済み）
+7. **`decline` が提示されない要求での短押しReject。** 2026-09-05の実Codex CLI（`codex-cli 0.153.2`）
+   実測では、コマンド承認・ファイル編集承認のいずれも `availableDecisions` は `accept` /
+   `acceptWithExecpolicyAmendment` / `cancel` の3種のみで、`decline` は一度も提示されなかった。
+   §6.2の「❌短押し＝拒否（`decline`）」は、`decline` が無い要求では `hud_coordinator.rs` の
+   Reject選定（`decline`との完全一致を探す）が成立せずno-opになる。`decline` 不在時に短押しを
+   `cancel` へフォールバックさせるか、無効のまま明示するかは未決。実HID確認（段階2の残作業）で
+   実際の押下挙動を見てから決める
 
 ---
 

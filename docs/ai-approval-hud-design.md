@@ -1,6 +1,6 @@
 # ScreenKey と HUD による AI 承認・回答 設計
 
-- 状態: 段階1は実装・実機確認済み。段階2は`race`実機検証を反映し、Brokerのfirst-wins調停とTauri回答commandまで実装済み。物理キー／エンコーダ接続と本番実機確認は未完了
+- 状態: 段階1は実装・実機確認済み。段階2のHost側はBrokerのfirst-wins調停、HUD操作状態、物理`HOST_ACTION`接続、自動BrokerライフサイクルE2Eまで実装済み。実Codex CLI＋本番Tauri GUI、物理キー／エンコーダ／ScreenKeyによる実機確認は未完了
 - 作成日: 2026-09-03
 - 対象: Keylink Studio Host、Codex Broker、Claude Code Observer、Tauri UI、Firmware 描画
 - 対象ハードウェア: ScreenKey 4個（0.85インチ / 128×128 / ST7735）、通常キー 7個、エンコーダ 1個
@@ -332,6 +332,20 @@ localhost の mock App Server は上流だけを代替し、製品の Broker Web
 guard 後の decision、Host先行／CLI先行のfirst-wins、`decline` と `cancel` の分離、切断時の pending
 解放を自動確認した。実 Codex CLI プロセス、Tauri GUI、実HIDはこのテスト範囲外である。
 
+段階2のHost側実装は次の4コミットで構成する。
+
+| commit | 内容 |
+|---|---|
+| `37532b8` | `Pending → Resolving → Resolved`のfirst-winsと、タイムアウト済み要求を後から実行しない応答経路 |
+| `832471c` | HUDの対象・選択肢・400 ms guardを管理する操作状態 |
+| `7965aee` | 表示対象threadへ物理`HOST_ACTION`を接続し、短押しRejectを`decline`、長押しをturn中断として分離 |
+| `be35c7f` | 実Brokerとmock App Serverを接続したライフサイクルE2E |
+
+検証は`rawhid-host-core` 311件、`rawhid-host-tauri` 73件（上記E2Eを含む）がPASSし、
+本番Tauriバイナリの`cargo check`、`cargo fmt --all -- --check`、`git diff --check`もPASSした。
+レビューで修正必須の正しさの問題は残っていない。ただしこれはHost内の自動検証完了を意味し、
+実Codex CLI＋本番Tauri GUIと実HIDを通した製品全体の受け入れ完了を意味しない。
+
 ### 9.2 Claude Code（hook decision）
 
 **`claude_observer.rs:323` の 204 応答を、`PermissionRequest` に限り decision へ差し替える。**
@@ -443,6 +457,9 @@ Codex で提供する場合も **`Fn` 併用必須**とし、単押しでは出�
 | **5** | 異常時のターミナル縮退、監査ログ、Settings | 実運用に耐える |
 
 **段階1が単独で意味を持つ**のが良いところで、回答機能の是非を決める前に価値を確認できる。
+
+2026-09-05現在、段階2はHost側実装と自動E2Eまで完了した。次は実Codex CLI＋本番Tauri GUIで
+Brokerライフサイクルを確認し、その後に実HIDでキー、エンコーダ、ScreenKey表示を確認する。
 
 ---
 

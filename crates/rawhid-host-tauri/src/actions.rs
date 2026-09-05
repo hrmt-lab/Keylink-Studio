@@ -203,9 +203,9 @@ pub fn execute(
 /// The lock used to move the selection is dropped (it lives only for the
 /// `let moved = ...;` statement) before `update` is called, matching
 /// `SelectHudTarget`'s own "drop the lock used to move, then re-acquire it to
-/// render" structure: this codebase never holds the HUD lock across an
-/// emit/sync API call (see the `update` call site's comment and its history
-/// of causing an unresponsive window).
+/// render" structure. The re-acquired guard is held across `update` itself,
+/// exactly as `SelectHudTarget` has always done; the point of dropping first
+/// is only that the move and the render do not share one guard.
 fn move_hud_selection_and_render(
     app: &AppHandle,
     extras: &MonitorExtras,

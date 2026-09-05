@@ -144,7 +144,11 @@ export default function Hud() {
         <div className="max-h-32 flex-shrink-0 overflow-y-auto px-4 pb-3 pt-1">
           <ul className="space-y-0.5">
             {decisions.map((decision, index) => (
-              <li key={index} className="text-xs text-ink">
+              <li
+                key={index}
+                className={`rounded px-1 py-0.5 text-xs ${shown.selected_decision_index === index ? "bg-accent/20 text-accent-deep" : "text-ink"}`}
+              >
+                {shown.selected_decision_index === index && <span aria-hidden="true">› </span>}
                 {decisionLabel(decision)}
               </li>
             ))}

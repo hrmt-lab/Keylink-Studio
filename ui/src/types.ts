@@ -239,6 +239,9 @@ export interface HudApprovalPayload {
   reason: string | null;
   cwd: string | null;
   available_decisions: unknown[] | null;
+  /** Host-managed cursor into `available_decisions`; null when no decision
+   * can safely be selected. */
+  selected_decision_index: number | null;
 }
 
 export type HostActionKind =

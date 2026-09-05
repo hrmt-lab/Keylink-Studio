@@ -53,6 +53,8 @@ export const saveConfig = (config: AppConfig) =>
 // are intentionally handled by separate layers.
 export const getCodexIntegrationStatus = () =>
   invoke<CodexBrokerStatus>("get_codex_integration_status");
+export const respondToCodexApproval = (requestKey: string, decisionIndex: number) =>
+  invoke<boolean>("respond_to_codex_approval", { requestKey, decisionIndex });
 export const getAiClientState = () =>
   invoke<AiClientStateSnapshot>("get_ai_client_state");
 export const getAiDisplaySlots = () => invoke<AiDisplaySlots>("get_ai_display_slots");

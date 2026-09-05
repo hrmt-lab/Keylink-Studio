@@ -3,6 +3,7 @@
 /ui/dist/
 
 /rawhid-host.toml
+/.claude/settings.local.json
 *.log
 *.tmp
 *.pdb

@@ -224,12 +224,13 @@ export interface AiDisplayCandidate {
   snapshot: AiClientStateSnapshot;
 }
 
-// ─── HUD (approval display, stage 1: read-only, see docs/ai-approval-hud-design.md) ──
+// ─── HUD approval ─────────────────────────────────────────────────────────────
 
 /** Sanitized view of one pending approval request, pushed from
  * `HudApprovalPayload` (rawhid-host-tauri's hud_coordinator.rs) via the
  * "hud-approval-update" event. `null` means no approval is pending. */
 export interface HudApprovalPayload {
+  request_key: string;
   client: "codex" | "claude_code";
   oversized: boolean;
   kind: string | null;

@@ -53,9 +53,10 @@ pub use codex_activity::{
 };
 pub use codex_broker::{
     extract_command_approval_body, BrokerDirection, CodexAppServerRuntime,
-    CodexApprovalRequestBody, CodexBrokerConfig, CodexBrokerError, CodexBrokerEvent,
-    CodexBrokerManager, CodexBrokerPhase, CodexBrokerStatus, CodexClientLaunchInfo, JsonRpcKind,
-    JsonRpcMetadata, MAX_CODEX_CLIENTS, SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256,
+    CodexApprovalRequestBody, CodexApprovalResponseOutcome, CodexBrokerConfig, CodexBrokerError,
+    CodexBrokerEvent, CodexBrokerManager, CodexBrokerPhase, CodexBrokerStatus,
+    CodexClientLaunchInfo, JsonRpcKind, JsonRpcMetadata, MAX_CODEX_CLIENTS,
+    SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256,
 };
 pub use config::{
     AiClientConfig, AiClientDisplayConfig, AiUsageConfig, AppConfig, ClaudeCodeAiUsageConfig,
@@ -79,9 +80,9 @@ pub use packet::{
     FEATURE_AI_CLIENT, FEATURE_SYSTEM, PACKET_SIZE, REPORT_SIZE,
 };
 pub use pending_approval::{
-    claude_key, codex_key, ApprovalClient, ApprovalKey, ApprovalOwner, PendingApprovalBody,
-    PendingApprovalContent, PendingApprovalSnapshot, PendingApprovalStore, MAX_ENTRIES,
-    MAX_PENDING_APPROVAL_BODY_BYTES,
+    claude_key, codex_key, ApprovalClient, ApprovalKey, ApprovalOwner, CodexPendingResponse,
+    PendingApprovalBody, PendingApprovalContent, PendingApprovalSnapshot, PendingApprovalStore,
+    MAX_ENTRIES, MAX_PENDING_APPROVAL_BODY_BYTES,
 };
 pub use runner::{
     uplink_device_key, DeviceBatterySource, DeviceBatteryStatus, DeviceLayerState, RunEvent,

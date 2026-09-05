@@ -1,6 +1,7 @@
 //! Bridges `PendingApprovalStore` (`rawhid-host-core`) to the HUD window
-//! (`hud_window.rs`) for **stage 1** of `docs/ai-approval-hud-design.md`:
-//! display only, no response path (§13).
+//! (`hud_window.rs`) for the display side of
+//! `docs/ai-approval-hud-design.md`. Stage 2 adds an opaque request token
+//! to the payload so a separate Tauri command can answer the exact request.
 //!
 //! `HudCoordinator::update` is called once per host-link tick from
 //! `commands.rs`'s monitor loop, after `drain_codex_state_changes` /
@@ -61,6 +62,9 @@ const HUD_EXIT_ANIMATION: std::time::Duration = std::time::Duration::from_millis
 /// mapping table.
 #[derive(Debug, Clone, Serialize)]
 pub struct HudApprovalPayload {
+    /// Opaque correlation token returned with a response. It contains no
+    /// approval body or Broker credential.
+    pub request_key: String,
     /// `"codex"` or `"claude_code"`.
     pub client: &'static str,
     /// `true` when the body exceeded `MAX_PENDING_APPROVAL_BODY_BYTES` and
@@ -79,10 +83,11 @@ pub struct HudApprovalPayload {
 }
 
 impl HudApprovalPayload {
-    fn from_snapshot(snapshot: &PendingApprovalSnapshot) -> Self {
+    fn from_snapshot(key: &ApprovalKey, snapshot: &PendingApprovalSnapshot) -> Self {
         let client = client_label(snapshot.client);
         match &snapshot.content {
             PendingApprovalContent::Body(body) => Self {
+                request_key: key.token().to_string(),
                 client,
                 oversized: false,
                 kind: body.kind.clone(),
@@ -93,6 +98,7 @@ impl HudApprovalPayload {
                 available_decisions: body.available_decisions.clone(),
             },
             PendingApprovalContent::Oversized => Self {
+                request_key: key.token().to_string(),
                 client,
                 oversized: true,
                 kind: None,
@@ -153,9 +159,9 @@ impl HudCoordinator {
                         pending.set_protected(previous, false);
                     }
                     pending.set_protected(&key, true);
-                    *shown = Some(key);
+                    *shown = Some(key.clone());
                 }
-                let payload = Some(HudApprovalPayload::from_snapshot(&snapshot));
+                let payload = Some(HudApprovalPayload::from_snapshot(&key, &snapshot));
                 let _ = app.emit_to(HUD_WINDOW_LABEL, HUD_EVENT, payload);
                 if changed {
                     self.show();

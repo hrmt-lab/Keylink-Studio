@@ -23,7 +23,10 @@ use rawhid_host_core::{
         AiClientStateChange, AiClientStateSnapshot, CodexActivityRuntime, CodexSessionSnapshot,
         CodexStateChange,
     },
-    codex_broker::{CodexAppServerRuntime, CodexBrokerConfig, CodexBrokerPhase, CodexBrokerStatus},
+    codex_broker::{
+        CodexAppServerRuntime, CodexApprovalResponseOutcome, CodexBrokerConfig, CodexBrokerPhase,
+        CodexBrokerStatus,
+    },
     config::{
         load_config, ActionsConfig, AppConfig, ClaudeLauncherConfig, CodexLaunchEnvironment,
         CodexLauncherConfig, ConfigPaths,
@@ -478,6 +481,41 @@ pub fn get_log_entries(state: State<AppState>) -> Vec<LogEntry> {
 #[tauri::command]
 pub fn get_codex_integration_status(state: State<AppState>) -> CodexBrokerStatus {
     state.codex_broker.status()
+}
+
+/// Answers the exact Codex approval currently represented by
+/// `request_key`. `decision_index` is resolved against the retained opaque
+/// `availableDecisions` array; the frontend cannot fabricate a decision.
+#[tauri::command]
+pub fn respond_to_codex_approval(
+    request_key: String,
+    decision_index: usize,
+    state: State<AppState>,
+) -> Result<bool, String> {
+    let pending = state.codex_activity.pending_approvals();
+    let response = pending
+        .codex_response(&request_key, decision_index)
+        .ok_or_else(|| "The approval is no longer available".to_string())?;
+    let outcome = state
+        .codex_broker
+        .respond_to_approval(
+            &response.connection_id,
+            response.request_id,
+            response.decision,
+        )
+        .map_err(|error| error.to_string())?;
+    match outcome {
+        CodexApprovalResponseOutcome::Accepted => {
+            pending.resolve(&response.key);
+            Ok(true)
+        }
+        CodexApprovalResponseOutcome::AlreadyResolved
+        | CodexApprovalResponseOutcome::RequestNotFound
+        | CodexApprovalResponseOutcome::ConnectionNotFound => {
+            pending.resolve(&response.key);
+            Ok(false)
+        }
+    }
 }
 
 #[tauri::command]

@@ -1,4 +1,5 @@
 use std::{
+    collections::{HashMap, HashSet, VecDeque},
     fs,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::{Path, PathBuf},
@@ -73,6 +74,8 @@ pub const MAX_CODEX_CLIENTS: usize = 8;
 const MANAGED_LAUNCH_PENDING_TIMEOUT: Duration = Duration::from_secs(30);
 const MANAGED_LAUNCH_RECONNECT_GRACE: Duration = Duration::from_secs(3);
 const MANAGED_LAUNCH_RESULT_RETENTION: Duration = Duration::from_secs(10);
+const APPROVAL_RESPONSE_TIMEOUT: Duration = Duration::from_secs(5);
+const MAX_RESOLVED_APPROVAL_IDS: usize = 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CodexAppServerRuntime {
@@ -313,6 +316,118 @@ pub enum CodexBrokerError {
     ManagerUnavailable,
 }
 
+/// Result of attempting to answer a Codex approval through the Broker.
+/// `Accepted` is the only case in which a response was written upstream.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CodexApprovalResponseOutcome {
+    Accepted,
+    AlreadyResolved,
+    RequestNotFound,
+    ConnectionNotFound,
+}
+
+struct ApprovalResponseCommand {
+    request_id: Value,
+    decision: Value,
+    reply: std_mpsc::Sender<CodexApprovalResponseOutcome>,
+    state: Arc<ApprovalResponseState>,
+}
+
+#[derive(Default)]
+struct ApprovalResponseState(AtomicUsize);
+
+impl ApprovalResponseState {
+    const QUEUED: usize = 0;
+    const EXECUTING: usize = 1;
+    const CANCELLED: usize = 2;
+
+    fn try_start(&self) -> bool {
+        self.transition_from_queued(Self::EXECUTING)
+    }
+
+    fn try_cancel(&self) -> bool {
+        self.transition_from_queued(Self::CANCELLED)
+    }
+
+    fn transition_from_queued(&self, next: usize) -> bool {
+        self.0
+            .compare_exchange(Self::QUEUED, next, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+    }
+}
+
+fn wait_for_approval_response(
+    reply_rx: std_mpsc::Receiver<CodexApprovalResponseOutcome>,
+    state: &ApprovalResponseState,
+    timeout: Duration,
+) -> Result<CodexApprovalResponseOutcome, CodexBrokerError> {
+    match reply_rx.recv_timeout(timeout) {
+        Ok(outcome) => Ok(outcome),
+        Err(std_mpsc::RecvTimeoutError::Timeout) if !state.try_cancel() => {
+            // Execution already won the race. Wait for its result instead of
+            // reporting a timeout while the response may still be sent upstream.
+            reply_rx.recv().map_err(|error| {
+                CodexBrokerError::Broker(format!("approval response was not completed: {error}"))
+            })
+        }
+        Err(error) => {
+            // Also invalidate queued work if the reply channel disconnected.
+            state.try_cancel();
+            Err(CodexBrokerError::Broker(format!(
+                "approval response was not completed: {error}"
+            )))
+        }
+    }
+}
+
+#[derive(Default)]
+struct ApprovalArbiter {
+    pending: HashSet<String>,
+    resolved: HashSet<String>,
+    resolved_order: VecDeque<String>,
+}
+
+impl ApprovalArbiter {
+    fn observe_request(&mut self, request_id: &Value) {
+        let token = approval_id_token(request_id);
+        self.resolved.remove(&token);
+        self.resolved_order.retain(|existing| existing != &token);
+        self.pending.insert(token);
+    }
+
+    fn observe_resolved(&mut self, request_id: &Value) {
+        let token = approval_id_token(request_id);
+        self.pending.remove(&token);
+        self.mark_resolved(token);
+    }
+
+    fn claim(&mut self, request_id: &Value) -> CodexApprovalResponseOutcome {
+        let token = approval_id_token(request_id);
+        if self.pending.remove(&token) {
+            self.mark_resolved(token);
+            CodexApprovalResponseOutcome::Accepted
+        } else if self.resolved.contains(&token) {
+            CodexApprovalResponseOutcome::AlreadyResolved
+        } else {
+            CodexApprovalResponseOutcome::RequestNotFound
+        }
+    }
+
+    fn mark_resolved(&mut self, token: String) {
+        if self.resolved.insert(token.clone()) {
+            self.resolved_order.push_back(token);
+        }
+        while self.resolved_order.len() > MAX_RESOLVED_APPROVAL_IDS {
+            if let Some(oldest) = self.resolved_order.pop_front() {
+                self.resolved.remove(&oldest);
+            }
+        }
+    }
+}
+
+type ApprovalResponseRoutes =
+    Arc<Mutex<HashMap<String, mpsc::UnboundedSender<ApprovalResponseCommand>>>>;
+
 enum ManagerCommand {
     Start(
         CodexBrokerConfig,
@@ -333,6 +448,7 @@ struct ManagerInner {
     event_rx: Mutex<std_mpsc::Receiver<CodexBrokerEvent>>,
     worker: Mutex<Option<thread::JoinHandle<()>>>,
     status: Arc<RwLock<CodexBrokerStatus>>,
+    approval_routes: ApprovalResponseRoutes,
 }
 
 #[derive(Clone)]
@@ -346,6 +462,8 @@ impl CodexBrokerManager {
         let (event_tx, event_rx) = std_mpsc::channel();
         let status = Arc::new(RwLock::new(CodexBrokerStatus::default()));
         let worker_status = status.clone();
+        let approval_routes = Arc::new(Mutex::new(HashMap::new()));
+        let worker_approval_routes = approval_routes.clone();
         let worker = thread::Builder::new()
             .name("codex-broker-manager".to_string())
             .spawn(move || {
@@ -355,9 +473,12 @@ impl CodexBrokerManager {
                     .thread_name("codex-broker-runtime")
                     .build();
                 match runtime {
-                    Ok(runtime) => {
-                        runtime.block_on(manager_loop(command_rx, event_tx, worker_status.clone()))
-                    }
+                    Ok(runtime) => runtime.block_on(manager_loop(
+                        command_rx,
+                        event_tx,
+                        worker_status.clone(),
+                        worker_approval_routes,
+                    )),
                     Err(error) => set_error_status(
                         &worker_status,
                         format!("failed to create Broker runtime: {error}"),
@@ -370,6 +491,7 @@ impl CodexBrokerManager {
             event_rx: Mutex::new(event_rx),
             worker: Mutex::new(Some(worker)),
             status,
+            approval_routes,
         });
         Self { inner }
     }
@@ -435,6 +557,38 @@ impl CodexBrokerManager {
         timeout: Duration,
     ) -> Result<CodexBrokerEvent, std_mpsc::RecvTimeoutError> {
         self.inner.event_rx.lock().unwrap().recv_timeout(timeout)
+    }
+
+    /// Sends one HUD-selected decision to the App Server connection that
+    /// owns `request_id`. The per-connection arbiter serializes this with
+    /// the CLI's own response, so exactly one side can return `Accepted`.
+    pub fn respond_to_approval(
+        &self,
+        connection_id: &str,
+        request_id: Value,
+        decision: Value,
+    ) -> Result<CodexApprovalResponseOutcome, CodexBrokerError> {
+        let route = self
+            .inner
+            .approval_routes
+            .lock()
+            .unwrap()
+            .get(connection_id)
+            .cloned();
+        let Some(route) = route else {
+            return Ok(CodexApprovalResponseOutcome::ConnectionNotFound);
+        };
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        let state = Arc::new(ApprovalResponseState::default());
+        route
+            .send(ApprovalResponseCommand {
+                request_id,
+                decision,
+                reply: reply_tx,
+                state: state.clone(),
+            })
+            .map_err(|_| CodexBrokerError::ManagerUnavailable)?;
+        wait_for_approval_response(reply_rx, &state, APPROVAL_RESPONSE_TIMEOUT)
     }
 }
 
@@ -607,6 +761,7 @@ async fn manager_loop(
     mut command_rx: mpsc::UnboundedReceiver<ManagerCommand>,
     event_tx: std_mpsc::Sender<CodexBrokerEvent>,
     status: Arc<RwLock<CodexBrokerStatus>>,
+    approval_routes: ApprovalResponseRoutes,
 ) {
     let mut session: Option<Session> = None;
     let mut health_tick = time::interval(Duration::from_millis(250));
@@ -620,7 +775,12 @@ async fn manager_loop(
                             Err(CodexBrokerError::InvalidConfig("Codex integration is already running".to_string()))
                         } else {
                             set_starting_status(&status, &config);
-                            match start_session(config, event_tx.clone(), status.clone()).await {
+                            match start_session(
+                                config,
+                                event_tx.clone(),
+                                status.clone(),
+                                approval_routes.clone(),
+                            ).await {
                                 Ok(started) => {
                                     session = Some(started);
                                     Ok(status.read().unwrap().clone())
@@ -755,6 +915,7 @@ async fn start_session(
     config: CodexBrokerConfig,
     event_tx: std_mpsc::Sender<CodexBrokerEvent>,
     status: Arc<RwLock<CodexBrokerStatus>>,
+    approval_routes: ApprovalResponseRoutes,
 ) -> Result<Session, CodexBrokerError> {
     config.validate()?;
     ensure_port_available(config.app_server_port, "App Server").await?;
@@ -888,6 +1049,7 @@ async fn start_session(
                 event_tx: broker_events,
                 status: broker_status,
                 managed_launches: broker_launches,
+                approval_routes,
             },
         )
         .await
@@ -1099,6 +1261,7 @@ async fn run_broker(
                     event_tx: args.event_tx.clone(),
                     status: args.status.clone(),
                     managed_launches: args.managed_launches.clone(),
+                    approval_routes: args.approval_routes.clone(),
                     shutdown_rx: connection_shutdown.subscribe(),
                 };
                 connections.spawn(async move { handle_connection(socket, args).await });
@@ -1135,6 +1298,7 @@ struct BrokerRuntimeArgs {
     event_tx: std_mpsc::Sender<CodexBrokerEvent>,
     status: Arc<RwLock<CodexBrokerStatus>>,
     managed_launches: Arc<Mutex<ManagedLaunchRegistry>>,
+    approval_routes: ApprovalResponseRoutes,
 }
 
 struct ConnectionArgs {
@@ -1147,6 +1311,7 @@ struct ConnectionArgs {
     event_tx: std_mpsc::Sender<CodexBrokerEvent>,
     status: Arc<RwLock<CodexBrokerStatus>>,
     managed_launches: Arc<Mutex<ManagedLaunchRegistry>>,
+    approval_routes: ApprovalResponseRoutes,
     shutdown_rx: broadcast::Receiver<()>,
 }
 
@@ -1262,6 +1427,11 @@ async fn handle_connection(
     accept_upgrade(&mut downstream, &request.websocket_key).await?;
     let downstream = WebSocketStream::from_raw_socket(downstream, Role::Server, None).await;
     let connection_id = random_identifier()?;
+    let (approval_tx, approval_rx) = mpsc::unbounded_channel();
+    args.approval_routes
+        .lock()
+        .unwrap()
+        .insert(connection_id.clone(), approval_tx);
     slot_guard.promote();
     args.reconnect_generation.fetch_add(1, Ordering::AcqRel);
     sync_connection_status(
@@ -1281,8 +1451,10 @@ async fn handle_connection(
         &connection_id,
         &args.event_tx,
         &mut args.shutdown_rx,
+        approval_rx,
     )
     .await;
+    args.approval_routes.lock().unwrap().remove(&connection_id);
     drop(slot_guard);
     let remaining = sync_connection_status(
         &args.status,
@@ -1323,12 +1495,14 @@ async fn forward_messages<Upstream>(
     connection_id: &str,
     event_tx: &std_mpsc::Sender<CodexBrokerEvent>,
     shutdown_rx: &mut broadcast::Receiver<()>,
+    mut approval_rx: mpsc::UnboundedReceiver<ApprovalResponseCommand>,
 ) -> &'static str
 where
     Upstream: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     let (mut downstream_write, mut downstream_read) = downstream.split();
     let (mut upstream_write, mut upstream_read) = upstream.split();
+    let mut approval_arbiter = ApprovalArbiter::default();
     loop {
         tokio::select! {
             _ = shutdown_rx.recv() => {
@@ -1341,7 +1515,23 @@ where
                     let _ = upstream_write.send(Message::Close(None)).await;
                     return "cli";
                 };
+                let metadata = message_metadata(&message);
                 emit_message_metadata(event_tx, connection_id, BrokerDirection::CliToAppServer, &message);
+                if let Some(metadata) = metadata.as_ref() {
+                    if metadata.kind == JsonRpcKind::Response {
+                        if let Some(id) = metadata.id.as_ref() {
+                            let outcome = approval_arbiter.claim(id);
+                            if outcome == CodexApprovalResponseOutcome::AlreadyResolved {
+                                tracing::debug!(
+                                    %connection_id,
+                                    request_id = %approval_id_token(id),
+                                    "ignored late Codex CLI approval response"
+                                );
+                                continue;
+                            }
+                        }
+                    }
+                }
                 let closed = message.is_close();
                 if upstream_write.send(message).await.is_err() || closed {
                     return "cli";
@@ -1352,13 +1542,79 @@ where
                     let _ = downstream_write.send(Message::Close(None)).await;
                     return "app_server";
                 };
+                let metadata = message_metadata(&message);
                 emit_message_metadata(event_tx, connection_id, BrokerDirection::AppServerToCli, &message);
+                if let Some(metadata) = metadata.as_ref() {
+                    if metadata.kind == JsonRpcKind::Request
+                        && metadata.method.as_deref()
+                            == Some("item/commandExecution/requestApproval")
+                    {
+                        if let Some(id) = metadata.id.as_ref() {
+                            approval_arbiter.observe_request(id);
+                        }
+                    } else if metadata.method.as_deref() == Some("serverRequest/resolved") {
+                        if let Some(id) = metadata.request_id.as_ref() {
+                            approval_arbiter.observe_resolved(id);
+                        }
+                    }
+                }
                 let closed = message.is_close();
                 if downstream_write.send(message).await.is_err() || closed {
                     return "app_server";
                 }
             }
+            command = approval_rx.recv() => {
+                let Some(command) = command else { continue };
+                if !command.state.try_start() {
+                    continue;
+                }
+                let outcome = approval_arbiter.claim(&command.request_id);
+                let outcome = if outcome == CodexApprovalResponseOutcome::Accepted {
+                    let response = Message::Text(serde_json::json!({
+                        "jsonrpc": "2.0",
+                        "id": command.request_id,
+                        "result": { "decision": command.decision },
+                    }).to_string().into());
+                    emit_message_metadata(
+                        event_tx,
+                        connection_id,
+                        BrokerDirection::CliToAppServer,
+                        &response,
+                    );
+                    if upstream_write.send(response).await.is_err() {
+                        let _ = command.reply.send(CodexApprovalResponseOutcome::RequestNotFound);
+                        return "app_server";
+                    }
+                    CodexApprovalResponseOutcome::Accepted
+                } else {
+                    tracing::debug!(
+                        %connection_id,
+                        request_id = %approval_id_token(&command.request_id),
+                        ?outcome,
+                        "ignored Codex HUD approval response"
+                    );
+                    outcome
+                };
+                let _ = command.reply.send(outcome);
+            }
         }
+    }
+}
+
+fn message_metadata(message: &Message) -> Option<JsonRpcMetadata> {
+    match message {
+        Message::Text(text) => Some(classify_json_rpc(text.as_str())),
+        Message::Binary(_) => Some(empty_metadata(JsonRpcKind::Binary)),
+        _ => None,
+    }
+}
+
+fn approval_id_token(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::String(value) => format!("s:{value}"),
+        Value::Number(value) => format!("n:{value}"),
+        other => format!("?:{other}"),
     }
 }
 
@@ -2184,9 +2440,10 @@ mod tests {
     use super::{
         classify_json_rpc, compatible_codex_versions, compatible_schema_sha256,
         complete_reconnect_grace, extract_command_approval_body, schema_is_compatible,
-        select_codex_executable, std_mpsc, try_acquire_client_slot, BrokerDirection,
-        BrokerRuntimeArgs, CodexBrokerEvent, CodexBrokerPhase, CodexBrokerStatus, JsonRpcKind,
-        MAX_CODEX_CLIENTS, SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256,
+        select_codex_executable, std_mpsc, try_acquire_client_slot, ApprovalArbiter,
+        BrokerDirection, BrokerRuntimeArgs, CodexApprovalResponseOutcome, CodexBrokerEvent,
+        CodexBrokerPhase, CodexBrokerStatus, JsonRpcKind, MAX_CODEX_CLIENTS,
+        SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256,
     };
     use futures_util::{SinkExt, StreamExt};
     use serde_json::Value;
@@ -2195,6 +2452,119 @@ mod tests {
         accept_async, connect_async,
         tungstenite::{client::IntoClientRequest, protocol::Message},
     };
+
+    #[test]
+    fn approval_timeout_cancels_queued_command_before_execution() {
+        let state = Arc::new(super::ApprovalResponseState::default());
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        let (route, mut commands) = tokio::sync::mpsc::unbounded_channel();
+        route
+            .send(super::ApprovalResponseCommand {
+                request_id: serde_json::json!(1),
+                decision: serde_json::json!("accept"),
+                reply: reply_tx,
+                state: state.clone(),
+            })
+            .unwrap();
+
+        assert!(super::wait_for_approval_response(reply_rx, &state, Duration::ZERO).is_err());
+        let command = commands.try_recv().unwrap();
+        assert!(!command.state.try_start());
+    }
+
+    #[test]
+    fn approval_timeout_waits_for_execution_that_already_started() {
+        let state = Arc::new(super::ApprovalResponseState::default());
+        assert!(state.try_start());
+        let (reply_tx, reply_rx) = std_mpsc::channel();
+        let (result_tx, result_rx) = std_mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            result_tx
+                .send(super::wait_for_approval_response(
+                    reply_rx,
+                    &state,
+                    Duration::ZERO,
+                ))
+                .unwrap();
+        });
+
+        assert!(matches!(
+            result_rx.recv_timeout(Duration::from_millis(20)),
+            Err(std_mpsc::RecvTimeoutError::Timeout)
+        ));
+        reply_tx
+            .send(CodexApprovalResponseOutcome::Accepted)
+            .unwrap();
+        assert_eq!(
+            result_rx
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap()
+                .unwrap(),
+            CodexApprovalResponseOutcome::Accepted
+        );
+        waiter.join().unwrap();
+    }
+
+    #[test]
+    fn approval_start_and_cancellation_have_only_one_winner() {
+        for _ in 0..32 {
+            let state = Arc::new(super::ApprovalResponseState::default());
+            let barrier = Arc::new(std::sync::Barrier::new(2));
+            let executor_state = state.clone();
+            let executor_barrier = barrier.clone();
+            let executor = std::thread::spawn(move || {
+                executor_barrier.wait();
+                executor_state.try_start()
+            });
+            barrier.wait();
+            let cancelled = state.try_cancel();
+            let started = executor.join().unwrap();
+            assert_ne!(cancelled, started);
+            assert!(!state.try_start());
+            assert!(!state.try_cancel());
+        }
+    }
+
+    #[test]
+    fn hud_claim_wins_and_late_cli_response_is_rejected() {
+        let mut arbiter = ApprovalArbiter::default();
+        let id = serde_json::json!(17);
+        arbiter.observe_request(&id);
+
+        assert_eq!(arbiter.claim(&id), CodexApprovalResponseOutcome::Accepted);
+        assert_eq!(
+            arbiter.claim(&id),
+            CodexApprovalResponseOutcome::AlreadyResolved
+        );
+    }
+
+    #[test]
+    fn cli_claim_wins_and_late_hud_response_is_rejected() {
+        let mut arbiter = ApprovalArbiter::default();
+        let id = serde_json::json!("approval-1");
+        arbiter.observe_request(&id);
+
+        assert_eq!(arbiter.claim(&id), CodexApprovalResponseOutcome::Accepted);
+        assert_eq!(
+            arbiter.claim(&id),
+            CodexApprovalResponseOutcome::AlreadyResolved
+        );
+    }
+
+    #[test]
+    fn app_server_resolution_closes_the_race_and_id_reuse_starts_a_new_one() {
+        let mut arbiter = ApprovalArbiter::default();
+        let id = serde_json::json!(3);
+        arbiter.observe_request(&id);
+        arbiter.observe_resolved(&id);
+        assert_eq!(
+            arbiter.claim(&id),
+            CodexApprovalResponseOutcome::AlreadyResolved
+        );
+
+        arbiter.observe_request(&id);
+        assert_eq!(arbiter.claim(&id), CodexApprovalResponseOutcome::Accepted);
+    }
 
     #[test]
     fn compatibility_gate_accepts_only_verified_releases() {
@@ -2485,6 +2855,7 @@ mod tests {
                 event_tx,
                 status: broker_status,
                 managed_launches: test_managed_launches(&["client-token-a", "client-token-b"]),
+                approval_routes: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             },
         ));
 
@@ -2577,6 +2948,203 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn broker_forwards_only_the_first_cli_or_hud_approval_response() {
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let (upstream_tx, upstream_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            let (socket, _) = upstream_listener.accept().await.unwrap();
+            upstream_tx
+                .send(accept_async(socket).await.unwrap())
+                .unwrap();
+        });
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let broker_addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = oneshot::channel();
+        let (event_tx, event_rx) = std::sync::mpsc::channel();
+        let status = Arc::new(RwLock::new(CodexBrokerStatus::default()));
+        let approval_routes = Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()));
+        let broker = tokio::spawn(super::run_broker(
+            listener,
+            shutdown_rx,
+            BrokerRuntimeArgs {
+                upstream_url: format!("ws://{upstream_addr}"),
+                app_server_token: "upstream-token".to_string(),
+                upstream_timeout: Duration::from_secs(2),
+                event_tx,
+                status,
+                managed_launches: test_managed_launches(&["client-token"]),
+                approval_routes: approval_routes.clone(),
+            },
+        ));
+
+        let mut request = format!("ws://{broker_addr}").into_client_request().unwrap();
+        request
+            .headers_mut()
+            .insert("authorization", "Bearer client-token".parse().unwrap());
+        let (mut cli, _) = connect_async(request).await.unwrap();
+        let mut app_server = upstream_rx.await.unwrap();
+        let connection_id = loop {
+            if let CodexBrokerEvent::ManagedClientConnected { connection_id, .. } =
+                event_rx.recv_timeout(Duration::from_secs(2)).unwrap()
+            {
+                break connection_id;
+            }
+        };
+        let route = approval_routes
+            .lock()
+            .unwrap()
+            .get(&connection_id)
+            .cloned()
+            .unwrap();
+
+        let request_one = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "item/commandExecution/requestApproval",
+            "params": { "availableDecisions": ["accept", "cancel"] }
+        });
+        app_server
+            .send(Message::Text(request_one.to_string().into()))
+            .await
+            .unwrap();
+        cli.next().await.unwrap().unwrap();
+        let (hud_reply_tx, hud_reply_rx) = std_mpsc::channel();
+        route
+            .send(super::ApprovalResponseCommand {
+                request_id: serde_json::json!(1),
+                decision: serde_json::json!("accept"),
+                reply: hud_reply_tx,
+                state: Arc::new(super::ApprovalResponseState::default()),
+            })
+            .unwrap();
+        let hud_response: Value =
+            serde_json::from_str(app_server.next().await.unwrap().unwrap().to_text().unwrap())
+                .unwrap();
+        assert_eq!(hud_response["result"]["decision"], "accept");
+        assert_eq!(
+            hud_reply_rx.recv().unwrap(),
+            CodexApprovalResponseOutcome::Accepted
+        );
+        cli.send(Message::Text(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": { "decision": "cancel" }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        assert!(time::timeout(Duration::from_millis(100), app_server.next())
+            .await
+            .is_err());
+
+        let request_two = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "item/commandExecution/requestApproval",
+            "params": { "availableDecisions": ["accept", "cancel"] }
+        });
+        app_server
+            .send(Message::Text(request_two.to_string().into()))
+            .await
+            .unwrap();
+        cli.next().await.unwrap().unwrap();
+        cli.send(Message::Text(
+            serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": { "decision": "cancel" }
+            })
+            .to_string()
+            .into(),
+        ))
+        .await
+        .unwrap();
+        let cli_response: Value =
+            serde_json::from_str(app_server.next().await.unwrap().unwrap().to_text().unwrap())
+                .unwrap();
+        assert_eq!(cli_response["result"]["decision"], "cancel");
+        let (late_hud_tx, late_hud_rx) = std_mpsc::channel();
+        route
+            .send(super::ApprovalResponseCommand {
+                request_id: serde_json::json!(2),
+                decision: serde_json::json!("accept"),
+                reply: late_hud_tx,
+                state: Arc::new(super::ApprovalResponseState::default()),
+            })
+            .unwrap();
+        assert_eq!(
+            late_hud_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            CodexApprovalResponseOutcome::AlreadyResolved
+        );
+        assert!(time::timeout(Duration::from_millis(100), app_server.next())
+            .await
+            .is_err());
+
+        // A timed-out queued command must neither reach upstream nor claim
+        // the approval: a later valid HUD response can still answer it.
+        app_server
+            .send(Message::Text(
+                serde_json::json!({
+                    "jsonrpc": "2.0",
+                    "id": 3,
+                    "method": "item/commandExecution/requestApproval",
+                    "params": { "availableDecisions": ["accept", "cancel"] }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        cli.next().await.unwrap().unwrap();
+        let cancelled_state = Arc::new(super::ApprovalResponseState::default());
+        let (cancelled_tx, cancelled_rx) = std_mpsc::channel();
+        assert!(
+            super::wait_for_approval_response(cancelled_rx, &cancelled_state, Duration::ZERO)
+                .is_err()
+        );
+        route
+            .send(super::ApprovalResponseCommand {
+                request_id: serde_json::json!(3),
+                decision: serde_json::json!("accept"),
+                reply: cancelled_tx,
+                state: cancelled_state,
+            })
+            .unwrap();
+        let (valid_tx, valid_rx) = std_mpsc::channel();
+        route
+            .send(super::ApprovalResponseCommand {
+                request_id: serde_json::json!(3),
+                decision: serde_json::json!("cancel"),
+                reply: valid_tx,
+                state: Arc::new(super::ApprovalResponseState::default()),
+            })
+            .unwrap();
+        let response = time::timeout(Duration::from_secs(2), app_server.next())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let response: Value = serde_json::from_str(response.to_text().unwrap()).unwrap();
+        assert_eq!(response["id"], 3);
+        assert_eq!(response["result"]["decision"], "cancel");
+        assert_eq!(
+            valid_rx.recv_timeout(Duration::from_secs(2)).unwrap(),
+            CodexApprovalResponseOutcome::Accepted
+        );
+        assert!(time::timeout(Duration::from_millis(100), app_server.next())
+            .await
+            .is_err());
+
+        let _ = shutdown_tx.send(());
+        broker.await.unwrap().unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn broker_rejects_an_unissued_capability_after_eight_managed_clients() {
         let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let upstream_addr = upstream_listener.local_addr().unwrap();
@@ -2622,6 +3190,7 @@ mod tests {
                     "client-token-6",
                     "client-token-7",
                 ]),
+                approval_routes: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
             },
         ));
 

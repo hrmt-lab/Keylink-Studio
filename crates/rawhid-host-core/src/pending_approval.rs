@@ -69,22 +69,61 @@ pub enum ApprovalOwner {
 ///
 /// Build this with [`codex_key`] or [`claude_key`]; the store itself
 /// treats it as an opaque handle.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ApprovalKey(String);
+#[derive(Debug, Clone)]
+pub struct ApprovalKey {
+    token: String,
+    codex_target: Option<CodexApprovalTarget>,
+}
+
+#[derive(Debug, Clone)]
+struct CodexApprovalTarget {
+    connection_id: String,
+    request_id: Value,
+}
+
+impl PartialEq for ApprovalKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.token == other.token
+    }
+}
+
+impl Eq for ApprovalKey {}
+
+impl std::hash::Hash for ApprovalKey {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.token.hash(state);
+    }
+}
 
 impl ApprovalKey {
     pub fn new(value: impl Into<String>) -> Self {
-        Self(value.into())
+        Self {
+            token: value.into(),
+            codex_target: None,
+        }
+    }
+
+    /// Opaque identifier sent to the HUD and returned with an answer. It
+    /// contains no request body or credential.
+    pub fn token(&self) -> &str {
+        &self.token
+    }
+
+    fn codex_target(&self) -> Option<&CodexApprovalTarget> {
+        self.codex_target.as_ref()
     }
 }
 
 /// Builds the correlation key for a Codex `requestApproval`, from the
 /// Broker connection id and the request's JSON-RPC id.
 pub fn codex_key(connection_id: &str, request_id: &Value) -> ApprovalKey {
-    ApprovalKey::new(format!(
-        "codex:{connection_id}:{}",
-        json_rpc_id_token(request_id)
-    ))
+    ApprovalKey {
+        token: format!("codex:{connection_id}:{}", json_rpc_id_token(request_id)),
+        codex_target: Some(CodexApprovalTarget {
+            connection_id: connection_id.to_string(),
+            request_id: request_id.clone(),
+        }),
+    }
 }
 
 /// Builds the correlation key for a Claude Code `PermissionRequest`, from
@@ -171,6 +210,16 @@ pub struct PendingApprovalSnapshot {
     pub client: ApprovalClient,
     pub content: PendingApprovalContent,
     pub protected: bool,
+}
+
+/// Validated routing data for one Codex HUD answer. The decision is cloned
+/// directly from that request's opaque `availableDecisions` array.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodexPendingResponse {
+    pub key: ApprovalKey,
+    pub connection_id: String,
+    pub request_id: Value,
+    pub decision: Value,
 }
 
 struct Entry {
@@ -307,6 +356,38 @@ impl PendingApprovalStore {
             client: entry.client,
             content: entry.content.clone(),
             protected: entry.protected,
+        })
+    }
+
+    /// Looks up a HUD answer by its opaque request token and decision index.
+    /// The caller never supplies a reconstructed decision value.
+    pub fn codex_response(
+        &self,
+        request_token: &str,
+        decision_index: usize,
+    ) -> Option<CodexPendingResponse> {
+        let inner = self.inner.lock().unwrap();
+        let (key, entry) = inner
+            .entries
+            .iter()
+            .find(|(key, _)| key.token() == request_token)?;
+        if entry.client != ApprovalClient::Codex {
+            return None;
+        }
+        let target = key.codex_target()?;
+        let PendingApprovalContent::Body(body) = &entry.content else {
+            return None;
+        };
+        let decision = body
+            .available_decisions
+            .as_ref()?
+            .get(decision_index)?
+            .clone();
+        Some(CodexPendingResponse {
+            key: key.clone(),
+            connection_id: target.connection_id.clone(),
+            request_id: target.request_id.clone(),
+            decision,
         })
     }
 
@@ -635,5 +716,38 @@ mod tests {
             }
             PendingApprovalContent::Oversized => panic!("unexpected oversized marker"),
         }
+    }
+
+    #[test]
+    fn codex_response_returns_the_exact_offered_decision_and_route() {
+        let store = PendingApprovalStore::new();
+        let request_id = serde_json::json!(42);
+        let key = codex_key("connection-a", &request_id);
+        let decisions = vec![
+            serde_json::json!("accept"),
+            serde_json::json!({
+                "acceptWithExecpolicyAmendment": {
+                    "execpolicy_amendment": ["mkdir"]
+                }
+            }),
+            serde_json::json!("cancel"),
+        ];
+        let mut approval = body("mkdir foo");
+        approval.available_decisions = Some(decisions.clone());
+        store.insert(
+            key.clone(),
+            ApprovalClient::Codex,
+            codex_owner("connection-a"),
+            approval,
+        );
+
+        let response = store
+            .codex_response(key.token(), 1)
+            .expect("valid response target");
+        assert_eq!(response.key, key);
+        assert_eq!(response.connection_id, "connection-a");
+        assert_eq!(response.request_id, request_id);
+        assert_eq!(response.decision, decisions[1]);
+        assert!(store.codex_response(response.key.token(), 3).is_none());
     }
 }

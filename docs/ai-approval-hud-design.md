@@ -1,6 +1,6 @@
 # ScreenKey と HUD による AI 承認・回答 設計
 
-- 状態: 段階1は実装・実機確認済み。段階2は`race`実機検証を反映して設計確定、実装未着手
+- 状態: 段階1は実装・実機確認済み。段階2は`race`実機検証を反映し、Brokerのfirst-wins調停とTauri回答commandまで実装済み。物理キー／エンコーダ接続と本番実機確認は未完了
 - 作成日: 2026-09-03
 - 対象: Keylink Studio Host、Codex Broker、Claude Code Observer、Tauri UI、Firmware 描画
 - 対象ハードウェア: ScreenKey 4個（0.85インチ / 128×128 / ST7735）、通常キー 7個、エンコーダ 1個

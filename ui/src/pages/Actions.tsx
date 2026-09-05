@@ -28,6 +28,11 @@ const ACTION_KINDS: HostActionKind[] = [
   "refresh_ai_usage",
   "cycle_ai_session",
   "focus_ai_terminal",
+  "hud_previous",
+  "hud_next",
+  "hud_confirm",
+  "hud_reject",
+  "select_hud_target",
   "launch",
   "open_folder",
 ];

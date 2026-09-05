@@ -1,6 +1,7 @@
 /target/
 /ui/node_modules/
 /ui/dist/
+/diagnostics/
 
 /rawhid-host.toml
 /.claude/settings.local.json

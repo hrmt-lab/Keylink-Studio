@@ -252,7 +252,12 @@ export type HostActionKind =
   | "cycle_ai_session"
   | "launch"
   | "open_folder"
-  | "focus_ai_terminal";
+  | "focus_ai_terminal"
+  | "hud_previous"
+  | "hud_next"
+  | "hud_confirm"
+  | "hud_reject"
+  | "select_hud_target";
 
 export interface ActionBinding {
   action_id: number;

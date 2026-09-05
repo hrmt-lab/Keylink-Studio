@@ -20,7 +20,10 @@
 //! response are all untouched (out of scope for stage 1, §13/§15 of the
 //! design doc).
 
-use std::{sync::Mutex, time::Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant,
+};
 
 use rawhid_host_core::pending_approval::{
     ApprovalClient, ApprovalKey, PendingApprovalContent, PendingApprovalSnapshot,
@@ -54,6 +57,10 @@ const HUD_LOGICAL_MARGIN: f64 = 20.0;
 /// The window stays visible for this long after the payload is cleared so
 /// the animation can finish; keep the two in step.
 const HUD_EXIT_ANIMATION: std::time::Duration = std::time::Duration::from_millis(160);
+/// Confirming immediately after the HUD appears is likely to be the tail of
+/// the key press that opened or selected it. Reject remains deliberately
+/// outside this guard as the user's escape route.
+pub const HUD_CONFIRM_GUARD: std::time::Duration = std::time::Duration::from_millis(400);
 
 /// Sanitized, display-only view of one pending approval request, sent to
 /// the HUD webview. Field names intentionally mirror
@@ -157,13 +164,18 @@ pub struct HudInteractionState {
     target: Option<ApprovalKey>,
     selected_decision_index: Option<usize>,
     shown_at: Option<Instant>,
+    /// Exactly one physical HUD response may be in flight globally. It is
+    /// intentionally not tied to `target`: the target can change while its
+    /// previous Broker response is finishing, and that completion must never
+    /// unlock a newer request.
+    response_in_flight: Option<ApprovalKey>,
 }
 
 impl HudInteractionState {
     /// Synchronizes this state with the latest pending request. Only a
     /// changed opaque key resets the selection and display-start timestamp;
     /// ordinary periodic updates for the same request preserve both.
-    pub fn sync_latest(
+    pub fn sync_target(
         &mut self,
         latest: Option<&ApprovalKey>,
         decision_count: usize,
@@ -184,6 +196,21 @@ impl HudInteractionState {
                 self.shown_at = None;
             }
         }
+    }
+
+    /// Backwards-compatible name for the initial latest-request policy.
+    /// Explicit physical selection uses [`Self::sync_target`] instead.
+    pub fn sync_latest(
+        &mut self,
+        latest: Option<&ApprovalKey>,
+        decision_count: usize,
+        now: Instant,
+    ) {
+        self.sync_target(latest, decision_count, now);
+    }
+
+    fn target(&self) -> Option<&ApprovalKey> {
+        self.target.as_ref()
     }
 
     /// Returns the currently selected index only if it is valid for the
@@ -228,6 +255,33 @@ impl HudInteractionState {
     pub fn shown_at(&self) -> Option<Instant> {
         self.shown_at
     }
+
+    fn select_target(&mut self, target: &ApprovalKey, decision_count: usize, now: Instant) {
+        self.sync_target(Some(target), decision_count, now);
+    }
+}
+
+/// Owns the one in-flight HUD response reservation. Dropping it releases the
+/// reservation only when it still belongs to the same opaque request key.
+/// This makes every worker return path -- including Broker errors and panic
+/// unwinding -- eligible to re-enable a later physical response safely.
+pub struct HudResponseDispatch {
+    pub selection: HudApprovalSelection,
+    _reservation: HudResponseReservation,
+}
+
+struct HudResponseReservation {
+    interaction: Arc<Mutex<HudInteractionState>>,
+    key: ApprovalKey,
+}
+
+impl Drop for HudResponseReservation {
+    fn drop(&mut self) {
+        let mut interaction = self.interaction.lock().unwrap();
+        if interaction.response_in_flight.as_ref() == Some(&self.key) {
+            interaction.response_in_flight = None;
+        }
+    }
 }
 
 fn snapshot_decision_count(snapshot: &PendingApprovalSnapshot) -> usize {
@@ -235,6 +289,86 @@ fn snapshot_decision_count(snapshot: &PendingApprovalSnapshot) -> usize {
         PendingApprovalContent::Body(body) => body.available_decisions.as_ref().map_or(0, Vec::len),
         PendingApprovalContent::Oversized => 0,
     }
+}
+
+fn current_target(
+    pending: &PendingApprovalStore,
+    explicit_target: Option<ApprovalKey>,
+) -> Option<(ApprovalKey, PendingApprovalSnapshot)> {
+    explicit_target
+        .and_then(|key| pending.get(&key).map(|snapshot| (key, snapshot)))
+        .or_else(|| pending.latest())
+}
+
+fn replace_shown(
+    pending: &PendingApprovalStore,
+    shown: &mut Option<ApprovalKey>,
+    next: &ApprovalKey,
+) -> bool {
+    if shown.as_ref() == Some(next) {
+        return false;
+    }
+    if let Some(previous) = shown.as_ref() {
+        pending.set_protected(previous, false);
+    }
+    pending.set_protected(next, true);
+    *shown = Some(next.clone());
+    true
+}
+
+fn response_selection_from_state(
+    interaction: &HudInteractionState,
+    pending: &PendingApprovalStore,
+    reject: bool,
+    now: Instant,
+) -> Option<HudApprovalSelection> {
+    if !reject
+        && interaction.shown_at().is_none_or(|shown_at| {
+            now.checked_duration_since(shown_at)
+                .is_none_or(|elapsed| elapsed < HUD_CONFIRM_GUARD)
+        })
+    {
+        return None;
+    }
+    let key = interaction.target()?.clone();
+    let snapshot = pending.get(&key)?;
+    let decision_count = snapshot_decision_count(&snapshot);
+    if reject {
+        let PendingApprovalContent::Body(body) = snapshot.content else {
+            return None;
+        };
+        let decision_index = body
+            .available_decisions?
+            .iter()
+            .position(|decision| decision.as_str() == Some("decline"))?;
+        return Some(HudApprovalSelection {
+            key,
+            decision_index,
+        });
+    }
+    interaction.selected_approval(decision_count)
+}
+
+fn begin_response_from_state(
+    interaction: Arc<Mutex<HudInteractionState>>,
+    pending: &PendingApprovalStore,
+    reject: bool,
+    now: Instant,
+) -> Option<HudResponseDispatch> {
+    let mut state = interaction.lock().unwrap();
+    if state.response_in_flight.is_some() {
+        return None;
+    }
+    let selection = response_selection_from_state(&state, pending, reject, now)?;
+    state.response_in_flight = Some(selection.key.clone());
+    drop(state);
+    Some(HudResponseDispatch {
+        _reservation: HudResponseReservation {
+            interaction,
+            key: selection.key.clone(),
+        },
+        selection,
+    })
 }
 
 /// Owns the HUD `WebviewWindow` and tracks which pending-approval entry (if
@@ -251,7 +385,7 @@ pub struct HudCoordinator {
     /// Selection and timing state used by the next physical-input stage.
     /// Kept independently from `shown` so it can expose small pure APIs
     /// without owning a Host Link action or an approval response path.
-    interaction: Mutex<HudInteractionState>,
+    interaction: Arc<Mutex<HudInteractionState>>,
 }
 
 impl HudCoordinator {
@@ -266,28 +400,25 @@ impl HudCoordinator {
         Ok(Self {
             window,
             shown: Mutex::new(None),
-            interaction: Mutex::new(HudInteractionState::default()),
+            interaction: Arc::new(Mutex::new(HudInteractionState::default())),
         })
     }
 
-    /// Called once per host-link tick. Shows the newest unresolved approval
-    /// request, or hides the HUD once none remain.
+    /// Called once per host-link tick. An explicitly selected live request
+    /// remains displayed; otherwise the newest unresolved request is shown.
+    /// A selected key that was resolved or evicted safely falls back to the
+    /// current latest request (or hides when none remain).
     pub fn update(&self, app: &AppHandle, pending: &PendingApprovalStore) {
         let mut shown = self.shown.lock().unwrap();
-        match pending.latest() {
+        let selected = self.interaction.lock().unwrap().target().cloned();
+        let current = current_target(pending, selected);
+        match current {
             Some((key, snapshot)) => {
-                let changed = shown.as_ref() != Some(&key);
-                if changed {
-                    if let Some(previous) = shown.as_ref() {
-                        pending.set_protected(previous, false);
-                    }
-                    pending.set_protected(&key, true);
-                    *shown = Some(key.clone());
-                }
+                let changed = replace_shown(pending, &mut shown, &key);
                 let selected_decision_index = {
                     let mut interaction = self.interaction.lock().unwrap();
                     let decision_count = snapshot_decision_count(&snapshot);
-                    interaction.sync_latest(Some(&key), decision_count, Instant::now());
+                    interaction.sync_target(Some(&key), decision_count, Instant::now());
                     interaction.selected_decision_index(decision_count)
                 };
                 let payload = Some(HudApprovalPayload::from_snapshot(
@@ -306,7 +437,7 @@ impl HudCoordinator {
                     self.interaction
                         .lock()
                         .unwrap()
-                        .sync_latest(None, 0, Instant::now());
+                        .sync_target(None, 0, Instant::now());
                     let empty: Option<HudApprovalPayload> = None;
                     let _ = app.emit_to(HUD_WINDOW_LABEL, HUD_EVENT, empty);
                     self.hide_after_exit_animation();
@@ -315,30 +446,51 @@ impl HudCoordinator {
         }
     }
 
-    /// Pure Host-state API for a future physical-input binding. The caller
-    /// supplies the live decision count from the current snapshot; this
-    /// method neither creates a `HOST_ACTION` nor sends a Broker response.
-    #[allow(dead_code)] // Wired to physical input in the next HUD stage.
+    /// Moves the selected decision within the live selected request. This
+    /// never answers the request.
     pub fn move_selection(
         &self,
-        decision_count: usize,
+        pending: &PendingApprovalStore,
         direction: HudSelectionDirection,
     ) -> Option<usize> {
-        self.interaction
-            .lock()
-            .unwrap()
-            .move_selection(decision_count, direction)
+        let mut interaction = self.interaction.lock().unwrap();
+        let snapshot = pending.get(interaction.target()?)?;
+        interaction.move_selection(snapshot_decision_count(&snapshot), direction)
     }
 
-    /// Returns the current opaque target and safe decision index for a future
-    /// confirmation binding. The actual first-wins Broker call remains out of
-    /// scope for this stage.
-    #[allow(dead_code)] // Wired to physical input in the next HUD stage.
-    pub fn selected_approval(&self, decision_count: usize) -> Option<HudApprovalSelection> {
-        self.interaction
-            .lock()
-            .unwrap()
-            .selected_approval(decision_count)
+    /// Atomically obtains the only physical-response reservation and returns
+    /// its exact store-derived candidate. A second Confirm or Reject becomes
+    /// a benign no-op until the returned dispatch object is dropped.
+    pub fn begin_response(
+        &self,
+        pending: &PendingApprovalStore,
+        reject: bool,
+        now: Instant,
+    ) -> Option<HudResponseDispatch> {
+        begin_response_from_state(Arc::clone(&self.interaction), pending, reject, now)
+    }
+
+    /// Makes the newest Codex approval belonging to this exact display
+    /// connection and thread the explicit HUD target. Claude and unassigned
+    /// slots never reach this method, and an absent or threadless request is
+    /// a benign no-op.
+    pub fn select_codex_thread(
+        &self,
+        pending: &PendingApprovalStore,
+        connection_id: &str,
+        thread_id: &str,
+    ) -> bool {
+        let Some((key, snapshot)) =
+            pending.latest_codex_for_connection_and_thread(connection_id, thread_id)
+        else {
+            return false;
+        };
+        self.interaction.lock().unwrap().select_target(
+            &key,
+            snapshot_decision_count(&snapshot),
+            Instant::now(),
+        );
+        true
     }
 
     /// Returns when the current opaque target began displaying. A future
@@ -445,9 +597,51 @@ fn work_area(_hud: &HudWindow) -> Option<(i32, i32, i32, i32)> {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{
+        sync::{Arc, Mutex},
+        time::Duration,
+    };
 
-    use super::{ApprovalKey, HudInteractionState, HudSelectionDirection, Instant};
+    use rawhid_host_core::pending_approval::{
+        codex_key, ApprovalClient, ApprovalOwner, PendingApprovalBody, PendingApprovalStore,
+    };
+    use serde_json::{json, Value};
+
+    use super::{
+        begin_response_from_state, current_target, replace_shown, response_selection_from_state,
+        ApprovalKey, HudInteractionState, HudSelectionDirection, Instant, HUD_CONFIRM_GUARD,
+    };
+
+    fn body(decisions: Vec<Value>) -> PendingApprovalBody {
+        PendingApprovalBody {
+            primary_text: None,
+            full_command: None,
+            reason: None,
+            cwd: None,
+            kind: None,
+            available_decisions: Some(decisions),
+            tool_use_id: None,
+            prompt_id: None,
+        }
+    }
+
+    fn insert_codex(
+        store: &PendingApprovalStore,
+        connection: &str,
+        request: u64,
+        decisions: Vec<Value>,
+    ) -> ApprovalKey {
+        let key = codex_key(connection, &json!(request));
+        store.insert(
+            key.clone(),
+            ApprovalClient::Codex,
+            ApprovalOwner::Codex {
+                connection_id: connection.to_string(),
+            },
+            body(decisions),
+        );
+        key
+    }
 
     #[test]
     fn new_target_starts_at_zero_and_records_display_time() {
@@ -531,5 +725,231 @@ mod tests {
         assert_eq!(state.move_selection(0, HudSelectionDirection::Next), None);
         assert_eq!(state.selected_approval(0), None);
         assert_eq!(state.shown_at(), Some(shown_at));
+    }
+
+    #[test]
+    fn physical_selection_wraps_without_constructing_a_response() {
+        let key = ApprovalKey::new("approval-a");
+        let mut state = HudInteractionState::default();
+        state.sync_target(Some(&key), 3, Instant::now());
+
+        assert_eq!(
+            state.move_selection(3, HudSelectionDirection::Previous),
+            Some(2)
+        );
+        assert_eq!(
+            state.move_selection(3, HudSelectionDirection::Next),
+            Some(0)
+        );
+        assert_eq!(state.selected_approval(3).unwrap().decision_index, 0);
+    }
+
+    #[test]
+    fn confirm_guard_and_exact_decline_index_use_the_live_store() {
+        let store = PendingApprovalStore::new();
+        let key = insert_codex(
+            &store,
+            "connection-a",
+            7,
+            vec![json!("approve"), json!({"allow": true}), json!("decline")],
+        );
+        let shown_at = Instant::now();
+        let mut state = HudInteractionState::default();
+        state.sync_target(Some(&key), 3, shown_at);
+        state.move_selection(3, HudSelectionDirection::Next);
+
+        assert!(response_selection_from_state(
+            &state,
+            &store,
+            false,
+            shown_at + HUD_CONFIRM_GUARD - Duration::from_nanos(1)
+        )
+        .is_none());
+        assert_eq!(
+            response_selection_from_state(&state, &store, false, shown_at + HUD_CONFIRM_GUARD)
+                .unwrap()
+                .decision_index,
+            1
+        );
+        assert_eq!(
+            response_selection_from_state(
+                &state,
+                &store,
+                true,
+                shown_at + Duration::from_millis(1)
+            )
+            .unwrap()
+            .decision_index,
+            2
+        );
+    }
+
+    #[test]
+    fn reject_with_only_cancel_is_a_safe_noop() {
+        let store = PendingApprovalStore::new();
+        let key = insert_codex(
+            &store,
+            "connection-a",
+            8,
+            vec![json!("approve"), json!("cancel")],
+        );
+        let shown_at = Instant::now();
+        let mut state = HudInteractionState::default();
+        state.sync_target(Some(&key), 2, shown_at);
+
+        assert!(response_selection_from_state(
+            &state,
+            &store,
+            true,
+            shown_at + Duration::from_millis(1)
+        )
+        .is_none());
+    }
+
+    #[test]
+    fn reject_prefers_decline_over_cancel() {
+        let store = PendingApprovalStore::new();
+        let key = insert_codex(
+            &store,
+            "connection-a",
+            9,
+            vec![json!("cancel"), json!("approve"), json!("decline")],
+        );
+        let shown_at = Instant::now();
+        let mut state = HudInteractionState::default();
+        state.sync_target(Some(&key), 3, shown_at);
+
+        assert_eq!(
+            response_selection_from_state(
+                &state,
+                &store,
+                true,
+                shown_at + Duration::from_millis(1)
+            )
+            .unwrap()
+            .decision_index,
+            2
+        );
+    }
+
+    #[test]
+    fn in_flight_response_allows_one_dispatch_then_releases_for_retry() {
+        let store = PendingApprovalStore::new();
+        let key = insert_codex(
+            &store,
+            "connection-a",
+            7,
+            vec![json!("approve"), json!("decline")],
+        );
+        let shown_at = Instant::now();
+        let interaction = Arc::new(Mutex::new(HudInteractionState::default()));
+        interaction
+            .lock()
+            .unwrap()
+            .sync_target(Some(&key), 2, shown_at);
+
+        let first = begin_response_from_state(
+            Arc::clone(&interaction),
+            &store,
+            false,
+            shown_at + HUD_CONFIRM_GUARD,
+        )
+        .expect("first dispatch reserves the HUD");
+        assert!(begin_response_from_state(
+            Arc::clone(&interaction),
+            &store,
+            true,
+            shown_at + HUD_CONFIRM_GUARD,
+        )
+        .is_none());
+
+        // Worker completion, Broker failure, and spawn failure all drop this
+        // value; a still-pending request can then be retried.
+        drop(first);
+        assert!(begin_response_from_state(
+            Arc::clone(&interaction),
+            &store,
+            false,
+            shown_at + HUD_CONFIRM_GUARD,
+        )
+        .is_some());
+    }
+
+    #[test]
+    fn old_response_reservation_cannot_unlock_a_newer_key() {
+        let store = PendingApprovalStore::new();
+        let first = insert_codex(&store, "connection-a", 1, vec![json!("approve")]);
+        let second = insert_codex(&store, "connection-b", 2, vec![json!("approve")]);
+        let shown_at = Instant::now();
+        let interaction = Arc::new(Mutex::new(HudInteractionState::default()));
+        interaction
+            .lock()
+            .unwrap()
+            .sync_target(Some(&first), 1, shown_at);
+        let first_dispatch = begin_response_from_state(
+            Arc::clone(&interaction),
+            &store,
+            false,
+            shown_at + HUD_CONFIRM_GUARD,
+        )
+        .unwrap();
+
+        // This models a target transition racing with completion. The Drop
+        // guard is key-scoped, so it never clears a reservation for `second`.
+        interaction.lock().unwrap().response_in_flight = Some(second.clone());
+        drop(first_dispatch);
+        assert_eq!(interaction.lock().unwrap().response_in_flight, Some(second));
+    }
+
+    #[test]
+    fn missing_empty_or_stale_targets_cannot_produce_a_response() {
+        let store = PendingApprovalStore::new();
+        let shown_at = Instant::now();
+        let mut state = HudInteractionState::default();
+        assert!(response_selection_from_state(&state, &store, false, shown_at).is_none());
+
+        let empty = insert_codex(&store, "connection-a", 1, Vec::new());
+        state.sync_target(Some(&empty), 0, shown_at);
+        assert!(
+            response_selection_from_state(&state, &store, false, shown_at + HUD_CONFIRM_GUARD)
+                .is_none()
+        );
+        store.resolve(&empty);
+        assert!(
+            response_selection_from_state(&state, &store, true, shown_at + HUD_CONFIRM_GUARD)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn explicit_target_is_retained_then_falls_back_and_releases_protection() {
+        let store = PendingApprovalStore::new();
+        let first = insert_codex(&store, "connection-a", 1, vec![json!("approve")]);
+        let newest = insert_codex(&store, "connection-b", 2, vec![json!("approve")]);
+        let mut shown = None;
+        assert!(replace_shown(&store, &mut shown, &first));
+        assert!(store.get(&first).unwrap().protected);
+
+        // A periodic update keeps the explicitly selected request despite a
+        // newer pending request.
+        assert_eq!(
+            current_target(&store, Some(first.clone())).unwrap().0,
+            first
+        );
+        // Changing the displayed target transfers the eviction protection.
+        assert!(replace_shown(&store, &mut shown, &newest));
+        assert!(!store.get(&first).unwrap().protected);
+        assert!(store.get(&newest).unwrap().protected);
+        assert!(replace_shown(&store, &mut shown, &first));
+        store.resolve(&first);
+        // Once resolved, it immediately degrades to the latest live key.
+        let fallback = current_target(&store, Some(first)).unwrap().0;
+        assert_eq!(fallback, newest);
+        assert!(replace_shown(&store, &mut shown, &fallback));
+        assert!(store.get(&newest).unwrap().protected);
+        // Resolving the target removes it despite protection; the next no-HUD
+        // transition has no stale flag left to preserve.
+        store.resolve(&newest);
+        assert!(current_target(&store, shown.clone()).is_none());
     }
 }

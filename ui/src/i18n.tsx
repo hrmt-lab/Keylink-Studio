@@ -131,6 +131,11 @@ const T = {
     "actions.kind.refresh_ai_usage": "AI 使用量を更新",
     "actions.kind.cycle_ai_session": "AIの表示セッションを切り替える",
     "actions.kind.focus_ai_terminal": "AIのターミナルを前面に出す",
+    "actions.kind.hud_previous": "HUDの前の選択肢へ移動",
+    "actions.kind.hud_next": "HUDの次の選択肢へ移動",
+    "actions.kind.hud_confirm": "HUDの選択肢を確定",
+    "actions.kind.hud_reject": "HUDの拒否を選択",
+    "actions.kind.select_hud_target": "ScreenKeyのCodex承認をHUDで選択",
     "actions.kind.launch": "アプリを起動",
     "actions.kind.open_folder": "フォルダを開く",
     "actions.firmware_hint":
@@ -847,6 +852,11 @@ const T = {
     "actions.kind.refresh_ai_usage": "Refresh AI usage",
     "actions.kind.cycle_ai_session": "Switch displayed AI session",
     "actions.kind.focus_ai_terminal": "Bring the AI terminal to the front",
+    "actions.kind.hud_previous": "Move to the previous HUD choice",
+    "actions.kind.hud_next": "Move to the next HUD choice",
+    "actions.kind.hud_confirm": "Confirm the HUD choice",
+    "actions.kind.hud_reject": "Choose the HUD decline decision",
+    "actions.kind.select_hud_target": "Select this ScreenKey's Codex approval in the HUD",
     "actions.kind.launch": "Launch app",
     "actions.kind.open_folder": "Open folder",
     "actions.firmware_hint":

@@ -245,6 +245,11 @@ pub enum HostActionKind {
     Launch,
     OpenFolder,
     FocusAiTerminal,
+    HudPrevious,
+    HudNext,
+    HudConfirm,
+    HudReject,
+    SelectHudTarget,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -696,7 +701,7 @@ enabled = false
 #
 #[[actions.devices."uid:7a91c3e4d102ab55".bindings]]
 #action_id = 1
-#action = "show_window"  # show_window | start_monitoring | stop_monitoring | refresh_ai_usage | cycle_ai_session | launch | open_folder | focus_ai_terminal
+#action = "show_window"  # show_window | start_monitoring | stop_monitoring | refresh_ai_usage | cycle_ai_session | launch | open_folder | focus_ai_terminal | hud_previous | hud_next | hud_confirm | hud_reject | select_hud_target
 #
 #[[actions.devices."uid:7a91c3e4d102ab55".bindings]]
 #action_id = 2

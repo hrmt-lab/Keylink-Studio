@@ -24,8 +24,8 @@ use rawhid_host_core::{
         CodexStateChange,
     },
     codex_broker::{
-        CodexAppServerRuntime, CodexApprovalResponseOutcome, CodexBrokerConfig, CodexBrokerPhase,
-        CodexBrokerStatus,
+        CodexAppServerRuntime, CodexApprovalResponseOutcome, CodexBrokerConfig, CodexBrokerManager,
+        CodexBrokerPhase, CodexBrokerStatus,
     },
     config::{
         load_config, ActionsConfig, AppConfig, ClaudeLauncherConfig, CodexLaunchEnvironment,
@@ -76,6 +76,7 @@ pub struct MonitorExtras {
     pub ai_terminal_focusing: Arc<AtomicBool>,
     pub key_stats: SharedKeyStatsStore,
     pub codex_activity: Arc<CodexActivityRuntime>,
+    pub codex_broker: CodexBrokerManager,
     pub claude_integration: Arc<Mutex<Option<ClaudeIntegration>>>,
     pub ai_display_slots: Arc<Mutex<AiDisplaySelection>>,
     pub hud: Arc<Mutex<Option<HudCoordinator>>>,
@@ -493,11 +494,22 @@ pub fn respond_to_codex_approval(
     state: State<AppState>,
 ) -> Result<bool, String> {
     let pending = state.codex_activity.pending_approvals();
+    respond_to_codex_approval_internal(&pending, &state.codex_broker, &request_key, decision_index)
+}
+
+/// Shared by the Tauri command and physical HUD actions. It always retrieves
+/// the opaque decision from `PendingApprovalStore` immediately before using
+/// the Broker's existing per-connection first-wins path.
+pub(crate) fn respond_to_codex_approval_internal(
+    pending: &PendingApprovalStore,
+    broker: &CodexBrokerManager,
+    request_key: &str,
+    decision_index: usize,
+) -> Result<bool, String> {
     let response = pending
         .codex_response(&request_key, decision_index)
         .ok_or_else(|| "The approval is no longer available".to_string())?;
-    let outcome = state
-        .codex_broker
+    let outcome = broker
         .respond_to_approval(
             &response.connection_id,
             response.request_id,
@@ -4191,6 +4203,7 @@ pub fn start_host_link_worker(
         ai_terminal_focusing: Arc::clone(&state.ai_terminal_focusing),
         key_stats: Arc::clone(&state.key_stats),
         codex_activity: Arc::clone(&state.codex_activity),
+        codex_broker: state.codex_broker.clone(),
         claude_integration: Arc::clone(&state.claude_integration),
         ai_display_slots: Arc::clone(&state.ai_display_slots),
         hud: Arc::clone(&state.hud),
@@ -5102,6 +5115,13 @@ fn handle_uplink_events(
                                 format!(
                                     "host action {} executed ({:?})",
                                     action.action_id, binding.action
+                                ),
+                            ),
+                            Ok(actions::ActionOutcome::HudNoop { reason }) => (
+                                "info",
+                                format!(
+                                    "host action {} ignored safely ({})",
+                                    action.action_id, reason
                                 ),
                             ),
                             Ok(actions::ActionOutcome::AiSessionSelected { label }) => (

@@ -1663,7 +1663,11 @@ fn ingest_codex_approval(
     request_id: &Value,
     body: CodexApprovalRequestBody,
 ) {
-    let key = codex_key(connection_id, request_id);
+    let key = crate::pending_approval::codex_key_for_thread(
+        connection_id,
+        request_id,
+        body.thread_id.as_deref(),
+    );
     if let (Some(thread_id), Some(turn_id)) = (body.thread_id.clone(), body.turn_id.clone()) {
         approval_turns
             .entry((connection_id.to_string(), thread_id, turn_id))

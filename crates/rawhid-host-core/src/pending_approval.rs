@@ -79,6 +79,9 @@ pub struct ApprovalKey {
 struct CodexApprovalTarget {
     connection_id: String,
     request_id: Value,
+    /// Internal only: binds this request to the exact Codex display thread.
+    /// It is never included in a HUD payload or Host Link packet.
+    thread_id: Option<String>,
 }
 
 impl PartialEq for ApprovalKey {
@@ -117,11 +120,24 @@ impl ApprovalKey {
 /// Builds the correlation key for a Codex `requestApproval`, from the
 /// Broker connection id and the request's JSON-RPC id.
 pub fn codex_key(connection_id: &str, request_id: &Value) -> ApprovalKey {
+    codex_key_for_thread(connection_id, request_id, None)
+}
+
+/// Builds a Codex correlation key with its request's optional `threadId`.
+/// A missing `threadId` remains deliberately unselectable from a ScreenKey:
+/// the strict display-slot lookup below never infers a thread from only a
+/// connection id.
+pub fn codex_key_for_thread(
+    connection_id: &str,
+    request_id: &Value,
+    thread_id: Option<&str>,
+) -> ApprovalKey {
     ApprovalKey {
         token: format!("codex:{connection_id}:{}", json_rpc_id_token(request_id)),
         codex_target: Some(CodexApprovalTarget {
             connection_id: connection_id.to_string(),
             request_id: request_id.clone(),
+            thread_id: thread_id.map(str::to_string),
         }),
     }
 }
@@ -412,6 +428,37 @@ impl PendingApprovalStore {
         })
     }
 
+    /// Returns the newest unresolved Codex request for exactly one display
+    /// connection and thread. The caller supplies both internal values from
+    /// the Codex display registry; neither a ScreenKey nor the UI can
+    /// manufacture this relationship. Entries from requests without a
+    /// `threadId` are intentionally not selectable here.
+    pub fn latest_codex_for_connection_and_thread(
+        &self,
+        connection_id: &str,
+        thread_id: &str,
+    ) -> Option<(ApprovalKey, PendingApprovalSnapshot)> {
+        let inner = self.inner.lock().unwrap();
+        inner.lru.iter().rev().find_map(|key| {
+            let entry = inner.entries.get(key)?;
+            (entry.client == ApprovalClient::Codex
+                && key.codex_target().is_some_and(|target| {
+                    target.connection_id == connection_id
+                        && target.thread_id.as_deref() == Some(thread_id)
+                }))
+            .then(|| {
+                (
+                    key.clone(),
+                    PendingApprovalSnapshot {
+                        client: entry.client,
+                        content: entry.content.clone(),
+                        protected: entry.protected,
+                    },
+                )
+            })
+        })
+    }
+
     pub fn len(&self) -> usize {
         self.inner.lock().unwrap().entries.len()
     }
@@ -690,6 +737,68 @@ mod tests {
 
         store.resolve(&key_a);
         assert!(store.latest().is_none());
+    }
+
+    #[test]
+    fn latest_codex_for_connection_and_thread_requires_an_exact_match() {
+        let store = PendingApprovalStore::new();
+        let first = codex_key_for_thread("connection-a", &Value::from(1), Some("thread-a"));
+        let other = codex_key_for_thread("connection-b", &Value::from(2), Some("thread-a"));
+        let latest = codex_key_for_thread("connection-a", &Value::from(3), Some("thread-a"));
+        for (key, connection) in [
+            (first, "connection-a"),
+            (other, "connection-b"),
+            (latest.clone(), "connection-a"),
+        ] {
+            store.insert(
+                key,
+                ApprovalClient::Codex,
+                codex_owner(connection),
+                body("command"),
+            );
+        }
+
+        assert_eq!(
+            store
+                .latest_codex_for_connection_and_thread("connection-a", "thread-a")
+                .map(|(key, _)| key),
+            Some(latest)
+        );
+        assert!(store
+            .latest_codex_for_connection_and_thread("connection-a", "missing")
+            .is_none());
+    }
+
+    #[test]
+    fn exact_thread_lookup_never_falls_back_to_another_thread_on_connection() {
+        let store = PendingApprovalStore::new();
+        let thread_a = codex_key_for_thread("connection-a", &Value::from(1), Some("thread-a"));
+        let thread_b = codex_key_for_thread("connection-a", &Value::from(2), Some("thread-b"));
+        let missing_thread = codex_key("connection-a", &Value::from(3));
+        for key in [thread_a.clone(), thread_b.clone(), missing_thread] {
+            store.insert(
+                key,
+                ApprovalClient::Codex,
+                codex_owner("connection-a"),
+                body("command"),
+            );
+        }
+
+        assert_eq!(
+            store
+                .latest_codex_for_connection_and_thread("connection-a", "thread-a")
+                .map(|(key, _)| key),
+            Some(thread_a)
+        );
+        assert_eq!(
+            store
+                .latest_codex_for_connection_and_thread("connection-a", "thread-b")
+                .map(|(key, _)| key),
+            Some(thread_b)
+        );
+        assert!(store
+            .latest_codex_for_connection_and_thread("connection-a", "thread-c")
+            .is_none());
     }
 
     #[test]

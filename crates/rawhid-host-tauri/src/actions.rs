@@ -112,100 +112,49 @@ pub fn execute(
             crate::explorer::open_folder(path, binding.prefer_tab)?;
             Ok(ActionOutcome::Continue)
         }
-        HostActionKind::FocusAiTerminal => {
-            // `value` is the ScreenKey's physical index, i.e. the display
-            // slot to resolve. Anything short of "exactly one session
-            // assigned to this slot" is a silent no-op per the design
-            // (docs/screenkey-terminal-focus-design.md 3.5): out-of-range
-            // slot, unassigned slot, and (unreachable in practice, see the
-            // design's F11-F13) an empty terminal_target_id. None of these
-            // touch `ai_terminal_focusing`: they never start a focus
-            // sequence, so there is nothing to guard against re-entry.
-            let assigned = extras
-                .ai_display_slots
-                .lock()
-                .unwrap()
-                .slots()
-                .get(usize::from(value))
-                .and_then(|slot| slot.assigned.clone());
-            let terminal_target_id = match assigned {
-                Some(AiDisplayTarget::Codex { terminal_target_id })
-                | Some(AiDisplayTarget::Claude { terminal_target_id }) => terminal_target_id,
-                None => return Ok(ActionOutcome::Continue),
-            };
-            if terminal_target_id.is_empty() {
-                return Ok(ActionOutcome::Continue);
-            }
-            // Only claim the in-progress flag once we know a focus sequence
-            // will actually run, so every early return above needs no
-            // matching `store(false)`; `FocusGuard` releases it when the
-            // spawned thread finishes.
-            if extras
-                .ai_terminal_focusing
-                .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
-                .is_err()
-            {
-                return Err("focus_in_progress".to_string());
-            }
-            // The search-and-focus sequence runs on its own thread: the
-            // monitor loop that calls `execute` must not block on it (it can
-            // take ~1.1s when SetForegroundWindow is denied, see F2/F8).
-            crate::ai_terminal_focus::spawn_focus(
-                terminal_target_id,
-                Arc::clone(&extras.ai_terminal_focusing),
-            );
-            Ok(ActionOutcome::Continue)
-        }
-        HostActionKind::HudPrevious => {
+        HostActionKind::FocusAiTerminal => focus_ai_terminal_for_slot(value, extras),
+        HostActionKind::HudPrevious => Ok(move_hud_selection_and_render(
+            app,
+            extras,
+            "no_selectable_hud_approval",
+            |hud, pending| hud.move_selection(pending, HudSelectionDirection::Previous),
+        )),
+        HostActionKind::HudNext => Ok(move_hud_selection_and_render(
+            app,
+            extras,
+            "no_selectable_hud_approval",
+            |hud, pending| hud.move_selection(pending, HudSelectionDirection::Next),
+        )),
+        HostActionKind::HudConfirm => {
             let pending = extras.codex_activity.pending_approvals();
-            let moved = extras
-                .hud
-                .lock()
-                .unwrap()
-                .as_ref()
-                .and_then(|hud| hud.move_selection(&pending, HudSelectionDirection::Previous));
-            Ok(moved
-                .map(|_| ActionOutcome::Continue)
-                .unwrap_or(ActionOutcome::HudNoop {
-                    reason: "no_selectable_hud_approval",
-                }))
-        }
-        HostActionKind::HudNext => {
-            let pending = extras.codex_activity.pending_approvals();
-            let moved = extras
-                .hud
-                .lock()
-                .unwrap()
-                .as_ref()
-                .and_then(|hud| hud.move_selection(&pending, HudSelectionDirection::Next));
-            Ok(moved
-                .map(|_| ActionOutcome::Continue)
-                .unwrap_or(ActionOutcome::HudNoop {
-                    reason: "no_selectable_hud_approval",
-                }))
-        }
-        HostActionKind::HudConfirm | HostActionKind::HudReject => {
-            let pending = extras.codex_activity.pending_approvals();
-            let reject = matches!(binding.action, HostActionKind::HudReject);
             let dispatch = extras
                 .hud
                 .lock()
                 .unwrap()
                 .as_ref()
-                .and_then(|hud| hud.begin_response(&pending, reject, Instant::now()));
+                .and_then(|hud| hud.begin_response(&pending, Instant::now()));
             let Some(dispatch) = dispatch else {
                 return Ok(ActionOutcome::HudNoop {
-                    reason: if reject {
-                        "hud_response_in_flight_or_no_decline"
-                    } else {
-                        "hud_response_in_flight_guard_or_no_selection"
-                    },
+                    reason: "hud_response_in_flight_guard_or_no_selection",
                 });
             };
             // `respond_to_approval` may wait for the App Server response.
             // Never make the Host Link monitor loop wait for that round trip.
             dispatch_hud_response(pending, extras.codex_broker.clone(), dispatch);
             Ok(ActionOutcome::Continue)
+        }
+        HostActionKind::HudReject => {
+            // Reject only relocates the highlight to the reject-side decision
+            // (exact "decline", else exact "cancel"; see
+            // `HudInteractionState::move_selection_toward_reject`). It never
+            // sends a response itself -- only a later HudConfirm does that,
+            // for whatever index ends up selected.
+            Ok(move_hud_selection_and_render(
+                app,
+                extras,
+                "no_reject_decision_available",
+                |hud, pending| hud.move_selection_toward_reject(pending),
+            ))
         }
         HostActionKind::SelectHudTarget => {
             let assigned = extras
@@ -216,10 +165,13 @@ pub fn execute(
                 .get(usize::from(value))
                 .and_then(|slot| slot.assigned.clone());
             let target = codex_target_for_slot(assigned, extras.codex_activity.snapshots());
+            // ScreenKey's uplink means "make this session the one I'm
+            // dealing with" (docs/ai-approval-hud-design.md §6.1/§11): a
+            // slot with nothing waiting for HUD approval falls back to the
+            // same terminal-focus behavior as a standalone FocusAiTerminal
+            // press, rather than staying a silent HudNoop.
             let Some((connection_id, thread_id)) = target else {
-                return Ok(ActionOutcome::HudNoop {
-                    reason: "slot_has_no_codex_pending_target",
-                });
+                return focus_ai_terminal_for_slot(value, extras);
             };
             let pending = extras.codex_activity.pending_approvals();
             let selected = {
@@ -229,9 +181,7 @@ pub fn execute(
                 })
             };
             if !selected {
-                return Ok(ActionOutcome::HudNoop {
-                    reason: "codex_slot_has_no_pending_approval",
-                });
+                return focus_ai_terminal_for_slot(value, extras);
             }
             // Render immediately, rather than waiting for the next periodic
             // update; `update` preserves this explicit target thereafter.
@@ -241,6 +191,95 @@ pub fn execute(
             Ok(ActionOutcome::Continue)
         }
     }
+}
+
+/// Applies a HUD selection move (`HudPrevious`/`HudNext`/`HudReject`) and, only
+/// when it actually moved the highlight, renders immediately rather than
+/// waiting for the next periodic update (`SelectHudTarget` above does the same
+/// for its own move, with the same comment). Without this, a physical
+/// encoder turn stayed invisible until the next host-link tick -- up to
+/// `polling.interval_ms` (500 ms on real hardware).
+///
+/// The lock used to move the selection is dropped (it lives only for the
+/// `let moved = ...;` statement) before `update` is called, matching
+/// `SelectHudTarget`'s own "drop the lock used to move, then re-acquire it to
+/// render" structure: this codebase never holds the HUD lock across an
+/// emit/sync API call (see the `update` call site's comment and its history
+/// of causing an unresponsive window).
+fn move_hud_selection_and_render(
+    app: &AppHandle,
+    extras: &MonitorExtras,
+    no_move_reason: &'static str,
+    move_fn: impl FnOnce(
+        &crate::hud_coordinator::HudCoordinator,
+        &rawhid_host_core::pending_approval::PendingApprovalStore,
+    ) -> Option<usize>,
+) -> ActionOutcome {
+    let pending = extras.codex_activity.pending_approvals();
+    let moved = extras
+        .hud
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|hud| move_fn(hud, &pending));
+    if moved.is_none() {
+        return ActionOutcome::HudNoop {
+            reason: no_move_reason,
+        };
+    }
+    if let Some(hud) = extras.hud.lock().unwrap().as_ref() {
+        hud.update(app, &pending);
+    }
+    ActionOutcome::Continue
+}
+
+/// Resolves the ScreenKey slot to its assigned terminal and brings it to the
+/// foreground. Shared by `HostActionKind::FocusAiTerminal` (a standalone key
+/// binding) and `HostActionKind::SelectHudTarget`'s fallback when the slot
+/// has no pending HUD approval to switch to.
+fn focus_ai_terminal_for_slot(value: u8, extras: &MonitorExtras) -> Result<ActionOutcome, String> {
+    // `value` is the ScreenKey's physical index, i.e. the display
+    // slot to resolve. Anything short of "exactly one session
+    // assigned to this slot" is a silent no-op per the design
+    // (docs/screenkey-terminal-focus-design.md 3.5): out-of-range
+    // slot, unassigned slot, and (unreachable in practice, see the
+    // design's F11-F13) an empty terminal_target_id. None of these
+    // touch `ai_terminal_focusing`: they never start a focus
+    // sequence, so there is nothing to guard against re-entry.
+    let assigned = extras
+        .ai_display_slots
+        .lock()
+        .unwrap()
+        .slots()
+        .get(usize::from(value))
+        .and_then(|slot| slot.assigned.clone());
+    let terminal_target_id = match assigned {
+        Some(AiDisplayTarget::Codex { terminal_target_id })
+        | Some(AiDisplayTarget::Claude { terminal_target_id }) => terminal_target_id,
+        None => return Ok(ActionOutcome::Continue),
+    };
+    if terminal_target_id.is_empty() {
+        return Ok(ActionOutcome::Continue);
+    }
+    // Only claim the in-progress flag once we know a focus sequence
+    // will actually run, so every early return above needs no
+    // matching `store(false)`; `FocusGuard` releases it when the
+    // spawned thread finishes.
+    if extras
+        .ai_terminal_focusing
+        .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+        .is_err()
+    {
+        return Err("focus_in_progress".to_string());
+    }
+    // The search-and-focus sequence runs on its own thread: the
+    // monitor loop that calls `execute` must not block on it (it can
+    // take ~1.1s when SetForegroundWindow is denied, see F2/F8).
+    crate::ai_terminal_focus::spawn_focus(
+        terminal_target_id,
+        Arc::clone(&extras.ai_terminal_focusing),
+    );
+    Ok(ActionOutcome::Continue)
 }
 
 fn codex_target_for_slot(
@@ -314,6 +353,10 @@ mod tests {
         codex_activity::{AiClientStateSnapshot, CodexActivityRuntime, CodexSessionSnapshot},
         codex_broker::{test_support::BrokerHarness, CodexApprovalResponseOutcome},
         packet::{AiActivityState, AiClientType, AiClientVariant, AiWorkPhase},
+        pending_approval::{
+            codex_key_for_thread, ApprovalClient, ApprovalOwner, PendingApprovalBody,
+            PendingApprovalStore,
+        },
     };
     use serde_json::{json, Value};
     use tokio::{net::TcpListener, time};
@@ -403,6 +446,77 @@ mod tests {
             target,
             Some(("connection-a".to_string(), "thread-a".to_string()))
         );
+    }
+
+    // `SelectHudTarget`'s routing decision cannot be exercised through
+    // `execute()` itself in this crate's tests: that arm needs a live
+    // `tauri::AppHandle` to build a `HudCoordinator`
+    // (`HudCoordinator::create`), and nothing in this crate's test suite
+    // constructs one -- see `hud_coordinator.rs`'s own tests, which only
+    // ever exercise `HudInteractionState`/free-function pure state, never
+    // the coordinator itself. The two tests below instead pin down the
+    // exact precondition `execute()`'s `SelectHudTarget` arm checks before
+    // falling back to `focus_ai_terminal_for_slot`:
+    // `codex_target_for_slot` finding a target, and (mirroring
+    // `HudCoordinator::select_codex_thread`'s own success condition)
+    // `PendingApprovalStore::latest_codex_for_connection_and_thread` finding
+    // a live entry for it.
+
+    #[test]
+    fn select_hud_target_precondition_holds_when_a_pending_approval_exists() {
+        let store = PendingApprovalStore::new();
+        let key = codex_key_for_thread("connection-a", &json!(7), Some("thread-a"));
+        store.insert(
+            key,
+            ApprovalClient::Codex,
+            ApprovalOwner::Codex {
+                connection_id: "connection-a".to_string(),
+            },
+            PendingApprovalBody {
+                primary_text: None,
+                full_command: None,
+                reason: None,
+                cwd: None,
+                kind: None,
+                available_decisions: Some(vec![json!("approve")]),
+                tool_use_id: None,
+                prompt_id: None,
+            },
+        );
+
+        let target = super::codex_target_for_slot(
+            Some(AiDisplayTarget::Codex {
+                terminal_target_id: "terminal-a".to_string(),
+            }),
+            vec![codex_snapshot("connection-a", "thread-a", "terminal-a")],
+        )
+        .expect("slot resolves the pending Codex session's connection/thread");
+        // This is exactly `HudCoordinator::select_codex_thread`'s success
+        // condition: when it holds, `execute()`'s `SelectHudTarget` arm
+        // switches the HUD target and returns `Continue` without ever
+        // reaching either former `HudNoop` (now fallback) point.
+        assert!(store
+            .latest_codex_for_connection_and_thread(&target.0, &target.1)
+            .is_some());
+    }
+
+    #[test]
+    fn select_hud_target_falls_back_when_slot_has_no_pending_codex_target() {
+        // No Codex session is `WaitingApproval` for this slot's assigned
+        // target, so `codex_target_for_slot` finds nothing -- the first of
+        // `SelectHudTarget`'s two former `HudNoop` points
+        // ("slot_has_no_codex_pending_target"), which `execute()` now
+        // routes to `focus_ai_terminal_for_slot` instead.
+        let mut idle_snapshot =
+            codex_snapshot("connection-a", "thread-a", "codex-deadbeefdeadbeef");
+        idle_snapshot.state.activity_state = AiActivityState::Available;
+        assert!(super::codex_target_for_slot(
+            Some(AiDisplayTarget::Codex {
+                terminal_target_id: "codex-deadbeefdeadbeef".to_string(),
+            }),
+            vec![idle_snapshot],
+        )
+        .is_none());
     }
 
     async fn receive_json<Stream>(socket: &mut tokio_tungstenite::WebSocketStream<Stream>) -> Value
@@ -551,17 +665,12 @@ mod tests {
         assert!(response_selection_from_state(
             &hud_state,
             &pending,
-            false,
             shown_at + HUD_CONFIRM_GUARD - Duration::from_nanos(1)
         )
         .is_none());
-        let selection = response_selection_from_state(
-            &hud_state,
-            &pending,
-            false,
-            shown_at + HUD_CONFIRM_GUARD,
-        )
-        .expect("400 ms guard releases the selected exact decision");
+        let selection =
+            response_selection_from_state(&hud_state, &pending, shown_at + HUD_CONFIRM_GUARD)
+                .expect("400 ms guard releases the selected exact decision");
         assert_eq!(selection.key, selected_key);
         assert_eq!(selection.decision_index, 0);
         assert!(super::dispatch_hud_response_selection(&pending, &manager, &selection).unwrap());
@@ -617,8 +726,10 @@ mod tests {
             .await
             .is_err());
 
-        // Reject is intentionally different from cancel: only an exact
-        // `decline` option can be selected by the Host.
+        // Reject only relocates the highlight; it prefers an exact `decline`
+        // option here even though `cancel` is also offered (see the priority
+        // order in `HudInteractionState::move_selection_toward_reject`).
+        // Sending it still requires a later HudConfirm, guard included.
         let decline = approval(104, "thread-b", "turn-b", json!(["cancel", "decline"]));
         app_server
             .send(Message::Text(decline.to_string().into()))
@@ -629,15 +740,28 @@ mod tests {
         let (decline_key, _) = pending
             .latest_codex_for_connection_and_thread(&connection_id, "thread-b")
             .unwrap();
-        hud_state.sync_target(Some(&decline_key), 2, Instant::now());
-        let reject =
-            response_selection_from_state(&hud_state, &pending, true, Instant::now()).unwrap();
+        let decline_shown_at = Instant::now();
+        hud_state.sync_target(Some(&decline_key), 2, decline_shown_at);
+        let decline_snapshot = pending.get(&decline_key).unwrap();
+        assert_eq!(
+            hud_state.move_selection_toward_reject(&decline_snapshot),
+            Some(1)
+        );
+        let reject = response_selection_from_state(
+            &hud_state,
+            &pending,
+            decline_shown_at + HUD_CONFIRM_GUARD,
+        )
+        .expect("guard-elapsed confirm sends whatever reject moved the highlight to");
         assert_eq!(reject.decision_index, 1);
         assert!(super::dispatch_hud_response_selection(&pending, &manager, &reject).unwrap());
         let decline_response = receive_json(&mut app_server).await;
         assert_eq!(decline_response["id"], 104);
         assert_eq!(decline_response["result"]["decision"], "decline");
 
+        // With no `decline` present, reject now falls back to an exact
+        // `cancel` option instead of being a no-op -- the old Host behavior
+        // (only `decline` was ever selectable) has changed.
         let cancel_only = approval(105, "thread-b", "turn-b", json!(["approve", "cancel"]));
         app_server
             .send(Message::Text(cancel_only.to_string().into()))
@@ -651,13 +775,29 @@ mod tests {
         let (cancel_key, _) = pending
             .latest_codex_for_connection_and_thread(&connection_id, "thread-b")
             .unwrap();
-        hud_state.sync_target(Some(&cancel_key), 2, Instant::now());
-        assert!(
-            response_selection_from_state(&hud_state, &pending, true, Instant::now()).is_none()
+        let cancel_shown_at = Instant::now();
+        hud_state.sync_target(Some(&cancel_key), 2, cancel_shown_at);
+        let cancel_snapshot = pending.get(&cancel_key).unwrap();
+        assert_eq!(
+            hud_state.move_selection_toward_reject(&cancel_snapshot),
+            Some(1)
         );
-        assert!(time::timeout(Duration::from_millis(100), app_server.next())
-            .await
-            .is_err());
+        let cancel_selection = response_selection_from_state(
+            &hud_state,
+            &pending,
+            cancel_shown_at + HUD_CONFIRM_GUARD,
+        )
+        .expect("guard-elapsed confirm sends the reject-moved-to cancel index");
+        assert_eq!(cancel_selection.decision_index, 1);
+        assert!(
+            super::dispatch_hud_response_selection(&pending, &manager, &cancel_selection).unwrap()
+        );
+        let cancel_response = receive_json(&mut app_server).await;
+        assert_eq!(cancel_response["id"], 105);
+        assert_eq!(cancel_response["result"]["decision"], "cancel");
+
+        // HUD/Host won this race too; the later CLI response cannot make a
+        // second upstream delivery.
         cli.send(Message::Text(
             json!({
                 "jsonrpc": "2.0", "id": 105, "result": { "decision": "cancel" }
@@ -667,18 +807,15 @@ mod tests {
         ))
         .await
         .unwrap();
-        assert_eq!(
-            receive_json(&mut app_server).await["result"]["decision"],
-            "cancel"
-        );
+        assert!(time::timeout(Duration::from_millis(100), app_server.next())
+            .await
+            .is_err());
 
         // A stale pure HUD target is harmless after disconnect: the runtime
         // clears every pending request owned by that Broker connection.
         cli.close(None).await.unwrap();
         wait_until("disconnect clears pending approvals", || pending.is_empty()).await;
-        assert!(
-            response_selection_from_state(&hud_state, &pending, false, Instant::now()).is_none()
-        );
+        assert!(response_selection_from_state(&hud_state, &pending, Instant::now()).is_none());
         drop(activity);
         harness.shutdown().await.unwrap();
     }

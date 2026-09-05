@@ -26,8 +26,8 @@ use std::{
 };
 
 use rawhid_host_core::pending_approval::{
-    ApprovalClient, ApprovalKey, PendingApprovalContent, PendingApprovalSnapshot,
-    PendingApprovalStore,
+    ApprovalClient, ApprovalKey, PendingApprovalBody, PendingApprovalContent,
+    PendingApprovalSnapshot, PendingApprovalStore,
 };
 use serde::Serialize;
 use serde_json::Value;
@@ -232,6 +232,25 @@ impl HudInteractionState {
         Some(next)
     }
 
+    /// Moves the selection to the reject side of the supplied live snapshot:
+    /// an exact `"decline"` element if present, otherwise an exact
+    /// `"cancel"` element, otherwise no move at all (see
+    /// `reject_decision_index_from_body`'s doc comment for the priority
+    /// order). A missing target is also a no-op. Like `move_selection`, this
+    /// never constructs a response -- it only relocates the highlight.
+    pub fn move_selection_toward_reject(
+        &mut self,
+        snapshot: &PendingApprovalSnapshot,
+    ) -> Option<usize> {
+        self.target.as_ref()?;
+        let PendingApprovalContent::Body(body) = &snapshot.content else {
+            return None;
+        };
+        let index = reject_decision_index_from_body(body)?;
+        self.selected_decision_index = Some(index);
+        Some(index)
+    }
+
     /// Returns the opaque target and currently safe index for a later
     /// confirmation path. It intentionally does not send a response.
     pub fn selected_approval(&self, decision_count: usize) -> Option<HudApprovalSelection> {
@@ -305,50 +324,55 @@ fn replace_shown(
     true
 }
 
+/// Confirm-only: returns the exact live selection to answer with, gated by
+/// the 400 ms accidental-activation guard. Reject no longer sends a
+/// response at all -- see `HudInteractionState::move_selection_toward_reject`
+/// / `reject_decision_index_from_body` -- so this
+/// function has nothing left to branch on.
 pub(crate) fn response_selection_from_state(
     interaction: &HudInteractionState,
     pending: &PendingApprovalStore,
-    reject: bool,
     now: Instant,
 ) -> Option<HudApprovalSelection> {
-    if !reject
-        && interaction.shown_at().is_none_or(|shown_at| {
-            now.checked_duration_since(shown_at)
-                .is_none_or(|elapsed| elapsed < HUD_CONFIRM_GUARD)
-        })
-    {
+    if interaction.shown_at().is_none_or(|shown_at| {
+        now.checked_duration_since(shown_at)
+            .is_none_or(|elapsed| elapsed < HUD_CONFIRM_GUARD)
+    }) {
         return None;
     }
     let key = interaction.target()?.clone();
     let snapshot = pending.get(&key)?;
     let decision_count = snapshot_decision_count(&snapshot);
-    if reject {
-        let PendingApprovalContent::Body(body) = snapshot.content else {
-            return None;
-        };
-        let decision_index = body
-            .available_decisions?
-            .iter()
-            .position(|decision| decision.as_str() == Some("decline"))?;
-        return Some(HudApprovalSelection {
-            key,
-            decision_index,
-        });
-    }
     interaction.selected_approval(decision_count)
+}
+
+/// The reject side's decision index within the live `available_decisions`,
+/// per the priority order in `docs/ai-approval-hud-design.md`: an exact
+/// `"decline"` element wins, otherwise an exact `"cancel"` element, otherwise
+/// there is no reject-side target at all. Elements are not necessarily
+/// strings, so this only ever matches via `as_str()`.
+fn reject_decision_index_from_body(body: &PendingApprovalBody) -> Option<usize> {
+    let decisions = body.available_decisions.as_ref()?;
+    decisions
+        .iter()
+        .position(|decision| decision.as_str() == Some("decline"))
+        .or_else(|| {
+            decisions
+                .iter()
+                .position(|decision| decision.as_str() == Some("cancel"))
+        })
 }
 
 fn begin_response_from_state(
     interaction: Arc<Mutex<HudInteractionState>>,
     pending: &PendingApprovalStore,
-    reject: bool,
     now: Instant,
 ) -> Option<HudResponseDispatch> {
     let mut state = interaction.lock().unwrap();
     if state.response_in_flight.is_some() {
         return None;
     }
-    let selection = response_selection_from_state(&state, pending, reject, now)?;
+    let selection = response_selection_from_state(&state, pending, now)?;
     state.response_in_flight = Some(selection.key.clone());
     drop(state);
     Some(HudResponseDispatch {
@@ -447,16 +471,28 @@ impl HudCoordinator {
         interaction.move_selection(snapshot_decision_count(&snapshot), direction)
     }
 
+    /// Moves the selection to the reject side (see
+    /// `HudInteractionState::move_selection_toward_reject`) of the live
+    /// selected request. Like `move_selection`, this never answers the
+    /// request -- only `begin_response` (Confirm) does that, and only for
+    /// whatever index is selected when the user presses it.
+    pub fn move_selection_toward_reject(&self, pending: &PendingApprovalStore) -> Option<usize> {
+        let mut interaction = self.interaction.lock().unwrap();
+        let snapshot = pending.get(interaction.target()?)?;
+        interaction.move_selection_toward_reject(&snapshot)
+    }
+
     /// Atomically obtains the only physical-response reservation and returns
-    /// its exact store-derived candidate. A second Confirm or Reject becomes
-    /// a benign no-op until the returned dispatch object is dropped.
+    /// its exact store-derived candidate. Confirm-only: Reject no longer
+    /// sends anything (`move_selection_toward_reject` handles it), so a
+    /// second Confirm press while one is already in flight becomes a benign
+    /// no-op until the returned dispatch object is dropped.
     pub fn begin_response(
         &self,
         pending: &PendingApprovalStore,
-        reject: bool,
         now: Instant,
     ) -> Option<HudResponseDispatch> {
-        begin_response_from_state(Arc::clone(&self.interaction), pending, reject, now)
+        begin_response_from_state(Arc::clone(&self.interaction), pending, now)
     }
 
     /// Makes the newest Codex approval belonging to this exact display
@@ -734,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn confirm_guard_and_exact_decline_index_use_the_live_store() {
+    fn confirm_guard_uses_the_live_selected_index() {
         let store = PendingApprovalStore::new();
         let key = insert_codex(
             &store,
@@ -750,31 +786,19 @@ mod tests {
         assert!(response_selection_from_state(
             &state,
             &store,
-            false,
             shown_at + HUD_CONFIRM_GUARD - Duration::from_nanos(1)
         )
         .is_none());
         assert_eq!(
-            response_selection_from_state(&state, &store, false, shown_at + HUD_CONFIRM_GUARD)
+            response_selection_from_state(&state, &store, shown_at + HUD_CONFIRM_GUARD)
                 .unwrap()
                 .decision_index,
             1
         );
-        assert_eq!(
-            response_selection_from_state(
-                &state,
-                &store,
-                true,
-                shown_at + Duration::from_millis(1)
-            )
-            .unwrap()
-            .decision_index,
-            2
-        );
     }
 
     #[test]
-    fn reject_with_only_cancel_is_a_safe_noop() {
+    fn reject_with_only_cancel_moves_to_the_cancel_index() {
         let store = PendingApprovalStore::new();
         let key = insert_codex(
             &store,
@@ -786,13 +810,9 @@ mod tests {
         let mut state = HudInteractionState::default();
         state.sync_target(Some(&key), 2, shown_at);
 
-        assert!(response_selection_from_state(
-            &state,
-            &store,
-            true,
-            shown_at + Duration::from_millis(1)
-        )
-        .is_none());
+        let snapshot = store.get(&key).unwrap();
+        assert_eq!(state.move_selection_toward_reject(&snapshot), Some(1));
+        assert_eq!(state.selected_decision_index(2), Some(1));
     }
 
     #[test]
@@ -808,16 +828,79 @@ mod tests {
         let mut state = HudInteractionState::default();
         state.sync_target(Some(&key), 3, shown_at);
 
+        let snapshot = store.get(&key).unwrap();
+        assert_eq!(state.move_selection_toward_reject(&snapshot), Some(2));
+    }
+
+    #[test]
+    fn reject_without_decline_or_cancel_does_not_move() {
+        let store = PendingApprovalStore::new();
+        let key = insert_codex(
+            &store,
+            "connection-a",
+            10,
+            vec![json!("approve"), json!({"allow": true})],
+        );
+        let shown_at = Instant::now();
+        let mut state = HudInteractionState::default();
+        state.sync_target(Some(&key), 2, shown_at);
+        state.move_selection(2, HudSelectionDirection::Next);
+
+        let snapshot = store.get(&key).unwrap();
+        assert_eq!(state.move_selection_toward_reject(&snapshot), None);
+        // The prior selection is left untouched by the no-op.
+        assert_eq!(state.selected_decision_index(2), Some(1));
+    }
+
+    #[test]
+    fn reject_move_has_no_confirm_guard_delay() {
+        let store = PendingApprovalStore::new();
+        let key = insert_codex(
+            &store,
+            "connection-a",
+            11,
+            vec![json!("approve"), json!("decline")],
+        );
+        let shown_at = Instant::now();
+        let mut state = HudInteractionState::default();
+        state.sync_target(Some(&key), 2, shown_at);
+
+        // `move_selection_toward_reject` takes no `now` argument at all: it
+        // never consults `shown_at`/`HUD_CONFIRM_GUARD`, so the move succeeds
+        // right at `shown_at` rather than only after 400 ms.
+        let snapshot = store.get(&key).unwrap();
+        assert_eq!(state.move_selection_toward_reject(&snapshot), Some(1));
+    }
+
+    #[test]
+    fn reject_move_then_confirm_sends_the_moved_to_index() {
+        let store = PendingApprovalStore::new();
+        let key = insert_codex(
+            &store,
+            "connection-a",
+            12,
+            vec![json!("approve"), json!("decline")],
+        );
+        let shown_at = Instant::now();
+        let mut state = HudInteractionState::default();
+        state.sync_target(Some(&key), 2, shown_at);
+
+        let snapshot = store.get(&key).unwrap();
+        assert_eq!(state.move_selection_toward_reject(&snapshot), Some(1));
+
+        // Confirm still observes its own 400 ms guard for whatever is
+        // selected, decline-moved-to or not.
+        assert!(response_selection_from_state(
+            &state,
+            &store,
+            shown_at + HUD_CONFIRM_GUARD - Duration::from_nanos(1)
+        )
+        .is_none());
         assert_eq!(
-            response_selection_from_state(
-                &state,
-                &store,
-                true,
-                shown_at + Duration::from_millis(1)
-            )
-            .unwrap()
-            .decision_index,
-            2
+            response_selection_from_state(&state, &store, shown_at + HUD_CONFIRM_GUARD)
+                .unwrap()
+                .decision_index,
+            1
         );
     }
 
@@ -840,14 +923,12 @@ mod tests {
         let first = begin_response_from_state(
             Arc::clone(&interaction),
             &store,
-            false,
             shown_at + HUD_CONFIRM_GUARD,
         )
         .expect("first dispatch reserves the HUD");
         assert!(begin_response_from_state(
             Arc::clone(&interaction),
             &store,
-            true,
             shown_at + HUD_CONFIRM_GUARD,
         )
         .is_none());
@@ -858,7 +939,6 @@ mod tests {
         assert!(begin_response_from_state(
             Arc::clone(&interaction),
             &store,
-            false,
             shown_at + HUD_CONFIRM_GUARD,
         )
         .is_some());
@@ -878,7 +958,6 @@ mod tests {
         let first_dispatch = begin_response_from_state(
             Arc::clone(&interaction),
             &store,
-            false,
             shown_at + HUD_CONFIRM_GUARD,
         )
         .unwrap();
@@ -895,18 +974,16 @@ mod tests {
         let store = PendingApprovalStore::new();
         let shown_at = Instant::now();
         let mut state = HudInteractionState::default();
-        assert!(response_selection_from_state(&state, &store, false, shown_at).is_none());
+        assert!(response_selection_from_state(&state, &store, shown_at).is_none());
 
         let empty = insert_codex(&store, "connection-a", 1, Vec::new());
         state.sync_target(Some(&empty), 0, shown_at);
         assert!(
-            response_selection_from_state(&state, &store, false, shown_at + HUD_CONFIRM_GUARD)
-                .is_none()
+            response_selection_from_state(&state, &store, shown_at + HUD_CONFIRM_GUARD).is_none()
         );
         store.resolve(&empty);
         assert!(
-            response_selection_from_state(&state, &store, true, shown_at + HUD_CONFIRM_GUARD)
-                .is_none()
+            response_selection_from_state(&state, &store, shown_at + HUD_CONFIRM_GUARD).is_none()
         );
     }
 

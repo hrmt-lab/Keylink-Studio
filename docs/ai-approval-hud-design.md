@@ -2,10 +2,10 @@
 
 - 状態: **段階1〜段階4まで実装・実機受け入れ済み（2026-09-07）。** 残るは段階5（異常時のターミナル縮退、監査ログ、Settings）
 - 作成日: 2026-09-03
-- 最終更新: 2026-09-07（段階4の残り＝ScreenKeyのClaude Code対象表示を実装。あわせて実機で見つかった承認ライフサイクルの3不具合を修正し、§9.5・§9.6を新設、§13・§14を改訂）
+- 最終更新: 2026-09-07（同日さらにプランモードを実測。`ExitPlanMode` の主表示をプラン本文へ変更し、§7.2・§14-4・§14-17・§15 を改訂。先行して段階4の残り＝ScreenKeyのClaude Code対象表示を実装し、実機で見つかった承認ライフサイクルの3不具合を修正、§9.5・§9.6を新設、§13・§14を改訂）
 - 対象: Keylink Studio Host、Codex Broker、Claude Code Observer、Tauri UI、Firmware 描画
 - 対象ハードウェア: ScreenKey 4個（0.85インチ / 128×128 / ST7735S）、通常キー、エンコーダ 1個（**押しボタン無し**）。実機は aipad（3×4、うち ScreenKey 4・`&bootloader` 1・エンコーダ位置 1）
-- 基準環境: `codex-cli 0.153.2`、Claude Code `2.1.259`、Windows 11 Pro `10.0.26200.9278`
+- 基準環境: `codex-cli 0.153.2`、Claude Code `2.1.259`（プランモードの実測のみ `2.1.263`）、Windows 11 Pro `10.0.26200.9278`
 
 ## 本書が置き換える文書
 
@@ -291,7 +291,7 @@ HUD にフォーカスを渡す理由が構造的に存在しない。
 
 | 表示項目 | Codex | Claude Code |
 |---|---|---|
-| **主表示** | `commandActions[].command` | `tool_input.command` |
+| **主表示** | `commandActions[].command` | `tool_input.command`（`ExitPlanMode` は `tool_input.plan` の全文） |
 | コマンド全文 | `command`（`powershell.exe -Command '...'` を含む冗長な形。副次表示） | — |
 | 理由 | `reason`（**AI がユーザーの言語で書く**。実測は日本語） | — |
 | 作業ディレクトリ | `cwd` | `cwd` |
@@ -300,6 +300,14 @@ HUD にフォーカスを渡す理由が構造的に存在しない。
 
 **Codex の `command` をそのまま主表示にしてはならない。** `powershell.exe -Command '...'` の
 ラッパに本質が埋もれる。
+
+**`ExitPlanMode`（プランモード）はプラン本文をそのまま出す。2026-09-07 実装・実機受け入れ済み。**
+`tool_input` に `command` が無いため、当初は `tool_input` 全体を JSON 文字列にして出していた。
+プランは複数段落の Markdown なので、**改行の潰れた1行になって読めなかった**。HUD の表示欄は
+改行を保つので、`tool_input.plan` を前後トリムだけして渡す。種別の表示も
+「`ExitPlanMode` の実行許可」ではなく**「プランの承認」**とする。
+なお 400×300（論理px）に長いプランは収まりきらない。全文はターミナルで読む前提で、
+HUD は「何のプランが上がったか」を掴むためのものと位置づける。
 
 ### 7.3 実装上の注意
 
@@ -863,7 +871,11 @@ first-wins は、ターミナルが先に答えると `PostToolUse` / `Permissio
    待ちの時点で必ず効くので、押しても無反応の HUD は残らない。実際の上限は、承認待ちを
    放置してから HUD で答え、`answered=` を見れば分かる
 4. `item/fileChange/requestApproval` / `item/permissions/requestApproval` /
-   `item/tool/requestUserInput` の各要求の扱い（本書は command approval を初期対象とする）
+   `item/tool/requestUserInput` の各要求の扱い（本書は command approval を初期対象とする）。
+   **2026-09-07 にコードで確認: これらは ScreenKey を黄色くするが、HUD は空になる。**
+   Broker が本文を取り出すのは `item/commandExecution/requestApproval` だけであるため
+   （`codex_broker.rs`）。`mcpServer/elicitation/request` も同じ。**どの段階にも入っていない**ので、
+   着手するなら段階5の中身を決めるときに一緒に判断する
 5. Codex の `proposedExecpolicyAmendment` を適用したときの永続範囲
 6. 複数 connection が同時に承認待ちになる本番GUI／実HIDでの操作性（同一 connection の2 thread選択は自動E2E済み）
 7. ~~`decline` が提示されない要求での短押しReject~~ **→ 2026-09-06 決着。** ❌ を
@@ -893,10 +905,13 @@ first-wins は、ターミナルが先に答えると `PostToolUse` / `Permissio
     「そのツールを実行してよいか」だけで、質問への回答は決まらない。ユーザー判断で**除外せず
     出し続ける**こととし、将来 HUD から質問そのものに答えられるようにしたい（`Elicitation`
     hook を扱う別機能になる）
-17. **ターミナルに出る選択肢と HUD の選択肢を揃えたい**（ユーザー要望、2026-09-07）。
-    ターミナルが 4 つ（`allow` / このコマンドだけ常に許可 / `allow` かつ auto mode on / `deny`）
-    出す場面があり、HUD はこれを 3 つに畳んでいる（候補を1件ずつ選ばせない、という §9.3 の判断）。
-    **同じ顔ぶれを出す方向で見直す。** 未着手
+17. ~~ターミナルに出る選択肢と HUD の選択肢を揃えたい~~ **→ 2026-09-07 決着。揃えない。**
+    プランモードのフック本文を実測したところ、`permission_suggestions` が**キーごと存在せず**、
+    ターミナルの「Yes, and use auto mode」は Host へ渡ってこない。HUD に出すには
+    **Claude Code が提示していないモード変更を Studio が自分で組み立てる**ことになり、
+    §9.3 の「候補を解釈して作り変えない」という境界を破る。**ユーザー判断で 2 択のまま据え置く**
+    （auto mode を使いたいときはターミナルで選ぶ。プランはどのみちターミナルで読むため）。
+    コマンド承認側で 4 択が出る場面の実測も、同じ判断により不要とした
 
 ---
 
@@ -906,6 +921,10 @@ first-wins は、ターミナルが先に答えると `PostToolUse` / `Permissio
 - 排他的フルスクリーンアプリとの共存（HUD を出さず ScreenKey の点滅のみへ縮退）
 - テキスト入力を伴う回答（Codex の「拒否して指示を伝える」、`isOther` の自由記述）
 - MCP elicitation
+- **Codex のプランモードの確認**（App Server プロトコルに要求が存在しない。2026-09-07、
+  `codex app-server generate-json-schema --experimental` で `ServerRequest` を全数確認した。
+  プランは通知として流れるだけで、確認は CLI の中で完結する。実機でも ScreenKey は黄色に
+  ならず HUD も出なかった）
 - Keylink Studio 外から起動されたセッションへの回答
 - 転送プレビューウィンドウの仕様（`ai-response-transfer-design.md` が正本。
   ただしウィンドウ層は §7.1 を共有する）

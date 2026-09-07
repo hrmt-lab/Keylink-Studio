@@ -349,10 +349,24 @@ fn claude_approval_body(body: &Value) -> PendingApprovalBody {
         .and_then(|input| input.get("command"))
         .and_then(Value::as_str)
         .map(str::to_string);
+    let tool_name = required_string(body, "tool_name");
+    // `ExitPlanMode`'s `tool_input` has no `command` -- it carries the whole
+    // plan document under `plan` instead, as captured from a real
+    // plan-mode approval on 2026-09-07. The generic fallback
+    // below dumps `tool_input` as one JSON string, which for a plan means
+    // flattening a multi-paragraph Markdown document -- newlines and all --
+    // into a single unreadable line on the HUD. `ExitPlanMode` gets its own
+    // branch instead, one that keeps the plan's newlines and Markdown intact
+    // so the HUD's own display area (which preserves line breaks) can show
+    // the whole thing as the user would read it in the terminal.
     let primary_text = command.clone().or_else(|| {
-        tool_input.map(|input| {
-            serde_json::to_string(input).unwrap_or_else(|_| "<tool_input>".to_string())
-        })
+        if tool_name.as_deref() == Some("ExitPlanMode") {
+            plan_text(tool_input)
+        } else {
+            tool_input.map(|input| {
+                serde_json::to_string(input).unwrap_or_else(|_| "<tool_input>".to_string())
+            })
+        }
     });
     // Only a non-empty JSON array counts as "there is a suggestion to
     // offer" -- see this function's own doc comment on why an absent field,
@@ -377,7 +391,7 @@ fn claude_approval_body(body: &Value) -> PendingApprovalBody {
         full_command: command,
         reason: None,
         cwd: required_string(body, "cwd"),
-        kind: required_string(body, "tool_name"),
+        kind: tool_name,
         available_decisions: Some(available_decisions),
         // Auxiliary only -- see the doc comments on these fields in
         // `pending_approval.rs`. Absent in the real capture (§4), present
@@ -386,6 +400,24 @@ fn claude_approval_body(body: &Value) -> PendingApprovalBody {
         prompt_id: required_string(body, "prompt_id"),
         permission_suggestions,
     }
+}
+
+/// Pulls the full plan document out of an `ExitPlanMode` `tool_input` for
+/// `claude_approval_body`'s HUD display -- see that function's comment on
+/// why the whole plan, not a summary, is what gets shown. Returns
+/// `tool_input.plan` verbatim aside from trimming leading/trailing
+/// whitespace: its newlines and Markdown (`#` headings, code fences, list
+/// markers) are left exactly as Claude Code wrote them, because the HUD's
+/// display area preserves line breaks and a plan reads the same way there
+/// as it does in the terminal. There is no length cap.
+///
+/// Returns `None` -- never a JSON dump -- when `plan` is absent, not a
+/// string, or blank after trimming: the whole point of this function is to
+/// give the HUD *something readable or nothing*, not a fallback that
+/// reintroduces the unreadable-single-line JSON dump it exists to avoid.
+fn plan_text(tool_input: Option<&Value>) -> Option<String> {
+    let plan = tool_input?.get("plan")?.as_str()?.trim();
+    (!plan.is_empty()).then(|| plan.to_string())
 }
 
 pub struct ClaudeSessionReducer {
@@ -2169,6 +2201,73 @@ mod tests {
             .primary_text
             .as_deref()
             .is_some_and(|text| text.contains("notes.md")));
+    }
+
+    /// The real `PermissionRequest` body captured for a plan-mode approval
+    /// (`ExitPlanMode`): `tool_input` carries the whole plan document under
+    /// `plan`, keyed off a Markdown `#` heading, plus a `planFilePath` the
+    /// terminal wrote the plan to. `primary_text` must become the plan's
+    /// full text, trimmed of leading/trailing whitespace only -- not a
+    /// heading, and not a JSON dump of the whole plan.
+    #[test]
+    fn claude_approval_body_shows_the_full_plan_text_for_exit_plan_mode() {
+        let body = serde_json::json!({
+            "cwd": "C:\\temp\\test1",
+            "hook_event_name": "PermissionRequest",
+            "permission_mode": "plan",
+            "prompt_id": "prompt-1",
+            "tool_name": "ExitPlanMode",
+            "tool_input": {
+                "plan": "# デスクトップに test1 フォルダを作成\n\n## Context\nユーザーから…\n\n## 実施内容\n1. …\n",
+                "planFilePath": "C:\\Users\\Onigiri\\.claude\\plans\\desktop-test1-vast-breeze.md"
+            }
+        });
+        let extracted = claude_approval_body(&body);
+        assert_eq!(
+            extracted.primary_text.as_deref(),
+            Some("# デスクトップに test1 フォルダを作成\n\n## Context\nユーザーから…\n\n## 実施内容\n1. …")
+        );
+        assert_eq!(extracted.full_command, None);
+        assert_eq!(extracted.kind.as_deref(), Some("ExitPlanMode"));
+        assert_eq!(
+            extracted.available_decisions,
+            Some(vec![json!(CLAUDE_DECISION_ALLOW), json!(CLAUDE_DECISION_DENY)])
+        );
+    }
+
+    /// A plan whose text starts with blank lines still needs its full body
+    /// on the HUD, with only the leading/trailing whitespace trimmed away --
+    /// the blank lines in the middle of a real plan are not touched.
+    #[test]
+    fn claude_approval_body_trims_leading_and_trailing_whitespace_from_the_plan() {
+        let body = serde_json::json!({
+            "tool_name": "ExitPlanMode",
+            "tool_input": {
+                "plan": "\n\nデスクトップに test1 フォルダを作成します。\n\n次に…\n"
+            }
+        });
+        let extracted = claude_approval_body(&body);
+        assert_eq!(
+            extracted.primary_text.as_deref(),
+            Some("デスクトップに test1 フォルダを作成します。\n\n次に…")
+        );
+    }
+
+    /// When an `ExitPlanMode` request somehow carries no `plan` at all,
+    /// there is nothing readable to show -- `primary_text` must fall back
+    /// to `None`, never to the generic JSON-dump-of-`tool_input` branch the
+    /// plan branch exists to avoid.
+    #[test]
+    fn claude_approval_body_has_no_primary_text_when_exit_plan_mode_is_missing_a_plan() {
+        let body = serde_json::json!({
+            "tool_name": "ExitPlanMode",
+            "tool_input": {
+                "planFilePath": "C:\\Users\\Onigiri\\.claude\\plans\\desktop-test1-vast-breeze.md"
+            }
+        });
+        let extracted = claude_approval_body(&body);
+        assert_eq!(extracted.primary_text, None);
+        assert_eq!(extracted.full_command, None);
     }
 
     #[test]

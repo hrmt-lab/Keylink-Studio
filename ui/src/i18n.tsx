@@ -735,6 +735,7 @@ const T = {
     "hud.kind.codex_unknown": "承認待ち",
     "hud.kind.claude_tool": "{tool} の実行許可",
     "hud.kind.claude_unknown": "許可待ち",
+    "hud.kind.claude_plan": "プランの承認",
   },
   en: {
     "app.loading": "Loading...",
@@ -1462,6 +1463,7 @@ const T = {
     "hud.kind.codex_unknown": "Waiting for approval",
     "hud.kind.claude_tool": "{tool} execution approval",
     "hud.kind.claude_unknown": "Waiting for approval",
+    "hud.kind.claude_plan": "Plan approval",
   },
 } as const;
 

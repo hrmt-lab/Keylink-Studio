@@ -31,6 +31,7 @@ function describeKind(payload: HudApprovalPayload, t: TFn): string {
     if (payload.kind === "command") return t("hud.kind.codex_command");
     return payload.kind ?? t("hud.kind.codex_unknown");
   }
+  if (payload.kind === "ExitPlanMode") return t("hud.kind.claude_plan");
   return payload.kind
     ? t("hud.kind.claude_tool", { tool: payload.kind })
     : t("hud.kind.claude_unknown");

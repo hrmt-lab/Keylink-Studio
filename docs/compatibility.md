@@ -1,5 +1,14 @@
 # 互換性情報
 
+## 現行 Codex CLI 基準（2026-09-11）
+
+現行基準は `codex-cli 0.154.0` です。experimental App Server schema の SHA-256 は
+`24DF528ACEC2952E6B96C1C2B061F98E60177D059E12C90CF318621380C9DE9E` です。
+検証済みの `0.153.2`、`0.151.0`、`0.150.1`、`0.149.1`、`0.149.0`、`0.147.0`、
+WSL 側 `0.146.0` も対応する version/schema pair として保持しています。
+
+詳細は [`codex-cli-0.154.0-compatibility.md`](codex-cli-0.154.0-compatibility.md) を参照してください。
+
 Keylink Studio のアプリバージョンと Host Link protocol version は別管理です。
 
 - アプリバージョンは PC 側アプリ、UI、CLI、配布物のバージョンです。

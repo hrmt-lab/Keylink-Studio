@@ -1,8 +1,10 @@
 # CodexランチャーのWSL実行環境不一致と解消方針
 
+> 現行基準は `codex-cli 0.154.0` です。Windows 側の version/schema preflight 実装と core unit test は完了しています。
+
 - 記録日: 2026-08-02
 - 対象: Keylink Studioの`Codexを開く`からWSL版Codex CLIを起動する経路
-- 状態: runtime選択・WSL App Server起動・WSL preflightを実装。Windows側Codex CLI 0.153.2の実Broker E2Eは合格。WSL側0.153.2と実ScreenKeyは未検証。
+- 状態: runtime選択・WSL App Server起動・WSL preflightを実装。Windows側Codex CLI 0.154.0の実Broker E2Eは合格。WSL側0.154.0と実ScreenKeyは未検証。詳細は [`codex-cli-0.154.0-compatibility.md`](codex-cli-0.154.0-compatibility.md) を参照してください。
 
 ## 2026-08-02の実装・確認結果
 

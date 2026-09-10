@@ -1,5 +1,11 @@
 # Codex Broker／ScreenKeyプロトタイプの現在地と次の作業
 
+## 2026-09-11: Codex CLI 0.154.0 対応記録
+
+現行基準を `codex-cli 0.154.0` とし、experimental schema hash を更新しました。取得結果、
+0.153.2 との API 比較、検証範囲は [`codex-cli-0.154.0-compatibility.md`](codex-cli-0.154.0-compatibility.md) に記録しています。
+実 Broker lifecycle E2E の結果は親タスクの検証完了後に追記します。
+
 - 最終更新日: 2026-08-29
 - 用途: Codex Broker／ScreenKeyプロトタイプの実施結果、完了条件、次の開始地点を管理する進捗文書
 - 主な確認元:

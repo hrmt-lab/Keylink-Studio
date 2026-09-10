@@ -2231,7 +2231,10 @@ mod tests {
         assert_eq!(extracted.kind.as_deref(), Some("ExitPlanMode"));
         assert_eq!(
             extracted.available_decisions,
-            Some(vec![json!(CLAUDE_DECISION_ALLOW), json!(CLAUDE_DECISION_DENY)])
+            Some(vec![
+                json!(CLAUDE_DECISION_ALLOW),
+                json!(CLAUDE_DECISION_DENY)
+            ])
         );
     }
 

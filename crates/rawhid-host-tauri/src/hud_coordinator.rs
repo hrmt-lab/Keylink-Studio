@@ -27,7 +27,7 @@ use std::{
 
 use rawhid_host_core::pending_approval::{
     ApprovalClient, ApprovalKey, PendingApprovalBody, PendingApprovalContent,
-    PendingApprovalSnapshot, PendingApprovalStore, CLAUDE_DECISION_ALLOW,
+    PendingApprovalSnapshot, PendingApprovalStore, PendingQuestion, CLAUDE_DECISION_ALLOW,
     CLAUDE_DECISION_ALLOW_WITH_PERMISSIONS, CLAUDE_DECISION_DENY,
 };
 use serde::Serialize;
@@ -106,6 +106,40 @@ pub struct HudApprovalPayload {
     /// regardless of the model-facing language, matching this HUD's
     /// existing English-only decision list.
     pub decision_labels: Option<Vec<String>>,
+    pub interaction_kind: Option<String>,
+    pub questions: Option<Vec<HudQuestion>>,
+    pub question_index: Option<usize>,
+    pub interaction_message: Option<String>,
+    pub interaction_url: Option<String>,
+    pub permission_text: Option<String>,
+    pub requires_terminal: bool,
+    pub physical_input_available: bool,
+    pub review_mode: bool,
+    pub review_answers: Option<Vec<HudAnswer>>,
+    pub review_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HudQuestionOption {
+    pub label: String,
+    pub description: Option<String>,
+    pub is_other: bool,
+    pub is_secret: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HudQuestion {
+    pub id: String,
+    pub header: Option<String>,
+    pub question: String,
+    pub options: Vec<HudQuestionOption>,
+    pub multi_select: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct HudAnswer {
+    pub id: String,
+    pub value: String,
 }
 
 impl HudApprovalPayload {
@@ -113,24 +147,63 @@ impl HudApprovalPayload {
         key: &ApprovalKey,
         snapshot: &PendingApprovalSnapshot,
         selected_decision_index: Option<usize>,
+        question_index: Option<usize>,
+        review_mode: bool,
+        review_answers: Option<Vec<HudAnswer>>,
+        review_index: Option<usize>,
     ) -> Self {
         let client = client_label(snapshot.client);
         match &snapshot.content {
-            PendingApprovalContent::Body(body) => Self {
-                request_key: key.token().to_string(),
-                client,
-                oversized: false,
-                kind: body.kind.clone(),
-                primary_text: body.primary_text.clone(),
-                full_command: body.full_command.clone(),
-                reason: body.reason.clone(),
-                cwd: body.cwd.clone(),
-                available_decisions: body.available_decisions.clone(),
-                selected_decision_index,
-                decision_labels: (snapshot.client == ApprovalClient::ClaudeCode)
-                    .then(|| claude_decision_labels(body))
-                    .flatten(),
-            },
+            PendingApprovalContent::Body(body) => {
+                let terminal_only = body
+                    .interaction
+                    .as_ref()
+                    .is_some_and(|interaction| interaction.requires_terminal);
+                Self {
+                    request_key: key.token().to_string(),
+                    client,
+                    oversized: false,
+                    kind: body.kind.clone(),
+                    primary_text: body.primary_text.clone(),
+                    full_command: body.full_command.clone(),
+                    reason: body.reason.clone(),
+                    cwd: body.cwd.clone(),
+                    available_decisions: (!terminal_only)
+                        .then(|| body.available_decisions.clone())
+                        .flatten(),
+                    selected_decision_index,
+                    decision_labels: (snapshot.client == ApprovalClient::ClaudeCode)
+                        .then(|| claude_decision_labels(body))
+                        .flatten(),
+                    interaction_kind: body.interaction.as_ref().map(|value| {
+                        serde_json::to_value(value.kind)
+                            .ok()
+                            .and_then(|value| value.as_str().map(str::to_string))
+                            .unwrap_or_default()
+                    }),
+                    questions: body.interaction.as_ref().map(|interaction| {
+                        interaction.questions.iter().map(hud_question).collect()
+                    }),
+                    question_index,
+                    interaction_message: body
+                        .interaction
+                        .as_ref()
+                        .and_then(|interaction| interaction.message.clone()),
+                    interaction_url: body
+                        .interaction
+                        .as_ref()
+                        .and_then(|interaction| interaction.url.clone()),
+                    permission_text: body
+                        .interaction
+                        .as_ref()
+                        .and_then(|interaction| interaction.permission_text.clone()),
+                    requires_terminal: terminal_only,
+                    physical_input_available: true,
+                    review_mode,
+                    review_answers,
+                    review_index,
+                }
+            }
             PendingApprovalContent::Oversized => Self {
                 request_key: key.token().to_string(),
                 client,
@@ -143,9 +216,52 @@ impl HudApprovalPayload {
                 available_decisions: None,
                 selected_decision_index: None,
                 decision_labels: None,
+                interaction_kind: None,
+                questions: None,
+                question_index: None,
+                interaction_message: None,
+                interaction_url: None,
+                permission_text: None,
+                requires_terminal: true,
+                physical_input_available: true,
+                review_mode: false,
+                review_answers: None,
+                review_index: None,
             },
         }
     }
+}
+
+fn hud_question(question: &PendingQuestion) -> HudQuestion {
+    HudQuestion {
+        id: question.id.clone(),
+        header: question.header.clone(),
+        question: question.question.clone(),
+        options: question
+            .options
+            .iter()
+            .map(|option| HudQuestionOption {
+                label: option.label.clone(),
+                description: option.description.clone(),
+                is_other: option.is_other,
+                is_secret: option.is_secret,
+            })
+            .collect(),
+        multi_select: question.multi_select,
+    }
+}
+
+fn hud_answers(answers: &[(String, Value)]) -> Vec<HudAnswer> {
+    answers
+        .iter()
+        .map(|(id, value)| HudAnswer {
+            id: id.clone(),
+            value: value
+                .as_str()
+                .map(str::to_string)
+                .unwrap_or_else(|| value.to_string()),
+        })
+        .collect()
 }
 
 /// Builds the exact per-index labels for a Claude Code entry's
@@ -276,6 +392,10 @@ pub enum HudTargetSession {
 pub struct HudApprovalSelection {
     pub key: ApprovalKey,
     pub decision_index: usize,
+    /// For a validated Codex input request, the JSON-RPC result to send.  It
+    /// is absent for ordinary approval decisions and is built only from the
+    /// retained question/options.
+    pub response: Option<Value>,
 }
 
 /// Host-side interaction state for the approval currently visible in the
@@ -292,6 +412,11 @@ pub struct HudInteractionState {
     /// previous Broker response is finishing, and that completion must never
     /// unlock a newer request.
     response_in_flight: Option<ApprovalKey>,
+    question_index: usize,
+    question_answers: Vec<(String, Value)>,
+    question_option_index: usize,
+    review_mode: bool,
+    review_index: usize,
 }
 
 impl HudInteractionState {
@@ -313,10 +438,20 @@ impl HudInteractionState {
             Some(_) => {
                 self.selected_decision_index = (decision_count > 0).then_some(0);
                 self.shown_at = Some(now);
+                self.question_index = 0;
+                self.question_answers.clear();
+                self.question_option_index = 0;
+                self.review_mode = false;
+                self.review_index = 0;
             }
             None => {
                 self.selected_decision_index = None;
                 self.shown_at = None;
+                self.question_index = 0;
+                self.question_answers.clear();
+                self.question_option_index = 0;
+                self.review_mode = false;
+                self.review_index = 0;
             }
         }
     }
@@ -380,7 +515,41 @@ impl HudInteractionState {
         Some(HudApprovalSelection {
             key: self.target.clone()?,
             decision_index: self.selected_decision_index(decision_count)?,
+            response: None,
         })
+    }
+
+    fn move_question_selection(
+        &mut self,
+        option_count: usize,
+        direction: HudSelectionDirection,
+    ) -> Option<usize> {
+        if self.target.is_none() || option_count == 0 {
+            return None;
+        }
+        self.question_option_index = match direction {
+            HudSelectionDirection::Previous => {
+                (self.question_option_index + option_count - 1) % option_count
+            }
+            HudSelectionDirection::Next => (self.question_option_index + 1) % option_count,
+        };
+        Some(self.question_option_index)
+    }
+
+    fn move_review_selection(
+        &mut self,
+        answer_count: usize,
+        direction: HudSelectionDirection,
+    ) -> Option<usize> {
+        let item_count = answer_count.checked_add(1)?;
+        if self.target.is_none() || item_count == 0 {
+            return None;
+        }
+        self.review_index = match direction {
+            HudSelectionDirection::Previous => (self.review_index + item_count - 1) % item_count,
+            HudSelectionDirection::Next => (self.review_index + 1) % item_count,
+        };
+        Some(self.review_index)
     }
 
     pub fn shown_at(&self) -> Option<Instant> {
@@ -392,6 +561,70 @@ impl HudInteractionState {
     }
 }
 
+/// Calculates the selection fields sent to the HUD without mutating the
+/// coordinator. Ordinary command/file approvals use the decision selection;
+/// Codex Answer Deck input uses the active question's option selection;
+/// terminal-only permissions/elicitation requests expose no selectable item.
+fn hud_payload_selection_indices(
+    snapshot: &PendingApprovalSnapshot,
+    interaction: &HudInteractionState,
+) -> (
+    Option<usize>,
+    Option<usize>,
+    bool,
+    Option<Vec<HudAnswer>>,
+    Option<usize>,
+) {
+    let PendingApprovalContent::Body(body) = &snapshot.content else {
+        return (None, None, false, None, None);
+    };
+
+    let Some(request) = body.interaction.as_ref() else {
+        return (
+            interaction.selected_decision_index(snapshot_decision_count(snapshot)),
+            None,
+            false,
+            None,
+            None,
+        );
+    };
+
+    if request.requires_terminal {
+        return (None, None, false, None, None);
+    }
+
+    match request.kind {
+        rawhid_host_core::pending_approval::PendingRequestKind::Approval => (
+            interaction.selected_decision_index(snapshot_decision_count(snapshot)),
+            None,
+            false,
+            None,
+            None,
+        ),
+        rawhid_host_core::pending_approval::PendingRequestKind::Input => {
+            let selected = request
+                .questions
+                .get(interaction.question_index)
+                .and_then(|question| {
+                    (interaction.question_option_index < question.options.len())
+                        .then_some(interaction.question_option_index)
+                });
+            let review = interaction.review_mode;
+            (
+                selected,
+                Some(interaction.question_index),
+                review,
+                review.then(|| hud_answers(&interaction.question_answers)),
+                review.then_some(interaction.review_index),
+            )
+        }
+        rawhid_host_core::pending_approval::PendingRequestKind::Permissions
+        | rawhid_host_core::pending_approval::PendingRequestKind::Elicitation => {
+            (None, None, false, None, None)
+        }
+    }
+}
+
 /// Owns the one in-flight HUD response reservation. Dropping it releases the
 /// reservation only when it still belongs to the same opaque request key.
 /// This makes every worker return path -- including Broker errors and panic
@@ -399,6 +632,12 @@ impl HudInteractionState {
 pub struct HudResponseDispatch {
     pub selection: HudApprovalSelection,
     _reservation: HudResponseReservation,
+}
+
+pub enum HudConfirmOutcome {
+    Noop,
+    Advanced,
+    Dispatch(HudResponseDispatch),
 }
 
 struct HudResponseReservation {
@@ -417,7 +656,17 @@ impl Drop for HudResponseReservation {
 
 fn snapshot_decision_count(snapshot: &PendingApprovalSnapshot) -> usize {
     match &snapshot.content {
-        PendingApprovalContent::Body(body) => body.available_decisions.as_ref().map_or(0, Vec::len),
+        PendingApprovalContent::Body(body) => {
+            if body
+                .interaction
+                .as_ref()
+                .is_some_and(|interaction| interaction.requires_terminal)
+            {
+                0
+            } else {
+                body.available_decisions.as_ref().map_or(0, Vec::len)
+            }
+        }
         PendingApprovalContent::Oversized => 0,
     }
 }
@@ -623,23 +872,48 @@ impl HudCoordinator {
     /// A selected key that was resolved or evicted safely falls back to the
     /// current latest request (or hides when none remain).
     pub fn update(&self, app: &AppHandle, pending: &PendingApprovalStore) {
+        self.update_with_device_availability(app, pending, true);
+    }
+
+    /// Updates the HUD and marks whether a verified Host Action device is
+    /// currently available for physical input. A temporary zero-device state
+    /// keeps the pending request visible while making the physical-control
+    /// limitation explicit in the payload.
+    pub fn update_with_device_availability(
+        &self,
+        app: &AppHandle,
+        pending: &PendingApprovalStore,
+        physical_input_available: bool,
+    ) {
         let mut shown = self.shown.lock().unwrap();
         let selected = self.interaction.lock().unwrap().target().cloned();
         let current = current_target(pending, selected);
         match current {
             Some((key, snapshot)) => {
                 let changed = replace_shown(pending, &mut shown, &key);
-                let selected_decision_index = {
+                let (
+                    selected_decision_index,
+                    question_index,
+                    review_mode,
+                    review_answers,
+                    review_index,
+                ) = {
                     let mut interaction = self.interaction.lock().unwrap();
                     let decision_count = snapshot_decision_count(&snapshot);
                     interaction.sync_target(Some(&key), decision_count, Instant::now());
-                    interaction.selected_decision_index(decision_count)
+                    hud_payload_selection_indices(&snapshot, &interaction)
                 };
-                let payload = Some(HudApprovalPayload::from_snapshot(
+                let mut payload = HudApprovalPayload::from_snapshot(
                     &key,
                     &snapshot,
                     selected_decision_index,
-                ));
+                    question_index,
+                    review_mode,
+                    review_answers,
+                    review_index,
+                );
+                payload.physical_input_available = physical_input_available;
+                let payload = Some(payload);
                 let _ = app.emit_to(HUD_WINDOW_LABEL, HUD_EVENT, payload);
                 if changed {
                     self.show();
@@ -669,18 +943,90 @@ impl HudCoordinator {
     ) -> Option<usize> {
         let mut interaction = self.interaction.lock().unwrap();
         let snapshot = pending.get(interaction.target()?)?;
+        if let PendingApprovalContent::Body(body) = &snapshot.content {
+            if let Some(request) = body.interaction.as_ref().filter(|request| {
+                request.kind == rawhid_host_core::pending_approval::PendingRequestKind::Input
+                    && !request.requires_terminal
+            }) {
+                if interaction.review_mode {
+                    let answer_count = interaction.question_answers.len();
+                    return interaction.move_review_selection(answer_count, direction);
+                }
+                let question = request.questions.get(interaction.question_index)?;
+                return interaction.move_question_selection(question.options.len(), direction);
+            }
+        }
         interaction.move_selection(snapshot_decision_count(&snapshot), direction)
     }
 
-    /// Moves the selection to the reject side (see
-    /// `HudInteractionState::move_selection_toward_reject`) of the live
-    /// selected request. Like `move_selection`, this never answers the
-    /// request -- only `begin_response` (Confirm) does that, and only for
-    /// whatever index is selected when the user presses it.
-    pub fn move_selection_toward_reject(&self, pending: &PendingApprovalStore) -> Option<usize> {
+    /// Handles the physical reject action for an input Answer Deck.  During
+    /// question entry it goes to the previous question; on the first one it
+    /// is a no-op.  During review it returns to the last question so the user
+    /// can revise the deck before sending it.  Approval entries retain their
+    /// existing reject-highlight behavior.
+    pub fn reject(&self, pending: &PendingApprovalStore) -> Option<usize> {
         let mut interaction = self.interaction.lock().unwrap();
         let snapshot = pending.get(interaction.target()?)?;
-        interaction.move_selection_toward_reject(&snapshot)
+        let PendingApprovalContent::Body(body) = &snapshot.content else {
+            return None;
+        };
+        let Some(request) = body.interaction.as_ref() else {
+            return interaction.move_selection_toward_reject(&snapshot);
+        };
+        if request.requires_terminal {
+            // Permissions, elicitation, and unverified input shapes are
+            // display-only. In particular, elicitation must not acquire a
+            // HUD-side reject path merely because its body advertises a
+            // string that happens to look like a decision.
+            return None;
+        }
+        if request.kind != rawhid_host_core::pending_approval::PendingRequestKind::Input {
+            return interaction.move_selection_toward_reject(&snapshot);
+        }
+        if interaction.review_mode {
+            interaction.review_mode = false;
+            interaction.question_index = request.questions.len().saturating_sub(1);
+            interaction.question_option_index = request
+                .questions
+                .get(interaction.question_index)
+                .and_then(|question| {
+                    interaction
+                        .question_answers
+                        .iter()
+                        .find(|(id, _)| id == &question.id)
+                        .and_then(|(_, value)| value.as_str())
+                        .and_then(|answer| {
+                            question
+                                .options
+                                .iter()
+                                .position(|option| option.label == answer)
+                        })
+                })
+                .unwrap_or(0);
+            return Some(interaction.question_index);
+        }
+        if interaction.question_index == 0 {
+            return None;
+        }
+        interaction.question_index -= 1;
+        interaction.question_option_index = request
+            .questions
+            .get(interaction.question_index)
+            .and_then(|question| {
+                interaction
+                    .question_answers
+                    .iter()
+                    .find(|(id, _)| id == &question.id)
+                    .and_then(|(_, value)| value.as_str())
+                    .and_then(|answer| {
+                        question
+                            .options
+                            .iter()
+                            .position(|option| option.label == answer)
+                    })
+            })
+            .unwrap_or(0);
+        Some(interaction.question_index)
     }
 
     /// Atomically obtains the only physical-response reservation and returns
@@ -694,6 +1040,112 @@ impl HudCoordinator {
         now: Instant,
     ) -> Option<HudResponseDispatch> {
         begin_response_from_state(Arc::clone(&self.interaction), pending, now)
+    }
+
+    /// Applies the Answer Deck confirm semantics.  Intermediate questions are
+    /// stored locally and advance to the next question; only the final
+    /// question creates a response reservation.
+    pub fn confirm(&self, pending: &PendingApprovalStore, now: Instant) -> HudConfirmOutcome {
+        let mut state = self.interaction.lock().unwrap();
+        let Some(key) = state.target.clone() else {
+            return HudConfirmOutcome::Noop;
+        };
+        if state.shown_at.is_none_or(|shown_at| {
+            now.checked_duration_since(shown_at)
+                .is_none_or(|elapsed| elapsed < HUD_CONFIRM_GUARD)
+        }) || state.response_in_flight.is_some()
+        {
+            return HudConfirmOutcome::Noop;
+        }
+        let Some(snapshot) = pending.get(&key) else {
+            return HudConfirmOutcome::Noop;
+        };
+        let PendingApprovalContent::Body(body) = snapshot.content else {
+            return HudConfirmOutcome::Noop;
+        };
+        let Some(request) = body.interaction else {
+            return HudConfirmOutcome::Noop;
+        };
+        if request.kind != rawhid_host_core::pending_approval::PendingRequestKind::Input
+            || request.requires_terminal
+        {
+            return HudConfirmOutcome::Noop;
+        }
+        if state.review_mode {
+            let send_index = state.question_answers.len();
+            if state.review_index < send_index {
+                let question_id = state.question_answers[state.review_index].0.clone();
+                let Some(question_index) = request
+                    .questions
+                    .iter()
+                    .position(|question| question.id == question_id)
+                else {
+                    return HudConfirmOutcome::Noop;
+                };
+                state.review_mode = false;
+                state.question_index = question_index;
+                state.question_option_index = state
+                    .question_answers
+                    .get(state.review_index)
+                    .and_then(|(_, value)| value.as_str())
+                    .and_then(|answer| {
+                        request.questions[question_index]
+                            .options
+                            .iter()
+                            .position(|option| option.label == answer)
+                    })
+                    .unwrap_or(0);
+                return HudConfirmOutcome::Advanced;
+            }
+            if state.review_index != send_index {
+                return HudConfirmOutcome::Noop;
+            }
+            let answers = state
+                .question_answers
+                .iter()
+                .map(|(id, answer)| {
+                    (
+                        id.clone(),
+                        serde_json::json!({ "answers": [answer.clone()] }),
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>();
+            let selection = HudApprovalSelection {
+                key: key.clone(),
+                decision_index: 0,
+                response: Some(serde_json::json!({ "answers": answers })),
+            };
+            state.response_in_flight = Some(key.clone());
+            drop(state);
+            return HudConfirmOutcome::Dispatch(HudResponseDispatch {
+                _reservation: HudResponseReservation {
+                    interaction: Arc::clone(&self.interaction),
+                    key,
+                },
+                selection,
+            });
+        }
+        let Some(question) = request.questions.get(state.question_index) else {
+            return HudConfirmOutcome::Noop;
+        };
+        let Some(option) = question.options.get(state.question_option_index) else {
+            return HudConfirmOutcome::Noop;
+        };
+        if option.is_other || option.is_secret || question.multi_select {
+            return HudConfirmOutcome::Noop;
+        }
+        state.question_answers.retain(|(id, _)| id != &question.id);
+        state
+            .question_answers
+            .push((question.id.clone(), Value::String(option.label.clone())));
+        if state.question_index + 1 < request.questions.len() {
+            state.question_index += 1;
+            state.question_option_index = 0;
+            return HudConfirmOutcome::Advanced;
+        }
+        state.review_mode = true;
+        state.review_index = 0;
+        HudConfirmOutcome::Advanced
     }
 
     /// Makes the newest Codex approval belonging to this exact display
@@ -733,6 +1185,20 @@ impl HudCoordinator {
         select_claude_session_from_state(&self.interaction, pending, launch_id, session_id)
     }
 
+    pub fn target_requires_terminal(&self, pending: &PendingApprovalStore) -> bool {
+        let interaction = self.interaction.lock().unwrap();
+        let Some(key) = interaction.target() else {
+            return false;
+        };
+        pending
+            .get(key)
+            .and_then(|snapshot| match snapshot.content {
+                PendingApprovalContent::Body(body) => body.interaction,
+                PendingApprovalContent::Oversized => None,
+            })
+            .is_some_and(|request| request.requires_terminal)
+    }
+
     /// Returns when the current opaque target began displaying. A future
     /// physical-input binding can compare this monotonic timestamp with its
     /// activation guard without accessing the interaction state directly.
@@ -752,6 +1218,13 @@ impl HudCoordinator {
     /// HUD payload or a Host Link packet.
     pub fn target_session(&self) -> Option<HudTargetSession> {
         target_session_from_state(&self.interaction)
+    }
+
+    /// Returns the opaque key currently targeted by the HUD. This is used
+    /// only for metadata-only audit records; callers must not expose the key's
+    /// request body or answer state through this accessor.
+    pub fn target_key(&self) -> Option<ApprovalKey> {
+        self.interaction.lock().unwrap().target().cloned()
     }
 
     fn show(&self) {
@@ -857,16 +1330,16 @@ mod tests {
 
     use rawhid_host_core::pending_approval::{
         claude_key, codex_key, codex_key_for_thread, ApprovalClient, ApprovalOwner,
-        PendingApprovalBody, PendingApprovalStore,
+        PendingApprovalBody, PendingApprovalStore, PendingInteraction, PendingRequestKind,
     };
     use serde_json::{json, Value};
 
     use super::{
         begin_response_from_state, claude_allow_with_permissions_label, claude_decision_labels,
-        current_target, reject_decision_index_from_body, replace_shown,
-        response_selection_from_state, select_claude_session_from_state, select_target_from_state,
-        target_session_from_state, ApprovalKey, HudInteractionState, HudSelectionDirection,
-        HudTargetSession, Instant, HUD_CONFIRM_GUARD,
+        current_target, hud_payload_selection_indices, reject_decision_index_from_body,
+        replace_shown, response_selection_from_state, select_claude_session_from_state,
+        select_target_from_state, target_session_from_state, ApprovalKey, HudInteractionState,
+        HudSelectionDirection, HudTargetSession, Instant, HUD_CONFIRM_GUARD,
     };
 
     fn body(decisions: Vec<Value>) -> PendingApprovalBody {
@@ -880,6 +1353,7 @@ mod tests {
             tool_use_id: None,
             prompt_id: None,
             permission_suggestions: None,
+            interaction: None,
         }
     }
 
@@ -1000,6 +1474,123 @@ mod tests {
             Some(0)
         );
         assert_eq!(state.selected_approval(3).unwrap().decision_index, 0);
+    }
+
+    #[test]
+    fn ordinary_approval_payload_reflects_initial_next_previous_and_reject_selection() {
+        let store = PendingApprovalStore::new();
+        let key = insert_codex(
+            &store,
+            "connection-a",
+            11,
+            vec![json!("approve"), json!("cancel"), json!("decline")],
+        );
+        let snapshot = store.get(&key).expect("approval is pending");
+        let shown_at = Instant::now();
+        let mut state = HudInteractionState::default();
+        state.sync_target(Some(&key), 3, shown_at);
+
+        let payload = hud_payload_for_test(&key, &snapshot, &state);
+        assert_eq!(payload.selected_decision_index, Some(0));
+
+        state.move_selection(3, HudSelectionDirection::Next);
+        let payload = hud_payload_for_test(&key, &snapshot, &state);
+        assert_eq!(payload.selected_decision_index, Some(1));
+
+        state.move_selection(3, HudSelectionDirection::Previous);
+        let payload = hud_payload_for_test(&key, &snapshot, &state);
+        assert_eq!(payload.selected_decision_index, Some(0));
+
+        assert_eq!(state.move_selection_toward_reject(&snapshot), Some(2));
+        let payload = hud_payload_for_test(&key, &snapshot, &state);
+        assert_eq!(payload.selected_decision_index, Some(2));
+    }
+
+    #[test]
+    fn file_change_approval_payload_reflects_initial_next_previous_and_reject_selection() {
+        let store = PendingApprovalStore::new();
+        let key = codex_key("connection-a", &json!(12));
+        let mut approval = body(vec![json!("approve"), json!("cancel"), json!("decline")]);
+        approval.interaction = Some(PendingInteraction {
+            kind: PendingRequestKind::Approval,
+            questions: Vec::new(),
+            message: None,
+            url: None,
+            permission_text: None,
+            requires_terminal: false,
+        });
+        store.insert(
+            key.clone(),
+            ApprovalClient::Codex,
+            ApprovalOwner::Codex {
+                connection_id: "connection-a".to_string(),
+            },
+            approval,
+        );
+
+        let snapshot = store.get(&key).expect("approval is pending");
+        let mut state = HudInteractionState::default();
+        state.sync_target(Some(&key), 3, Instant::now());
+
+        let payload = hud_payload_for_test(&key, &snapshot, &state);
+        assert_eq!(payload.selected_decision_index, Some(0));
+
+        state.move_selection(3, HudSelectionDirection::Next);
+        let payload = hud_payload_for_test(&key, &snapshot, &state);
+        assert_eq!(payload.selected_decision_index, Some(1));
+
+        state.move_selection(3, HudSelectionDirection::Previous);
+        let payload = hud_payload_for_test(&key, &snapshot, &state);
+        assert_eq!(payload.selected_decision_index, Some(0));
+
+        assert_eq!(state.move_selection_toward_reject(&snapshot), Some(2));
+        let payload = hud_payload_for_test(&key, &snapshot, &state);
+        assert_eq!(payload.selected_decision_index, Some(2));
+    }
+
+    fn hud_payload_for_test(
+        key: &ApprovalKey,
+        snapshot: &rawhid_host_core::pending_approval::PendingApprovalSnapshot,
+        state: &HudInteractionState,
+    ) -> super::HudApprovalPayload {
+        let (selected, question_index, review, answers, review_index) =
+            hud_payload_selection_indices(snapshot, state);
+        super::HudApprovalPayload::from_snapshot(
+            key,
+            snapshot,
+            selected,
+            question_index,
+            review,
+            answers,
+            review_index,
+        )
+    }
+
+    #[test]
+    fn answer_deck_review_selection_includes_trailing_send() {
+        let key = ApprovalKey::new("input-a");
+        let mut state = HudInteractionState::default();
+        state.sync_target(Some(&key), 0, Instant::now());
+        state.review_mode = true;
+        state.question_answers = vec![
+            ("first".to_string(), json!("safe")),
+            ("second".to_string(), json!("fast")),
+        ];
+
+        assert_eq!(state.review_index, 0);
+        assert_eq!(
+            state.move_review_selection(2, HudSelectionDirection::Previous),
+            Some(2),
+            "previous from the first card selects the trailing Send item"
+        );
+        assert_eq!(
+            state.move_review_selection(2, HudSelectionDirection::Next),
+            Some(0)
+        );
+        assert_eq!(
+            state.move_review_selection(2, HudSelectionDirection::Next),
+            Some(1)
+        );
     }
 
     #[test]

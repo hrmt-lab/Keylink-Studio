@@ -38,6 +38,10 @@ use tokio_tungstenite::{
     WebSocketStream,
 };
 
+use crate::pending_approval::{
+    PendingInteraction, PendingQuestion, PendingQuestionOption, PendingRequestKind,
+};
+
 pub const SUPPORTED_CODEX_VERSION: &str = "codex-cli 0.154.0";
 pub const SUPPORTED_SCHEMA_SHA256: &str =
     "24DF528ACEC2952E6B96C1C2B061F98E60177D059E12C90CF318621380C9DE9E";
@@ -297,6 +301,15 @@ pub enum CodexBrokerEvent {
         request_id: Value,
         body: Box<CodexApprovalRequestBody>,
     },
+    /// Normalized body for the other Codex server requests that can leave the
+    /// CLI waiting.  Command approvals retain the legacy event above for API
+    /// compatibility; all four request methods also emit this event.
+    InteractionRequestBody {
+        connection_id: String,
+        request_id: Value,
+        method: String,
+        body: Box<CodexInteractionRequestBody>,
+    },
     Error {
         component: &'static str,
         detail: String,
@@ -332,7 +345,7 @@ pub enum CodexApprovalResponseOutcome {
 
 struct ApprovalResponseCommand {
     request_id: Value,
-    decision: Value,
+    result: Value,
     reply: std_mpsc::Sender<CodexApprovalResponseOutcome>,
     state: Arc<ApprovalResponseState>,
 }
@@ -579,6 +592,22 @@ impl CodexBrokerManager {
         request_id: Value,
         decision: Value,
     ) -> Result<CodexApprovalResponseOutcome, CodexBrokerError> {
+        self.respond_to_request(
+            connection_id,
+            request_id,
+            serde_json::json!({ "decision": decision }),
+        )
+    }
+
+    /// Sends an arbitrary JSON-RPC result for one server request.  The same
+    /// per-connection first-wins arbiter is used for approvals and input
+    /// requests, so a TUI/CLI/server-resolved race still produces one result.
+    pub fn respond_to_request(
+        &self,
+        connection_id: &str,
+        request_id: Value,
+        result: Value,
+    ) -> Result<CodexApprovalResponseOutcome, CodexBrokerError> {
         let route = self
             .inner
             .approval_routes
@@ -594,7 +623,7 @@ impl CodexBrokerManager {
         route
             .send(ApprovalResponseCommand {
                 request_id,
-                decision,
+                result,
                 reply: reply_tx,
                 state: state.clone(),
             })
@@ -1653,8 +1682,10 @@ where
                 emit_message_metadata(event_tx, connection_id, BrokerDirection::AppServerToCli, &message);
                 if let Some(metadata) = metadata.as_ref() {
                     if metadata.kind == JsonRpcKind::Request
-                        && metadata.method.as_deref()
-                            == Some("item/commandExecution/requestApproval")
+                        && metadata
+                            .method
+                            .as_deref()
+                            .is_some_and(is_server_request_method)
                     {
                         if let Some(id) = metadata.id.as_ref() {
                             approval_arbiter.observe_request(id);
@@ -1680,7 +1711,7 @@ where
                     let response = Message::Text(serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": command.request_id,
-                        "result": { "decision": command.decision },
+                        "result": command.result,
                     }).to_string().into());
                     emit_message_metadata(
                         event_tx,
@@ -1758,15 +1789,31 @@ fn emit_message_metadata(
     // CLI emits these at high frequency) skips this branch entirely.
     if direction == BrokerDirection::AppServerToCli
         && metadata.kind == JsonRpcKind::Request
-        && metadata.method.as_deref() == Some("item/commandExecution/requestApproval")
+        && metadata
+            .method
+            .as_deref()
+            .is_some_and(is_server_request_method)
     {
         if let Message::Text(text) = message {
-            if let Some(body) = extract_command_approval_body(text.as_str()) {
-                let _ = event_tx.send(CodexBrokerEvent::ApprovalRequestBody {
-                    connection_id: connection_id.to_string(),
-                    request_id: metadata.id.clone().unwrap_or(Value::Null),
-                    body: Box::new(body),
-                });
+            let request_id = metadata.id.clone().unwrap_or(Value::Null);
+            if metadata.method.as_deref() == Some("item/commandExecution/requestApproval") {
+                if let Some(body) = extract_command_approval_body(text.as_str()) {
+                    let _ = event_tx.send(CodexBrokerEvent::ApprovalRequestBody {
+                        connection_id: connection_id.to_string(),
+                        request_id: request_id.clone(),
+                        body: Box::new(body),
+                    });
+                }
+            }
+            if metadata.method.as_deref() != Some("item/commandExecution/requestApproval") {
+                if let Some(body) = extract_codex_interaction_body(text.as_str()) {
+                    let _ = event_tx.send(CodexBrokerEvent::InteractionRequestBody {
+                        connection_id: connection_id.to_string(),
+                        request_id,
+                        method: metadata.method.clone().unwrap_or_default(),
+                        body: Box::new(body),
+                    });
+                }
             }
         }
     }
@@ -1775,6 +1822,17 @@ fn emit_message_metadata(
         direction,
         metadata: Box::new(metadata),
     });
+}
+
+fn is_server_request_method(method: &str) -> bool {
+    matches!(
+        method,
+        "item/commandExecution/requestApproval"
+            | "item/fileChange/requestApproval"
+            | "item/permissions/requestApproval"
+            | "item/tool/requestUserInput"
+            | "mcpServer/elicitation/request"
+    )
 }
 
 /// The body of a Codex `item/commandExecution/requestApproval` request,
@@ -1799,6 +1857,217 @@ pub struct CodexApprovalRequestBody {
     pub thread_id: Option<String>,
     pub turn_id: Option<String>,
     pub item_id: Option<String>,
+}
+
+/// Normalized body for Codex's file-change, permission, tool-input and MCP
+/// elicitation requests.  The request body is reduced to renderable fields;
+/// opaque response values are never reconstructed from these fields.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct CodexInteractionRequestBody {
+    pub primary_text: Option<String>,
+    pub full_command: Option<String>,
+    pub reason: Option<String>,
+    pub cwd: Option<String>,
+    pub kind: Option<String>,
+    pub available_decisions: Vec<Value>,
+    pub interaction: PendingInteraction,
+    pub thread_id: Option<String>,
+    pub turn_id: Option<String>,
+}
+
+pub fn extract_codex_interaction_body(text: &str) -> Option<CodexInteractionRequestBody> {
+    let value: Value = serde_json::from_str(text).ok()?;
+    let method = value.get("method")?.as_str()?;
+    let params = value.get("params")?.as_object()?;
+    let kind = params
+        .get("kind")
+        .or_else(|| params.get("toolName"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let cwd = params
+        .get("cwd")
+        .or_else(|| params.get("grantRoot"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let reason = params
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let available_decisions = params
+        .get("availableDecisions")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let interaction = match method {
+        "item/fileChange/requestApproval" => PendingInteraction {
+            kind: PendingRequestKind::Approval,
+            questions: Vec::new(),
+            message: None,
+            url: None,
+            permission_text: None,
+            requires_terminal: false,
+        },
+        "item/permissions/requestApproval" => PendingInteraction {
+            kind: PendingRequestKind::Permissions,
+            questions: Vec::new(),
+            message: None,
+            url: None,
+            permission_text: params
+                .get("permissions")
+                .map(|permissions| serde_json::to_string_pretty(permissions).unwrap_or_default()),
+            requires_terminal: true,
+        },
+        "item/tool/requestUserInput" => PendingInteraction {
+            kind: PendingRequestKind::Input,
+            questions: extract_questions(params.get("questions")),
+            message: None,
+            url: None,
+            permission_text: None,
+            requires_terminal: false,
+        },
+        "mcpServer/elicitation/request" => PendingInteraction {
+            kind: PendingRequestKind::Elicitation,
+            questions: Vec::new(),
+            message: params
+                .get("message")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+                .or_else(|| {
+                    params.get("title").and_then(Value::as_str).map(|title| {
+                        let description = params
+                            .get("description")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default();
+                        if description.is_empty() {
+                            title.to_string()
+                        } else {
+                            format!("{title}\n{description}")
+                        }
+                    })
+                }),
+            url: params
+                .get("url")
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            permission_text: None,
+            requires_terminal: true,
+        },
+        _ => return None,
+    };
+    let primary_text = reason.clone().or_else(|| interaction.message.clone());
+    Some(CodexInteractionRequestBody {
+        primary_text,
+        full_command: params
+            .get("command")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        reason,
+        cwd,
+        kind,
+        available_decisions,
+        interaction,
+        thread_id: params
+            .get("threadId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        turn_id: params
+            .get("turnId")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+fn extract_questions(value: Option<&Value>) -> Vec<PendingQuestion> {
+    value
+        .and_then(Value::as_array)
+        .map(|questions| {
+            questions
+                .iter()
+                .enumerate()
+                .map(|(index, question)| {
+                    let Some(object) = question.as_object() else {
+                        return PendingQuestion {
+                            id: format!("invalid-question-{index}"),
+                            header: None,
+                            question: "Unsupported question format".to_string(),
+                            options: Vec::new(),
+                            multi_select: false,
+                        };
+                    };
+                    let Some(question_text) = object.get("question").and_then(Value::as_str) else {
+                        return PendingQuestion {
+                            id: format!("invalid-question-{index}"),
+                            header: None,
+                            question: "Unsupported question format".to_string(),
+                            options: Vec::new(),
+                            multi_select: false,
+                        };
+                    };
+                    let id = object
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .unwrap_or_else(|| format!("question-{index}"));
+                    let options = object
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|options| {
+                            options
+                                .iter()
+                                .map(|option| {
+                                    let Some(option) = option.as_object() else {
+                                        return PendingQuestionOption {
+                                            label: "Unsupported option format".to_string(),
+                                            description: None,
+                                            is_other: true,
+                                            is_secret: false,
+                                        };
+                                    };
+                                    let Some(label) = option.get("label").and_then(Value::as_str)
+                                    else {
+                                        return PendingQuestionOption {
+                                            label: "Unsupported option format".to_string(),
+                                            description: None,
+                                            is_other: true,
+                                            is_secret: false,
+                                        };
+                                    };
+                                    PendingQuestionOption {
+                                        label: label.to_string(),
+                                        description: option
+                                            .get("description")
+                                            .and_then(Value::as_str)
+                                            .map(str::to_string),
+                                        is_other: option
+                                            .get("isOther")
+                                            .and_then(Value::as_bool)
+                                            .unwrap_or(false),
+                                        is_secret: option
+                                            .get("isSecret")
+                                            .and_then(Value::as_bool)
+                                            .unwrap_or(false),
+                                    }
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    PendingQuestion {
+                        id,
+                        header: object
+                            .get("header")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        question: question_text.to_string(),
+                        options,
+                        multi_select: object
+                            .get("multiSelect")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Extracts the full body of a `item/commandExecution/requestApproval`
@@ -2546,10 +2815,10 @@ fn complete_reconnect_grace(
 mod tests {
     use super::{
         classify_json_rpc, compatible_codex_versions, compatible_schema_sha256,
-        complete_reconnect_grace, extract_command_approval_body, schema_is_compatible,
-        select_codex_executable, std_mpsc, try_acquire_client_slot, ApprovalArbiter,
-        BrokerDirection, BrokerRuntimeArgs, CodexApprovalResponseOutcome, CodexBrokerEvent,
-        CodexBrokerPhase, CodexBrokerStatus, JsonRpcKind, MAX_CODEX_CLIENTS,
+        complete_reconnect_grace, extract_codex_interaction_body, extract_command_approval_body,
+        schema_is_compatible, select_codex_executable, std_mpsc, try_acquire_client_slot,
+        ApprovalArbiter, BrokerDirection, BrokerRuntimeArgs, CodexApprovalResponseOutcome,
+        CodexBrokerEvent, CodexBrokerPhase, CodexBrokerStatus, JsonRpcKind, MAX_CODEX_CLIENTS,
         SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256,
     };
     use futures_util::{SinkExt, StreamExt};
@@ -2568,7 +2837,7 @@ mod tests {
         route
             .send(super::ApprovalResponseCommand {
                 request_id: serde_json::json!(1),
-                decision: serde_json::json!("accept"),
+                result: serde_json::json!({ "decision": "accept" }),
                 reply: reply_tx,
                 state: state.clone(),
             })
@@ -2842,6 +3111,73 @@ mod tests {
         assert!(extract_command_approval_body("not json").is_none());
         assert!(extract_command_approval_body(r#"{"id":1,"method":"other"}"#).is_none());
         assert!(extract_command_approval_body(r#"{"jsonrpc":"2.0"}"#).is_none());
+    }
+
+    #[test]
+    fn extract_codex_interaction_body_preserves_questions_and_opaque_decisions() {
+        let request = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 21,
+            "method": "item/tool/requestUserInput",
+            "params": {
+                "threadId": "thread-1",
+                "turnId": "turn-1",
+                "availableDecisions": ["accept", {"custom": {"value": 1}}],
+                "questions": [{
+                    "id": "choice",
+                    "header": "Mode",
+                    "question": "Which mode?",
+                    "multiSelect": false,
+                    "options": [
+                        {"label": "safe", "description": "Read only"},
+                        {"label": "other", "isOther": true}
+                    ]
+                }]
+            }
+        });
+        let body = extract_codex_interaction_body(&request.to_string()).expect("input body");
+        assert_eq!(body.thread_id.as_deref(), Some("thread-1"));
+        assert_eq!(body.turn_id.as_deref(), Some("turn-1"));
+        assert_eq!(
+            body.available_decisions[1],
+            serde_json::json!({"custom": {"value": 1}})
+        );
+        assert_eq!(
+            body.interaction.kind,
+            crate::pending_approval::PendingRequestKind::Input
+        );
+        assert_eq!(body.interaction.questions.len(), 1);
+        assert_eq!(body.interaction.questions[0].options[0].label, "safe");
+        assert!(body.interaction.questions[0].options[1].is_other);
+    }
+
+    #[test]
+    fn extract_codex_permission_and_elicitation_bodies_are_display_only() {
+        for (method, params, expected_kind) in [
+            (
+                "item/permissions/requestApproval",
+                serde_json::json!({"permissions": {"read": ["C:/work"]}}),
+                "permissions",
+            ),
+            (
+                "mcpServer/elicitation/request",
+                serde_json::json!({"message": "Provide a label", "url": "https://example.test"}),
+                "elicitation",
+            ),
+        ] {
+            let request = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 22,
+                "method": method,
+                "params": params
+            });
+            let body = extract_codex_interaction_body(&request.to_string()).expect("body");
+            assert_eq!(
+                format!("{:?}", body.interaction.kind).to_lowercase(),
+                expected_kind
+            );
+            assert!(body.interaction.requires_terminal);
+        }
     }
 
     #[test]
@@ -3125,7 +3461,7 @@ mod tests {
         route
             .send(super::ApprovalResponseCommand {
                 request_id: serde_json::json!(1),
-                decision: serde_json::json!("accept"),
+                result: serde_json::json!({ "decision": "accept" }),
                 reply: hud_reply_tx,
                 state: Arc::new(super::ApprovalResponseState::default()),
             })
@@ -3183,7 +3519,7 @@ mod tests {
         route
             .send(super::ApprovalResponseCommand {
                 request_id: serde_json::json!(2),
-                decision: serde_json::json!("accept"),
+                result: serde_json::json!({ "decision": "accept" }),
                 reply: late_hud_tx,
                 state: Arc::new(super::ApprovalResponseState::default()),
             })
@@ -3221,7 +3557,7 @@ mod tests {
         route
             .send(super::ApprovalResponseCommand {
                 request_id: serde_json::json!(3),
-                decision: serde_json::json!("accept"),
+                result: serde_json::json!({ "decision": "accept" }),
                 reply: cancelled_tx,
                 state: cancelled_state,
             })
@@ -3230,7 +3566,7 @@ mod tests {
         route
             .send(super::ApprovalResponseCommand {
                 request_id: serde_json::json!(3),
-                decision: serde_json::json!("cancel"),
+                result: serde_json::json!({ "decision": "cancel" }),
                 reply: valid_tx,
                 state: Arc::new(super::ApprovalResponseState::default()),
             })

@@ -12,7 +12,9 @@ use rawhid_host_core::claude_activity::ClaudeSessionSnapshot;
 use rawhid_host_core::claude_decision::ClaudePermissionGate;
 use rawhid_host_core::codex_activity::CodexSessionSnapshot;
 use rawhid_host_core::config::{ActionBinding, HostActionKind};
-use rawhid_host_core::pending_approval::ApprovalClient;
+use rawhid_host_core::pending_approval::{
+    ApprovalClient, ApprovalKey, PendingApprovalLogContext, PendingApprovalStore,
+};
 use tauri::{AppHandle, Manager};
 
 use crate::state::{AiDisplayTarget, MonitorStatus};
@@ -21,7 +23,7 @@ use crate::{
         claude_display_inputs, respond_to_claude_approval_internal,
         respond_to_codex_approval_internal, spawn_ai_refresh_watcher, MonitorExtras,
     },
-    hud_coordinator::{HudSelectionDirection, HudTargetSession},
+    hud_coordinator::{HudCoordinator, HudSelectionDirection, HudTargetSession},
 };
 
 pub enum ActionOutcome {
@@ -59,6 +61,82 @@ pub enum ActionOutcome {
     HudTargetSelected {
         slot: u8,
     },
+}
+
+fn log_hud_event_for_key(
+    approval_log: &crate::approval_log::ApprovalLog,
+    pending: &PendingApprovalStore,
+    key: Option<&ApprovalKey>,
+    action: &str,
+    allowed: bool,
+    outcome: &str,
+    reason: Option<&str>,
+) {
+    let context = key.and_then(|key| pending.audit_context(key));
+    log_hud_event_for_context(
+        approval_log,
+        context.as_ref(),
+        action,
+        allowed,
+        outcome,
+        reason,
+    );
+}
+
+fn log_hud_event_for_context(
+    approval_log: &crate::approval_log::ApprovalLog,
+    context: Option<&PendingApprovalLogContext>,
+    action: &str,
+    allowed: bool,
+    outcome: &str,
+    reason: Option<&str>,
+) {
+    let Some(context) = context else {
+        approval_log.record_event(crate::approval_log::ApprovalLogEvent::new(
+            "none",
+            "unknown",
+            "unknown",
+            action,
+            allowed,
+            outcome,
+            reason.map(str::to_owned),
+        ));
+        return;
+    };
+    approval_log.record_event(crate::approval_log::ApprovalLogEvent::new(
+        context.session_label.clone(),
+        context.client.as_str(),
+        context.request_kind.clone(),
+        action,
+        allowed,
+        outcome,
+        reason.map(str::to_owned),
+    ));
+}
+
+fn log_hud_action(
+    extras: &MonitorExtras,
+    pending: &PendingApprovalStore,
+    action: &str,
+    allowed: bool,
+    outcome: &str,
+    reason: Option<&str>,
+) {
+    let key = extras
+        .hud
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(HudCoordinator::target_key);
+    log_hud_event_for_key(
+        extras.approval_log.as_ref(),
+        pending,
+        key.as_ref(),
+        action,
+        allowed,
+        outcome,
+        reason,
+    );
 }
 
 pub fn execute(
@@ -144,12 +222,14 @@ pub fn execute(
         HostActionKind::HudPrevious => Ok(move_hud_selection_and_render(
             app,
             extras,
+            "Previous",
             "no_selectable_hud_approval",
             |hud, pending| hud.move_selection(pending, HudSelectionDirection::Previous),
         )),
         HostActionKind::HudNext => Ok(move_hud_selection_and_render(
             app,
             extras,
+            "Next",
             "no_selectable_hud_approval",
             |hud, pending| hud.move_selection(pending, HudSelectionDirection::Next),
         )),
@@ -160,6 +240,7 @@ pub fn execute(
             // lock (`ai_display_slots`) below -- see this module's
             // `move_hud_selection_and_render` doc comment on not holding the
             // lock used for one step across another.
+            let mut advanced = false;
             let (dispatch, target_session) = {
                 let hud_guard = extras.hud.lock().unwrap();
                 let Some(hud) = hud_guard.as_ref() else {
@@ -167,18 +248,53 @@ pub fn execute(
                         reason: "hud_response_in_flight_guard_or_no_selection",
                     });
                 };
-                let dispatch = hud.begin_response(&pending, Instant::now());
+                let result = hud.confirm(&pending, Instant::now());
+                let dispatch = match result {
+                    crate::hud_coordinator::HudConfirmOutcome::Dispatch(dispatch) => Some(dispatch),
+                    crate::hud_coordinator::HudConfirmOutcome::Advanced => {
+                        advanced = true;
+                        None
+                    }
+                    crate::hud_coordinator::HudConfirmOutcome::Noop => {
+                        // Permissions, elicitation, and unverified Claude
+                        // question inputs are display-only.  They may still
+                        // carry protocol metadata, but that metadata is not
+                        // an approval decision and must never reach the
+                        // response path by falling through to begin_response.
+                        if hud.target_requires_terminal(&pending) {
+                            None
+                        } else {
+                            hud.begin_response(&pending, Instant::now())
+                        }
+                    }
+                };
                 let target_session = match &dispatch {
                     Some(_) => hud.target_session(),
                     None => None,
                 };
                 (dispatch, target_session)
             };
+            if advanced {
+                if let Some(hud) = extras.hud.lock().unwrap().as_ref() {
+                    hud.update(app, &pending);
+                }
+                log_hud_action(extras, &pending, "Confirm", true, "advanced", None);
+                return Ok(ActionOutcome::Continue);
+            }
             let Some(dispatch) = dispatch else {
+                log_hud_action(
+                    extras,
+                    &pending,
+                    "Confirm",
+                    false,
+                    "ineligible",
+                    Some("no_live_selection_or_terminal_only"),
+                );
                 return Ok(ActionOutcome::HudNoop {
                     reason: "hud_response_in_flight_guard_or_no_selection",
                 });
             };
+            log_hud_action(extras, &pending, "Confirm", true, "queued", None);
             // `respond_to_approval` may wait for the App Server response.
             // Never make the Host Link monitor loop wait for that round trip.
             dispatch_hud_response(
@@ -186,6 +302,7 @@ pub fn execute(
                 extras.codex_broker.clone(),
                 Arc::clone(&extras.claude_permission_gate),
                 dispatch,
+                Arc::clone(&extras.approval_log),
             );
             let slot = target_session.and_then(|target| resolve_hud_target_slot(extras, &target));
             match slot {
@@ -202,8 +319,9 @@ pub fn execute(
             Ok(move_hud_selection_and_render(
                 app,
                 extras,
+                "Reject",
                 "no_reject_decision_available",
-                |hud, pending| hud.move_selection_toward_reject(pending),
+                |hud, pending| hud.reject(pending),
             ))
         }
         HostActionKind::SelectHudTarget => {
@@ -234,23 +352,45 @@ pub fn execute(
             // same terminal-focus behavior as a standalone FocusAiTerminal
             // press, rather than staying a silent HudNoop.
             let Some(target) = target else {
+                let pending = extras.codex_activity.pending_approvals();
+                log_hud_action(
+                    extras,
+                    &pending,
+                    "Select",
+                    false,
+                    "ineligible",
+                    Some("no_pending_for_slot"),
+                );
                 return focus_ai_terminal_for_slot(value, extras);
             };
             let pending = extras.codex_activity.pending_approvals();
-            let selected = {
+            let (selected, requires_terminal) = {
                 let hud = extras.hud.lock().unwrap();
-                hud.as_ref().is_some_and(|hud| match &target {
-                    HudTargetSession::Codex {
-                        connection_id,
-                        thread_id,
-                    } => hud.select_codex_thread(&pending, connection_id, thread_id),
-                    HudTargetSession::Claude {
-                        launch_id,
-                        session_id,
-                    } => hud.select_claude_session(&pending, launch_id, session_id),
-                })
+                hud.as_ref()
+                    .map(|hud| {
+                        let selected = match &target {
+                            HudTargetSession::Codex {
+                                connection_id,
+                                thread_id,
+                            } => hud.select_codex_thread(&pending, connection_id, thread_id),
+                            HudTargetSession::Claude {
+                                launch_id,
+                                session_id,
+                            } => hud.select_claude_session(&pending, launch_id, session_id),
+                        };
+                        (selected, selected && hud.target_requires_terminal(&pending))
+                    })
+                    .unwrap_or((false, false))
             };
             if !selected {
+                log_hud_action(
+                    extras,
+                    &pending,
+                    "Select",
+                    false,
+                    "ineligible",
+                    Some("request_not_available"),
+                );
                 return focus_ai_terminal_for_slot(value, extras);
             }
             // Render immediately, rather than waiting for the next periodic
@@ -258,6 +398,18 @@ pub fn execute(
             if let Some(hud) = extras.hud.lock().unwrap().as_ref() {
                 hud.update(app, &pending);
             }
+            if requires_terminal {
+                log_hud_action(
+                    extras,
+                    &pending,
+                    "Select",
+                    true,
+                    "terminal_only",
+                    Some("terminal_required"),
+                );
+                return focus_ai_terminal_for_slot(value, extras);
+            }
+            log_hud_action(extras, &pending, "Select", true, "selected", None);
             Ok(ActionOutcome::HudTargetSelected { slot: value })
         }
     }
@@ -279,6 +431,7 @@ pub fn execute(
 fn move_hud_selection_and_render(
     app: &AppHandle,
     extras: &MonitorExtras,
+    action: &'static str,
     no_move_reason: &'static str,
     move_fn: impl FnOnce(
         &crate::hud_coordinator::HudCoordinator,
@@ -293,10 +446,19 @@ fn move_hud_selection_and_render(
         .as_ref()
         .and_then(|hud| move_fn(hud, &pending));
     if moved.is_none() {
+        log_hud_action(
+            extras,
+            &pending,
+            action,
+            false,
+            "ineligible",
+            Some(no_move_reason),
+        );
         return ActionOutcome::HudNoop {
             reason: no_move_reason,
         };
     }
+    log_hud_action(extras, &pending, action, true, "allowed", None);
     if let Some(hud) = extras.hud.lock().unwrap().as_ref() {
         hud.update(app, &pending);
     }
@@ -396,8 +558,11 @@ pub(crate) fn codex_target_for_slot(
         .find(|snapshot| {
             snapshot.state.session_active
                 && snapshot.is_display_target
-                && snapshot.state.activity_state
-                    == rawhid_host_core::packet::AiActivityState::WaitingApproval
+                && matches!(
+                    snapshot.state.activity_state,
+                    rawhid_host_core::packet::AiActivityState::WaitingApproval
+                        | rawhid_host_core::packet::AiActivityState::WaitingInput
+                )
                 && snapshot.terminal_target_id == terminal_target_id
         })
         .map(|snapshot| (snapshot.owner_connection_id, snapshot.thread_id))
@@ -445,8 +610,11 @@ fn claude_target_for_slot(
                         && other.launch_id == snapshot.launch_id
                         && other.registration_order > snapshot.registration_order
                 })
-                && snapshot.activity_state
-                    == rawhid_host_core::packet::AiActivityState::WaitingApproval
+                && matches!(
+                    snapshot.activity_state,
+                    rawhid_host_core::packet::AiActivityState::WaitingApproval
+                        | rawhid_host_core::packet::AiActivityState::WaitingInput
+                )
         })
         .map(|snapshot| (snapshot.launch_id.clone(), snapshot.session_id.clone()))
 }
@@ -505,6 +673,7 @@ fn dispatch_hud_response(
     broker: rawhid_host_core::codex_broker::CodexBrokerManager,
     claude_permission_gate: Arc<ClaudePermissionGate>,
     dispatch: crate::hud_coordinator::HudResponseDispatch,
+    approval_log: Arc<crate::approval_log::ApprovalLog>,
 ) {
     // `Builder::spawn` returns an error rather than panicking on the usual
     // OS thread-creation failure. In that case `dispatch` drops here and its
@@ -517,11 +686,26 @@ fn dispatch_hud_response(
             // respective first-wins race. The monitor already recorded
             // dispatch, and there is no safe recovery action for a stale
             // physical packet.
-            let _ = dispatch_hud_response_selection(
+            let selection_key = dispatch.selection.key.clone();
+            let selection_context = pending.audit_context(&selection_key);
+            let result = dispatch_hud_response_selection(
                 &pending,
                 &broker,
                 &claude_permission_gate,
                 &dispatch.selection,
+            );
+            let (allowed, outcome, reason) = match result {
+                Ok(true) => (true, "sent", None),
+                Ok(false) => (true, "rejected", Some("server_rejected")),
+                Err(_) => (false, "failed", Some("dispatch_failed")),
+            };
+            log_hud_event_for_context(
+                approval_log.as_ref(),
+                selection_context.as_ref(),
+                "Confirm",
+                allowed,
+                outcome,
+                reason,
             );
         });
 }
@@ -548,12 +732,28 @@ pub(crate) fn dispatch_hud_response_selection(
         .ok_or_else(|| "The approval is no longer available".to_string())?
         .client;
     match client {
-        ApprovalClient::Codex => respond_to_codex_approval_internal(
-            pending,
-            broker,
-            selection.key.token(),
-            selection.decision_index,
-        ),
+        ApprovalClient::Codex => {
+            if let Some(result) = selection.response.clone() {
+                let response = pending
+                    .codex_request(selection.key.token())
+                    .ok_or_else(|| "The request is no longer available".to_string())?;
+                let outcome = broker
+                    .respond_to_request(&response.connection_id, response.request_id, result)
+                    .map_err(|error| error.to_string())?;
+                pending.resolve(&response.key);
+                Ok(matches!(
+                    outcome,
+                    rawhid_host_core::codex_broker::CodexApprovalResponseOutcome::Accepted
+                ))
+            } else {
+                respond_to_codex_approval_internal(
+                    pending,
+                    broker,
+                    selection.key.token(),
+                    selection.decision_index,
+                )
+            }
+        }
         ApprovalClient::ClaudeCode => respond_to_claude_approval_internal(
             pending,
             claude_permission_gate,
@@ -871,6 +1071,7 @@ mod tests {
                 tool_use_id: None,
                 prompt_id: None,
                 permission_suggestions: None,
+                interaction: None,
             },
         );
 
@@ -945,6 +1146,7 @@ mod tests {
                 tool_use_id: None,
                 prompt_id: None,
                 permission_suggestions: None,
+                interaction: None,
             },
         );
 
@@ -957,6 +1159,7 @@ mod tests {
         let selection = crate::hud_coordinator::HudApprovalSelection {
             key: key.clone(),
             decision_index: 1, // CLAUDE_DECISION_DENY
+            response: None,
         };
 
         assert_eq!(
@@ -996,6 +1199,139 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for {description}"));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn codex_answer_deck_dispatches_a_single_opaque_answers_result() {
+        let upstream_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream_listener.local_addr().unwrap();
+        let harness = BrokerHarness::start(
+            format!("ws://{upstream_addr}"),
+            &[("client-token", "screenkey-terminal")],
+        )
+        .await
+        .unwrap();
+        let manager = harness.manager();
+        let activity = CodexActivityRuntime::start(manager.clone());
+        let claude_permission_gate = ClaudePermissionGate::default();
+        let upstream = tokio::spawn(async move {
+            let (upstream_socket, _) = upstream_listener.accept().await.unwrap();
+            accept_async(upstream_socket).await.unwrap()
+        });
+
+        let mut request = format!("ws://{}", harness.broker_addr())
+            .into_client_request()
+            .unwrap();
+        request
+            .headers_mut()
+            .insert("authorization", "Bearer client-token".parse().unwrap());
+        let (mut cli, _) = connect_async(request).await.unwrap();
+        let mut app_server = upstream.await.unwrap();
+
+        cli.send(Message::Text(
+            json!({"jsonrpc": "2.0", "id": 1, "method": "thread/start", "params": {}})
+                .to_string()
+                .into(),
+        ))
+        .await
+        .unwrap();
+        assert_eq!(receive_json(&mut app_server).await["id"], 1);
+        app_server
+            .send(Message::Text(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 1,
+                    "result": {"thread": {"id": "thread-input"}}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let _ = receive_json(&mut cli).await;
+        app_server
+            .send(Message::Text(
+                json!({
+                    "jsonrpc": "2.0",
+                    "method": "turn/started",
+                    "params": {"threadId": "thread-input", "turn": {"id": "turn-input", "status": "inProgress"}}
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let _ = receive_json(&mut cli).await;
+
+        app_server
+            .send(Message::Text(
+                json!({
+                    "jsonrpc": "2.0",
+                    "id": 201,
+                    "method": "item/tool/requestUserInput",
+                    "params": {
+                        "threadId": "thread-input",
+                        "turnId": "turn-input",
+                        "questions": [{
+                            "id": "mode",
+                            "header": "Mode",
+                            "question": "Which mode?",
+                            "multiSelect": false,
+                            "options": [{"label": "safe", "description": "Read only"}]
+                        }]
+                    }
+                })
+                .to_string()
+                .into(),
+            ))
+            .await
+            .unwrap();
+        let _ = receive_json(&mut cli).await;
+
+        let pending = activity.pending_approvals();
+        wait_until("input request in pending store", || pending.len() == 1).await;
+        let latest = pending.latest().expect("the input request is retained");
+        let (connection_id, thread_id) = latest
+            .0
+            .codex_thread()
+            .expect("input request keeps its thread route");
+        assert_eq!(thread_id, "thread-input");
+        let (key, snapshot) = pending
+            .latest_codex_for_connection_and_thread(connection_id, thread_id)
+            .expect("input request is selectable by exact thread");
+        assert!(matches!(
+            snapshot.content,
+            rawhid_host_core::pending_approval::PendingApprovalContent::Body(ref body)
+                if body.interaction.as_ref().is_some_and(|interaction| {
+                    interaction.kind
+                        == rawhid_host_core::pending_approval::PendingRequestKind::Input
+                        && !interaction.requires_terminal
+                })
+        ));
+
+        let selection = crate::hud_coordinator::HudApprovalSelection {
+            key: key.clone(),
+            decision_index: 0,
+            response: Some(json!({"answers": {"mode": {"answers": ["safe"]}}})),
+        };
+        assert!(super::dispatch_hud_response_selection(
+            &pending,
+            &manager,
+            &claude_permission_gate,
+            &selection,
+        )
+        .unwrap());
+        let host_response = receive_json(&mut app_server).await;
+        assert_eq!(host_response["id"], 201);
+        assert_eq!(
+            host_response["result"],
+            json!({"answers": {"mode": {"answers": ["safe"]}}})
+        );
+        assert!(pending.get(&key).is_none());
+
+        cli.close(None).await.unwrap();
+        drop(activity);
+        harness.shutdown().await.unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1449,6 +1785,7 @@ mod tests {
         let stale_selection = crate::hud_coordinator::HudApprovalSelection {
             key: second_key,
             decision_index: 0,
+            response: None,
         };
         assert!(super::dispatch_hud_response_selection(
             &pending,
@@ -1499,6 +1836,7 @@ mod tests {
         let permissions_selection = crate::hud_coordinator::HudApprovalSelection {
             key: third_key.clone(),
             decision_index: 1,
+            response: None,
         };
         assert!(super::dispatch_hud_response_selection(
             &pending,

@@ -248,6 +248,37 @@ export interface HudApprovalPayload {
    * before this field existed. Always English, matching this HUD's existing
    * English-only decision list (no i18n). */
   decision_labels: string[] | null;
+  interaction_kind: "approval" | "input" | "permissions" | "elicitation" | null;
+  questions: HudQuestion[] | null;
+  question_index: number | null;
+  interaction_message: string | null;
+  interaction_url: string | null;
+  permission_text: string | null;
+  requires_terminal: boolean;
+  physical_input_available: boolean;
+  review_mode: boolean;
+  review_answers: HudAnswer[] | null;
+  review_index: number | null;
+}
+
+export interface HudQuestionOption {
+  label: string;
+  description: string | null;
+  is_other: boolean;
+  is_secret: boolean;
+}
+
+export interface HudQuestion {
+  id: string;
+  header: string | null;
+  question: string;
+  options: HudQuestionOption[];
+  multi_select: boolean;
+}
+
+export interface HudAnswer {
+  id: string;
+  value: string;
 }
 
 export type HostActionKind =
@@ -360,6 +391,8 @@ export interface MonitorStatus {
   ai_usage: AiUsageProviderStatus[];
   device_battery: DeviceBatteryStatus[];
   device_layers: DeviceLayerState[];
+  approval_hud_available: boolean;
+  approval_hud_unavailable_reason: string | null;
 }
 
 export type AiUsageStatusKind =

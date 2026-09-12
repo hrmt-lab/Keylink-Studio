@@ -24,6 +24,7 @@ use rawhid_host_core::{
     ClaudeSessionRegistry,
 };
 
+use crate::approval_log::ApprovalLog;
 use crate::debug_log::DebugLogHandle;
 use crate::hud_coordinator::HudCoordinator;
 
@@ -50,6 +51,8 @@ pub struct MonitorStatus {
     pub ai_usage: Vec<AiUsageProviderStatus>,
     pub device_battery: Vec<DeviceBatteryStatus>,
     pub device_layers: Vec<DeviceLayerState>,
+    pub approval_hud_available: bool,
+    pub approval_hud_unavailable_reason: Option<String>,
 }
 
 impl Default for MonitorStatus {
@@ -65,6 +68,8 @@ impl Default for MonitorStatus {
             ai_usage: Vec::new(),
             device_battery: Vec::new(),
             device_layers: Vec::new(),
+            approval_hud_available: false,
+            approval_hud_unavailable_reason: Some("monitoring_stopped".to_string()),
         }
     }
 }
@@ -107,6 +112,7 @@ pub struct AppState {
     /// toggle changes. See `debug_log`'s module doc for why this is a
     /// toggleable handle rather than a subscriber re-initialized per save.
     pub debug_log: DebugLogHandle,
+    pub approval_log: Arc<ApprovalLog>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -532,6 +538,7 @@ impl AppState {
             encoder_restore_rollbacks: Arc::new(Mutex::new(HashMap::new())),
             hud: Arc::new(Mutex::new(None)),
             debug_log,
+            approval_log: Arc::new(ApprovalLog::new()),
         }
     }
 }

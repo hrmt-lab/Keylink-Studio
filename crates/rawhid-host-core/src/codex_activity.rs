@@ -11,13 +11,13 @@ use serde_json::Value;
 use crate::{
     codex_broker::{
         BrokerDirection, CodexApprovalRequestBody, CodexBrokerEvent, CodexBrokerManager,
-        JsonRpcKind, JsonRpcMetadata,
+        CodexInteractionRequestBody, JsonRpcKind, JsonRpcMetadata,
     },
     next_ai_session_registration_order,
     packet::{AiActivityState, AiClientType, AiClientVariant, AiWorkPhase},
     pending_approval::{
-        codex_key, ApprovalClient, ApprovalKey, ApprovalOwner, PendingApprovalBody,
-        PendingApprovalStore,
+        codex_key, codex_key_for_thread, ApprovalClient, ApprovalKey, ApprovalOwner,
+        PendingApprovalBody, PendingApprovalStore,
     },
 };
 
@@ -1550,9 +1550,12 @@ fn run_activity_loop(
                         ..
                     } => {
                         adapters.remove(&connection_id);
-                        pending_approvals.clear_owner(&ApprovalOwner::Codex {
-                            connection_id: connection_id.clone(),
-                        });
+                        pending_approvals.clear_owner_with_reason(
+                            &ApprovalOwner::Codex {
+                                connection_id: connection_id.clone(),
+                            },
+                            "broker_disconnected",
+                        );
                         approval_turns.retain(|(owner, _, _), _| owner != &connection_id);
                         let changes_for_connection =
                             registry.disconnect(&connection_id, origin == "cli", now);
@@ -1574,6 +1577,21 @@ fn run_activity_loop(
                             &mut approval_turns,
                             &connection_id,
                             &request_id,
+                            *body,
+                        );
+                    }
+                    CodexBrokerEvent::InteractionRequestBody {
+                        connection_id,
+                        request_id,
+                        method,
+                        body,
+                    } => {
+                        ingest_codex_interaction(
+                            &pending_approvals,
+                            &mut approval_turns,
+                            &connection_id,
+                            &request_id,
+                            &method,
                             *body,
                         );
                     }
@@ -1614,7 +1632,8 @@ fn run_activity_loop(
                         ..
                     } => {
                         adapters.clear();
-                        pending_approvals.clear_client(ApprovalClient::Codex);
+                        pending_approvals
+                            .clear_client_with_reason(ApprovalClient::Codex, "broker_stopped");
                         approval_turns.clear();
                         let ended = registry.end_all(now);
                         publish_registry_changes(
@@ -1633,7 +1652,8 @@ fn run_activity_loop(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
             Err(mpsc::RecvTimeoutError::Disconnected) => {
-                pending_approvals.clear_client(ApprovalClient::Codex);
+                pending_approvals
+                    .clear_client_with_reason(ApprovalClient::Codex, "broker_disconnected");
                 approval_turns.clear();
                 let ended = registry.end_all(Instant::now());
                 publish_registry_changes(
@@ -1691,8 +1711,68 @@ fn ingest_codex_approval(
         tool_use_id: None,
         prompt_id: None,
         permission_suggestions: None,
+        interaction: None,
     };
-    pending_approvals.insert(key, ApprovalClient::Codex, owner, normalized);
+    pending_approvals.insert(key.clone(), ApprovalClient::Codex, owner, normalized);
+}
+
+fn ingest_codex_interaction(
+    pending_approvals: &PendingApprovalStore,
+    approval_turns: &mut HashMap<(String, String, String), Vec<ApprovalKey>>,
+    connection_id: &str,
+    request_id: &Value,
+    method: &str,
+    body: CodexInteractionRequestBody,
+) {
+    let thread_id = body.thread_id.clone();
+    let turn_id = body.turn_id.clone();
+    let key = codex_key_for_thread(connection_id, request_id, thread_id.as_deref());
+    let owner = ApprovalOwner::Codex {
+        connection_id: connection_id.to_string(),
+    };
+    let mut interaction = body.interaction;
+    // A malformed/empty question set is deliberately terminal-only.  This
+    // prevents the HUD from sending an answer shape it has not validated.
+    if method == "item/tool/requestUserInput"
+        && (interaction.questions.is_empty()
+            || {
+                let mut question_ids = HashSet::new();
+                interaction
+                    .questions
+                    .iter()
+                    .any(|question| !question_ids.insert(question.id.as_str()))
+            }
+            || interaction.questions.iter().any(|question| {
+                question.options.is_empty()
+                    || question.multi_select
+                    || question
+                        .options
+                        .iter()
+                        .any(|option| option.is_other || option.is_secret)
+            }))
+    {
+        interaction.requires_terminal = true;
+    }
+    let normalized = PendingApprovalBody {
+        primary_text: body.primary_text,
+        full_command: body.full_command,
+        reason: body.reason,
+        cwd: body.cwd,
+        kind: body.kind.or_else(|| Some(method.to_string())),
+        available_decisions: (!body.available_decisions.is_empty())
+            .then_some(body.available_decisions),
+        tool_use_id: None,
+        prompt_id: None,
+        permission_suggestions: None,
+        interaction: Some(interaction),
+    };
+    pending_approvals.insert(key.clone(), ApprovalClient::Codex, owner, normalized);
+    if let (Some(thread_id), Some(turn_id)) = (thread_id, turn_id) {
+        approval_turns
+            .entry((connection_id.to_string(), thread_id, turn_id))
+            .or_default()
+            .push(key);
+    }
 }
 
 /// Resolution triggers for `pending_approvals`, read from the same
@@ -1717,14 +1797,18 @@ fn resolve_codex_approval(
         BrokerDirection::CliToAppServer => {
             if metadata.kind == JsonRpcKind::Response {
                 if let Some(id) = metadata.id.as_ref() {
-                    pending_approvals.resolve(&codex_key(connection_id, id));
+                    pending_approvals
+                        .withdraw_with_reason(&codex_key(connection_id, id), "terminal_resolved");
                 }
             }
         }
         BrokerDirection::AppServerToCli => match metadata.method.as_deref() {
             Some("serverRequest/resolved") => {
                 if let Some(request_id) = metadata.request_id.as_ref() {
-                    pending_approvals.resolve(&codex_key(connection_id, request_id));
+                    pending_approvals.withdraw_with_reason(
+                        &codex_key(connection_id, request_id),
+                        "server_resolved",
+                    );
                 }
             }
             Some("turn/completed") => {
@@ -1738,7 +1822,7 @@ fn resolve_codex_approval(
                     );
                     if let Some(keys) = approval_turns.remove(&map_key) {
                         for key in keys {
-                            pending_approvals.resolve(&key);
+                            pending_approvals.withdraw_with_reason(&key, "turn_completed");
                         }
                     }
                 }
@@ -1827,7 +1911,10 @@ fn initial_revision() -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pending_approval::PendingApprovalContent;
+    use crate::pending_approval::{
+        PendingApprovalContent, PendingInteraction, PendingQuestion, PendingQuestionOption,
+        PendingRequestKind,
+    };
 
     const THREAD_A: &str = "thread-a";
     const THREAD_B: &str = "thread-b";
@@ -3728,6 +3815,128 @@ mod tests {
                 .map(Vec::len),
             Some(1)
         );
+    }
+
+    #[test]
+    fn ingest_codex_input_preserves_answer_deck_questions_and_disables_unsafe_shapes() {
+        let store = PendingApprovalStore::new();
+        let mut approval_turns = HashMap::new();
+        let request_id = Value::from(31);
+        let body = CodexInteractionRequestBody {
+            primary_text: None,
+            full_command: None,
+            reason: None,
+            cwd: Some("C:\\work".to_string()),
+            kind: None,
+            available_decisions: Vec::new(),
+            interaction: PendingInteraction {
+                kind: PendingRequestKind::Input,
+                questions: vec![PendingQuestion {
+                    id: "mode".to_string(),
+                    header: Some("Mode".to_string()),
+                    question: "Which mode?".to_string(),
+                    options: vec![PendingQuestionOption {
+                        label: "safe".to_string(),
+                        description: None,
+                        is_other: false,
+                        is_secret: false,
+                    }],
+                    multi_select: false,
+                }],
+                message: None,
+                url: None,
+                permission_text: None,
+                requires_terminal: false,
+            },
+            thread_id: Some(THREAD_A.to_string()),
+            turn_id: Some(TURN_A.to_string()),
+        };
+        ingest_codex_interaction(
+            &store,
+            &mut approval_turns,
+            "connection-1",
+            &request_id,
+            "item/tool/requestUserInput",
+            body,
+        );
+        let key = codex_key("connection-1", &request_id);
+        let snapshot = store.get(&key).expect("input inserted");
+        assert!(store
+            .latest_codex_for_connection_and_thread("connection-1", THREAD_A)
+            .is_some());
+        match snapshot.content {
+            PendingApprovalContent::Body(body) => {
+                let interaction = body.interaction.expect("interaction retained");
+                assert_eq!(interaction.questions[0].id, "mode");
+                assert!(!interaction.requires_terminal);
+            }
+            PendingApprovalContent::Oversized => panic!("unexpected oversized marker"),
+        }
+
+        let multi_select_body = CodexInteractionRequestBody {
+            interaction: PendingInteraction {
+                questions: vec![PendingQuestion {
+                    multi_select: true,
+                    ..PendingQuestion {
+                        id: "scopes".to_string(),
+                        header: None,
+                        question: "Scopes?".to_string(),
+                        options: vec![PendingQuestionOption {
+                            label: "read".to_string(),
+                            description: None,
+                            is_other: false,
+                            is_secret: false,
+                        }],
+                        multi_select: false,
+                    }
+                }],
+                ..PendingInteraction {
+                    kind: PendingRequestKind::Input,
+                    questions: Vec::new(),
+                    message: None,
+                    url: None,
+                    permission_text: None,
+                    requires_terminal: false,
+                }
+            },
+            ..CodexInteractionRequestBody {
+                primary_text: None,
+                full_command: None,
+                reason: None,
+                cwd: None,
+                kind: None,
+                available_decisions: Vec::new(),
+                interaction: PendingInteraction {
+                    kind: PendingRequestKind::Input,
+                    questions: Vec::new(),
+                    message: None,
+                    url: None,
+                    permission_text: None,
+                    requires_terminal: false,
+                },
+                thread_id: Some(THREAD_A.to_string()),
+                turn_id: Some(TURN_A.to_string()),
+            }
+        };
+        ingest_codex_interaction(
+            &store,
+            &mut approval_turns,
+            "connection-1",
+            &Value::from(32),
+            "item/tool/requestUserInput",
+            multi_select_body,
+        );
+        let snapshot = store
+            .get(&codex_key("connection-1", &Value::from(32)))
+            .expect("multi-select input inserted");
+        match snapshot.content {
+            PendingApprovalContent::Body(body) => assert!(
+                body.interaction
+                    .expect("interaction retained")
+                    .requires_terminal
+            ),
+            PendingApprovalContent::Oversized => panic!("unexpected oversized marker"),
+        }
     }
 
     #[test]

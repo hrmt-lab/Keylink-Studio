@@ -95,6 +95,8 @@ function AppInner() {
     ai_usage: [],
     device_battery: [],
     device_layers: [],
+    approval_hud_available: false,
+    approval_hud_unavailable_reason: "monitoring_stopped",
   });
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [studioDevices, setStudioDevices] = useState<StudioDeviceStatus[]>([]);

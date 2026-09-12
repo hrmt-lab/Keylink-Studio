@@ -60,8 +60,8 @@ pub use codex_broker::{
     extract_command_approval_body, BrokerDirection, CodexAppServerRuntime,
     CodexApprovalRequestBody, CodexApprovalResponseOutcome, CodexBrokerConfig, CodexBrokerError,
     CodexBrokerEvent, CodexBrokerManager, CodexBrokerPhase, CodexBrokerStatus,
-    CodexClientLaunchInfo, JsonRpcKind, JsonRpcMetadata, MAX_CODEX_CLIENTS,
-    SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256,
+    CodexClientLaunchInfo, CodexInteractionRequestBody, JsonRpcKind, JsonRpcMetadata,
+    MAX_CODEX_CLIENTS, SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256,
 };
 pub use config::{
     AiClientConfig, AiClientDisplayConfig, AiUsageConfig, AppConfig, ClaudeCodeAiUsageConfig,
@@ -87,8 +87,10 @@ pub use packet::{
 pub use pending_approval::{
     claude_key, claude_launch_token_prefix, codex_key, ApprovalClient, ApprovalKey, ApprovalOwner,
     ClaudePendingResponse, CodexPendingResponse, PendingApprovalBody, PendingApprovalContent,
-    PendingApprovalSnapshot, PendingApprovalStore, CLAUDE_DECISION_ALLOW, CLAUDE_DECISION_DENY,
-    MAX_ENTRIES, MAX_PENDING_APPROVAL_BODY_BYTES,
+    PendingApprovalLogContext, PendingApprovalSnapshot, PendingApprovalStore,
+    PendingApprovalWithdrawal, PendingInteraction, PendingQuestion, PendingQuestionOption,
+    PendingRequestKind, CLAUDE_DECISION_ALLOW, CLAUDE_DECISION_DENY, MAX_ENTRIES,
+    MAX_PENDING_APPROVAL_BODY_BYTES,
 };
 pub use runner::{
     uplink_device_key, DeviceBatterySource, DeviceBatteryStatus, DeviceLayerState, RunEvent,

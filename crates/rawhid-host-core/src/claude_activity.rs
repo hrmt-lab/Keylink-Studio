@@ -13,7 +13,8 @@ use crate::{
     packet::{AiActivityState, AiWorkPhase},
     pending_approval::{
         claude_key, ApprovalClient, ApprovalOwner, PendingApprovalBody, PendingApprovalContent,
-        PendingApprovalStore, CLAUDE_DECISION_ALLOW, CLAUDE_DECISION_ALLOW_WITH_PERMISSIONS,
+        PendingApprovalStore, PendingInteraction, PendingQuestion, PendingQuestionOption,
+        PendingRequestKind, CLAUDE_DECISION_ALLOW, CLAUDE_DECISION_ALLOW_WITH_PERMISSIONS,
         CLAUDE_DECISION_DENY,
     },
 };
@@ -227,7 +228,7 @@ impl ClaudeApprovalBodyConsumer {
             // hook connection still waiting on a decision for one of that
             // launch's sessions is released the same way.
             ClaudeObserverEvent::WrapperExited(exit) => {
-                store.clear_claude_launch(&exit.launch_id);
+                store.clear_claude_launch_with_reason(&exit.launch_id, "wrapper_exited");
                 gate.cancel_launch(&exit.launch_id);
             }
         }
@@ -262,6 +263,22 @@ impl ClaudeApprovalBodyConsumer {
                     claude_approval_body(&hook.body),
                 );
             }
+            // Claude's MCP elicitation hook is display-only until a real
+            // response path has been verified. Keep its normalized body in
+            // the same store so the HUD can show the request and ScreenKey
+            // can focus the owning terminal.
+            "Elicitation" => {
+                let owner = ApprovalOwner::ClaudeSession {
+                    launch_id: hook.launch_id.clone(),
+                    session_id: session_id.to_string(),
+                };
+                store.insert(
+                    claude_key(&hook.launch_id, session_id),
+                    ApprovalClient::ClaudeCode,
+                    owner,
+                    claude_elicitation_body(&hook.body),
+                );
+            }
             // PermissionDenied is Claude's explicit denial; PostToolUse
             // fires once the tool has actually run, which for an approved
             // tool is the resolution (Notification/permission_prompt is
@@ -283,16 +300,22 @@ impl ClaudeApprovalBodyConsumer {
                 let event_tool_use_id = required_string(&hook.body, "tool_use_id");
                 let should_resolve = match store.get(&key).map(|snapshot| snapshot.content) {
                     Some(PendingApprovalContent::Body(stored)) => {
-                        match (stored.tool_use_id, event_tool_use_id) {
-                            (Some(stored_id), Some(event_id)) => stored_id == event_id,
-                            _ => true,
+                        if stored.interaction.as_ref().is_some_and(|interaction| {
+                            interaction.kind == PendingRequestKind::Elicitation
+                        }) {
+                            false
+                        } else {
+                            match (stored.tool_use_id, event_tool_use_id) {
+                                (Some(stored_id), Some(event_id)) => stored_id == event_id,
+                                _ => true,
+                            }
                         }
                     }
                     Some(PendingApprovalContent::Oversized) => true,
                     None => false,
                 };
                 if should_resolve {
-                    store.resolve(&key);
+                    store.withdraw_with_reason(&key, "terminal_resolved");
                     // The terminal (or an already-run tool) resolved this
                     // request first; a hook connection still waiting on the
                     // gate for the same token must not also receive a
@@ -301,13 +324,30 @@ impl ClaudeApprovalBodyConsumer {
                     gate.cancel(key.token());
                 }
             }
+            "ElicitationResult" => {
+                let key = claude_key(&hook.launch_id, session_id);
+                if store.get(&key).is_some_and(|snapshot| {
+                    matches!(
+                        snapshot.content,
+                        PendingApprovalContent::Body(body)
+                            if body.interaction.as_ref().is_some_and(|interaction| {
+                                interaction.kind == PendingRequestKind::Elicitation
+                            })
+                    )
+                }) {
+                    store.withdraw_with_reason(&key, "elicitation_resolved");
+                }
+            }
             // The turn (or session) ending leaves nothing left to answer,
             // even if no explicit resolution for a given request arrived.
             "Stop" | "SessionEnd" => {
-                store.clear_owner(&ApprovalOwner::ClaudeSession {
-                    launch_id: hook.launch_id.clone(),
-                    session_id: session_id.to_string(),
-                });
+                store.clear_owner_with_reason(
+                    &ApprovalOwner::ClaudeSession {
+                        launch_id: hook.launch_id.clone(),
+                        session_id: session_id.to_string(),
+                    },
+                    "session_ended",
+                );
                 gate.cancel(claude_key(&hook.launch_id, session_id).token());
             }
             _ => {}
@@ -350,6 +390,7 @@ fn claude_approval_body(body: &Value) -> PendingApprovalBody {
         .and_then(Value::as_str)
         .map(str::to_string);
     let tool_name = required_string(body, "tool_name");
+    let is_ask_user_question = tool_name.as_deref() == Some("AskUserQuestion");
     // `ExitPlanMode`'s `tool_input` has no `command` -- it carries the whole
     // plan document under `plan` instead, as captured from a real
     // plan-mode approval on 2026-09-07. The generic fallback
@@ -359,15 +400,19 @@ fn claude_approval_body(body: &Value) -> PendingApprovalBody {
     // branch instead, one that keeps the plan's newlines and Markdown intact
     // so the HUD's own display area (which preserves line breaks) can show
     // the whole thing as the user would read it in the terminal.
-    let primary_text = command.clone().or_else(|| {
-        if tool_name.as_deref() == Some("ExitPlanMode") {
-            plan_text(tool_input)
-        } else {
-            tool_input.map(|input| {
-                serde_json::to_string(input).unwrap_or_else(|_| "<tool_input>".to_string())
-            })
-        }
-    });
+    let primary_text = if is_ask_user_question {
+        None
+    } else {
+        command.clone().or_else(|| {
+            if tool_name.as_deref() == Some("ExitPlanMode") {
+                plan_text(tool_input)
+            } else {
+                tool_input.map(|input| {
+                    serde_json::to_string(input).unwrap_or_else(|_| "<tool_input>".to_string())
+                })
+            }
+        })
+    };
     // Only a non-empty JSON array counts as "there is a suggestion to
     // offer" -- see this function's own doc comment on why an absent field,
     // an empty array, and a non-array value are all treated identically
@@ -377,14 +422,19 @@ fn claude_approval_body(body: &Value) -> PendingApprovalBody {
         .and_then(Value::as_array)
         .filter(|suggestions| !suggestions.is_empty())
         .cloned();
-    let available_decisions = if permission_suggestions.is_some() {
-        vec![
+    let available_decisions = if is_ask_user_question {
+        None
+    } else if permission_suggestions.is_some() {
+        Some(vec![
             json!(CLAUDE_DECISION_ALLOW),
             json!(CLAUDE_DECISION_ALLOW_WITH_PERMISSIONS),
             json!(CLAUDE_DECISION_DENY),
-        ]
+        ])
     } else {
-        vec![json!(CLAUDE_DECISION_ALLOW), json!(CLAUDE_DECISION_DENY)]
+        Some(vec![
+            json!(CLAUDE_DECISION_ALLOW),
+            json!(CLAUDE_DECISION_DENY),
+        ])
     };
     PendingApprovalBody {
         primary_text,
@@ -392,14 +442,120 @@ fn claude_approval_body(body: &Value) -> PendingApprovalBody {
         reason: None,
         cwd: required_string(body, "cwd"),
         kind: tool_name,
-        available_decisions: Some(available_decisions),
+        available_decisions,
         // Auxiliary only -- see the doc comments on these fields in
         // `pending_approval.rs`. Absent in the real capture (§4), present
         // when Claude Code happens to include it.
         tool_use_id: required_string(body, "tool_use_id"),
         prompt_id: required_string(body, "prompt_id"),
         permission_suggestions,
+        interaction: is_ask_user_question.then(|| PendingInteraction {
+            kind: PendingRequestKind::Input,
+            questions: extract_claude_questions(tool_input),
+            message: None,
+            url: None,
+            permission_text: None,
+            // The actual response injection path is intentionally gated on
+            // the Claude probe; until it is proven, the HUD is display-only
+            // and ScreenKey routes the user to the terminal.
+            requires_terminal: true,
+        }),
     }
+}
+
+fn claude_elicitation_body(body: &Value) -> PendingApprovalBody {
+    let message = required_string(body, "message").or_else(|| {
+        required_string(body, "title").map(|title| {
+            required_string(body, "description")
+                .map(|description| format!("{title}\n{description}"))
+                .unwrap_or(title)
+        })
+    });
+    let kind = required_string(body, "server_name")
+        .or_else(|| required_string(body, "serverName"))
+        .or_else(|| Some("Elicitation".to_string()));
+    PendingApprovalBody {
+        primary_text: message.clone(),
+        full_command: None,
+        reason: None,
+        cwd: required_string(body, "cwd"),
+        kind,
+        available_decisions: None,
+        tool_use_id: None,
+        prompt_id: required_string(body, "prompt_id"),
+        permission_suggestions: None,
+        interaction: Some(PendingInteraction {
+            kind: PendingRequestKind::Elicitation,
+            questions: Vec::new(),
+            message,
+            url: required_string(body, "url"),
+            permission_text: body
+                .get("requestedSchema")
+                .map(|schema| serde_json::to_string_pretty(schema).unwrap_or_default()),
+            requires_terminal: true,
+        }),
+    }
+}
+
+fn extract_claude_questions(tool_input: Option<&Value>) -> Vec<PendingQuestion> {
+    tool_input
+        .and_then(|input| input.get("questions"))
+        .and_then(Value::as_array)
+        .map(|questions| {
+            questions
+                .iter()
+                .enumerate()
+                .filter_map(|(index, question)| {
+                    let object = question.as_object()?;
+                    let text = object.get("question")?.as_str()?.to_string();
+                    let options = object
+                        .get("options")
+                        .and_then(Value::as_array)
+                        .map(|options| {
+                            options
+                                .iter()
+                                .filter_map(|option| {
+                                    let object = option.as_object()?;
+                                    Some(PendingQuestionOption {
+                                        label: object.get("label")?.as_str()?.to_string(),
+                                        description: object
+                                            .get("description")
+                                            .and_then(Value::as_str)
+                                            .map(str::to_string),
+                                        is_other: object
+                                            .get("isOther")
+                                            .and_then(Value::as_bool)
+                                            .unwrap_or(false),
+                                        is_secret: object
+                                            .get("isSecret")
+                                            .and_then(Value::as_bool)
+                                            .unwrap_or(false),
+                                    })
+                                })
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    Some(PendingQuestion {
+                        id: object
+                            .get("id")
+                            .and_then(Value::as_str)
+                            .map(str::to_string)
+                            .unwrap_or_else(|| format!("question-{index}")),
+                        header: object
+                            .get("header")
+                            .and_then(Value::as_str)
+                            .map(str::to_string),
+                        question: text,
+                        options,
+                        multi_select: object
+                            .get("multiSelect")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false),
+                    })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Pulls the full plan document out of an `ExitPlanMode` `tool_input` for
@@ -2203,6 +2359,36 @@ mod tests {
             .is_some_and(|text| text.contains("notes.md")));
     }
 
+    #[test]
+    fn claude_ask_user_question_keeps_structured_questions_without_raw_tool_input_text() {
+        let body = serde_json::json!({
+            "tool_name": "AskUserQuestion",
+            "tool_input": {
+                "questions": [{
+                    "header": "Mode",
+                    "question": "Which mode should be used?",
+                    "options": [{
+                        "label": "Safe",
+                        "description": "Use the safe mode"
+                    }]
+                }]
+            }
+        });
+
+        let extracted = claude_approval_body(&body);
+        assert_eq!(extracted.primary_text, None);
+        assert_eq!(extracted.available_decisions, None);
+        let interaction = extracted.interaction.expect("structured question");
+        assert_eq!(interaction.kind, PendingRequestKind::Input);
+        assert!(interaction.requires_terminal);
+        assert_eq!(interaction.questions.len(), 1);
+        assert_eq!(
+            interaction.questions[0].question,
+            "Which mode should be used?"
+        );
+        assert_eq!(interaction.questions[0].options[0].label, "Safe");
+    }
+
     /// The real `PermissionRequest` body captured for a plan-mode approval
     /// (`ExitPlanMode`): `tool_input` carries the whole plan document under
     /// `plan`, keyed off a Markdown `#` heading, plus a `planFilePath` the
@@ -2305,6 +2491,51 @@ mod tests {
             waiter.blocking_recv().is_err(),
             "PermissionDenied must cancel the gate waiter, not leave it open"
         );
+    }
+
+    #[test]
+    fn consumer_displays_claude_elicitation_and_resolves_only_on_result() {
+        let store = PendingApprovalStore::new();
+        let consumer = ClaudeApprovalBodyConsumer;
+        let gate = ClaudePermissionGate::default();
+        let key = claude_key("launch-1", "session-1");
+
+        consumer.ingest(
+            &store,
+            &gate,
+            &hook(
+                "Elicitation",
+                serde_json::json!({
+                    "elicitation_id": "elicit-1",
+                    "server_name": "demo-server",
+                    "message": "Choose a test label",
+                    "url": "https://example.test",
+                    "requestedSchema": {"type": "object"}
+                }),
+            ),
+        );
+        let snapshot = store.get(&key).expect("elicitation is pending");
+        match snapshot.content {
+            PendingApprovalContent::Body(body) => {
+                assert_eq!(body.kind.as_deref(), Some("demo-server"));
+                assert_eq!(body.primary_text.as_deref(), Some("Choose a test label"));
+                let interaction = body.interaction.expect("normalized interaction");
+                assert_eq!(interaction.kind, PendingRequestKind::Elicitation);
+                assert!(interaction.requires_terminal);
+                assert_eq!(interaction.url.as_deref(), Some("https://example.test"));
+            }
+            PendingApprovalContent::Oversized => panic!("unexpected oversized marker"),
+        }
+
+        consumer.ingest(
+            &store,
+            &gate,
+            &hook(
+                "ElicitationResult",
+                serde_json::json!({"elicitation_id": "elicit-1"}),
+            ),
+        );
+        assert!(store.get(&key).is_none());
     }
 
     #[test]

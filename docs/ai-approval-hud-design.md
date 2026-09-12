@@ -1,12 +1,12 @@
 # ScreenKey と HUD による AI 承認・回答 設計
 
-- 状態: **段階1〜段階4まで実装・実機受け入れ済み（2026-09-07）。段階5のスコープを確定（2026-09-11、実装未着手）。段階6を新設**
+- 状態: **段階1〜段階6まで実装・実機受け入れ済み（2026-09-12）。Codex permissions と本物の MCP elicitation の回答注入、Claude Code の in-band 回答注入は未検証**
 - 作成日: 2026-09-03
-- 最終更新: 2026-09-11（段階5のスコープを確定し §12・§13 を改訂。Codex の承認要求4種を schema から確認して §14-4 を全面改訂。`AskUserQuestion` の HUD 表示不具合を受けて §14-16 を改訂し、**段階6（HUD から質問そのものに答える）を新設**。実装は未着手）
+- 最終更新: 2026-09-12（段階5・段階6を実装し、実機で通常承認、Codex Answer Deck、Claude の構造化表示と TUI 前面化、USB 再接続、監査ログを受け入れ。§12・§13・§14 を実装後の境界へ更新。Codex permissions／本物の MCP elicitation／Claude in-band 回答注入は未検証）
 - 一つ前の更新: 2026-09-07（同日さらにプランモードを実測。`ExitPlanMode` の主表示をプラン本文へ変更し、§7.2・§14-4・§14-17・§15 を改訂。先行して段階4の残り＝ScreenKeyのClaude Code対象表示を実装し、実機で見つかった承認ライフサイクルの3不具合を修正、§9.5・§9.6を新設、§13・§14を改訂）
 - 対象: Keylink Studio Host、Codex Broker、Claude Code Observer、Tauri UI、Firmware 描画
 - 対象ハードウェア: ScreenKey 4個（0.85インチ / 128×128 / ST7735S）、通常キー、エンコーダ 1個（**押しボタン無し**）。実機は aipad（3×4、うち ScreenKey 4・`&bootloader` 1・エンコーダ位置 1）
-- 基準環境: `codex-cli 0.153.2`、Claude Code `2.1.259`（プランモードの実測のみ `2.1.263`）、Windows 11 Pro `10.0.26200.9278`
+- 基準環境: `codex-cli 0.154.0`（0.153.2との差分は§14-4に記録）、Claude Code `2.1.259`（プランモードの実測のみ `2.1.263`）、Windows 11 Pro `10.0.26200.9278`
 
 ## 本書が置き換える文書
 
@@ -641,13 +641,16 @@ Codex の decision は不透明値をそのまま返す契約なので、**理�
 
 ### 9.6 答えられなくなった要求の取り下げ
 
-Studio が回答を届けられなくなる経路は2つある。**どちらも HUD の申し出を取り下げる。**
-残しておくと「押しても何も起きない HUD」になり、これは無反応そのものより悪い。
+Studio が回答を届けられなくなる経路は、要求側・監視側・Broker・Host Link の終了として扱う。
+**正常な一時 USB 切断だけは例外として HUD と pending を保持する。** それ以外を残しておくと
+「押しても何も起きない HUD」になり、これは無反応そのものより悪い。
 
 | 理由 | 起きること | セッションの状態 |
 |---|---|---|
 | `connection_closed` | ターミナルで拒否された（§9.5） | **ターンを終わらせて待機へ。** 拒否後の Claude Code はプロンプトで入力待ちであり、許可を求めていた道具は完了 hook が来ないまま `active_items` に残るため、そのままだと待機中のセッションが「実行中」表示で回り続ける |
 | `decision_timeout` | 誰も答えないまま Host の待ちが尽きた | 承認要求だけを落として再計算（＝汎用の作業中）。**結末が分からない**ため、承認待ちを名乗り続けない。代償として「答えてほしい」黄色い合図は戻らない |
+| `monitoring_stopped` / Broker 切断 / 明示的な `host_link_error` / 上流の外部解決・終了 | その要求を解決不能として取り下げる | HUD と pending を取り下げ、理由付きで監査ログへ記録する |
+| **正常な一時 USB 切断（成功した再スキャンで verified device が0台）** | **取り下げない。** HUDを残し、物理入力不可を表示する。HOST_ACTIONは受け付けず、再接続して実効条件を満たしたら操作を再開する | **pending と上流の要求を保持する。監査ログに withdraw を記録しない** |
 
 **ScreenKey の黄色い点滅は、申し出を取り下げるまでは維持する。** ターミナルでは本当に承認待ちだからである。
 
@@ -660,9 +663,9 @@ Studio が回答を届けられなくなる経路は2つある。**どちらも 
 | 遷移 | 条件 |
 |---|---|
 | 対象を設定 | 待機中セッションの ScreenKey 短押し、または待機が1件だけになったとき自動 |
-| 対象を解除 | 回答した／外部で解決された／セッション終了／デバイス切断／監視停止 |
+| 対象を解除 | 回答した／外部で解決された／セッション終了／監視停止／Broker 切断／明示的な host link error |
 
-- **HUD の表示自体はセッションごとではなく1つ。** 対象を切り替えて中身を差し替える
+- **HUD の表示自体はセッションごとではなく1つ。** 対象を切り替えて中身を差し替える。正常な一時 USB 切断では対象を解除しない
 - 待機中セッションが複数あっても、ScreenKey は全件が自分の状態を表示し続ける
   （HUD だけが1件を指す）
 - 解除時は全 slot の `AI_CLIENT_STATE` を full send で再送する
@@ -738,11 +741,12 @@ ScreenKey を押しても白い L 字が最大 5 秒動かず、§8 の目的を
 |---|---|
 | 既定 | **HUD の表示は有効。回答は `[actions]` の既存 opt-in が鍵になる**（2026-09-11 改訂。旧: 「無効。Settings から明示的な警告つき opt-in」） |
 | 権限 | 既存 host action の制約を継承（device 単位の許可リスト、監視中のみ、同一 `seq` は1回） |
+| Settings の実効状態 | 監視中、`[actions]` 有効、接続済みで `HOST_ACTION` capability を持つ有効 device が1台以上あり、5つの必須 HUD binding（Select / Previous / Next / Confirm / Reject）が同じ device に揃うときだけ「キーボードから AI の承認に答える」を有効と表示する。複数 device は全件を評価する |
 | 誤爆防止 | HUD 出現直後 400ms は ✅ を受け付けない（**実装済み・実機確認済み**）。❌ には掛からない（送信しないため） |
 | 「常に許可」 | **Claude Code は実装済み**（§9.3）。単押しの3つ目の選択肢として出すが、**適用範囲を必ずラベルに出す**（`this session` / `saved to project settings`）。Codex は未実装 |
 | 中断 | **❌ → ✅ の 2 打鍵**（`cancel` を明示的に選んで送る）。長押しは使わない（§6.5） |
 | 縮退 | 失敗時は必ずターミナルへ委ねる。**自動許可へ倒さない** |
-| 監査ログ | **`[debug_log]` とは別の、承認専用の常時ログ**（2026-09-11 確定）。残すのは**いつ／どのセッション／要求種別／押下／送出可否／失敗・取り下げの理由**。**コマンド本文・変更内容・許可候補の中身は残さない** |
+| 監査ログ | **`[debug_log]` とは別の、承認専用の常時ログ**。既定保存先は `%APPDATA%\Keylink Studio\config\logs`（ProjectDirsの `config_dir/logs`）。**いつ／opaqueなセッション識別子／要求種別／物理操作（Select / Previous / Next / Confirm / Reject）／送出可否／失敗・取り下げ理由**を残し、コマンド本文・変更内容・許可候補・回答値は残さない。改行をsanitizeし、7日分をbest-effortで保持する。書込み失敗は回答を止めず無警告で継続する |
 | 機微情報 | **コマンド文字列や書き込み内容が Studio の UI に表示される**（新規の経路）。**画面共有時の伏字モードは段階5から外した（2026-09-11）** — 画面共有する場面が実際に出てから決める。未決のまま残す |
 
 ### なぜ「既定無効」をやめたか（2026-09-11）
@@ -767,6 +771,20 @@ Settings に出すのは、新しいトグルではなく **「キーボード�
 したがって承認ログを**トグルで購読者を入れ直す形にはできない**。
 **専用の宛先（target）を1本増やし、常時開いた書き出し口へ流す**形になる。
 
+### 段階5・6で確定した実効境界（2026-09-12）
+
+- Settings の表示判定と HOST_ACTION の受付判定は同じ純粋判定を使う。非対応 device、無効な
+  device config、無効な actions、必須5 bindingの欠落がある device では物理回答を受け付けない。
+- 正常な再スキャンで一時的に device が0台になっても、上流の pending request と HUD は残す。
+  HUDには物理入力不可を表示し、切断中の Previous / Next / Confirm / Reject / Select と遅れて届いた
+  HOST_ACTION は無視する。実効条件を満たす device の再接続後だけ操作を再開する。
+- permissions と elicitation は本文を HUD に表示するが、HUD から回答を組み立てない。ScreenKey の
+  短押しは対象 TUI／Terminal を前面化し、回答は TUI に委ねる。Codex の plan 最終承認も既存どおり
+  TUI で処理する。
+- Claude `AskUserQuestion` は raw tool_input JSON を HUD に重ねず、構造化された header / question /
+  options を「質問への回答」として表示する。in-band の回答注入は未検証のため、実際の回答はTUIへ
+  フォールバックする。
+
 ---
 
 ## 13. 段階的実装計画
@@ -782,27 +800,50 @@ Settings に出すのは、新しいトグルではなく **「キーボード�
 
 **段階1が単独で意味を持つ**のが良いところで、回答機能の是非を決める前に価値を確認できる。
 
-### 段階5：スコープ確定（2026-09-11、実装未着手）
+### 段階5：実装・実機受け入れ済み（2026-09-12）
 
 | # | 作るもの | 中身 |
 |---|---|---|
-| 1 | **Settings の状態表示** | 新しい設定は作らない。`[actions]` の状態を読んで「キーボードから AI の承認に答える」が今どちらかを出す（§12） |
-| 2 | **承認専用の常時ログ** | `[debug_log]` とは別（§12）。コマンド本文・変更内容・許可候補の中身は残さない |
-| 3 | **異常時の縮退** | §9.6 の取り下げは実装済みなので、**HID が抜けた／監視を止めた／Broker が落ちた**ときにそれを呼ぶ入口を足す |
-| 4 | **Codex 4種の本文表示** | §14-4。4種とも本文を出す。答えられるのはファイル変更と elicitation の拒否だけ |
-| 5 | **`AskUserQuestion` の表示修正** | §14-16 の A。`claude_activity.rs` に専用分岐を足し、質問文と選択肢を並べる |
+| 1 | **Settings の状態表示** | 新しい設定は作らず、監視・actions・対象 device・必須5 bindingを全件評価して実効状態と安定した理由コードを表示 |
+| 2 | **承認専用の常時ログ** | `[debug_log]` とは別に `%APPDATA%\Keylink Studio\config\logs` へ metadata-onlyで保存。7世代、改行sanitize、best-effort |
+| 3 | **異常時の縮退** | 監視停止、Broker切断、明示的な Host Link error、外部解決・終了は withdraw。正常な一時USB切断は pending/HUD を保持し、再接続で復帰 |
+| 4 | **Codex 4種の本文表示** | command / file-change / permissions / requestUserInput / elicitation の要求内容を安全な表示用payloadへ変換。permissionsとelicitationは回答をTUIへ委ねる |
+| 5 | **`AskUserQuestion` の表示修正** | raw JSONを表示せず、header / question / optionsを構造化表示。「質問への回答」として表示し、ScreenKey短押しで対応TUIを前面化 |
 
 **段階5 から外したもの:** 機微情報の伏字モード（§12）、**ファイル変更の変更内容の表示**（要求に
 入っておらず、item 側から拾う経路の新設が要るため。§14-4）。
 
-### 段階6：HUD から質問そのものに答える（2026-09-11 新設、実装未着手）
+実機では通常承認の選択、Claude の構造化表示と TUI 前面化、USB 再接続、監査ログを確認し、
+HUD出現直後の guard と first-wins も既存の受け入れ結果を維持した。
 
-`AskUserQuestion` の選択肢を HUD に並べ、エンコーダ＋✅ で答える。Codex の
-`item/tool/requestUserInput` も同じ仕組みに乗る（どちらも「許可／拒否」ではなく
-**質問ごとの答え**を返す形だから）。
+### 段階6：HUD から質問そのものに答える（実装・実機受け入れ済み、2026-09-12）
 
-**着手前に実測する。** `behavior:"allow"` ＋ `updatedInput.answers` で答えが通るかは未確認
-（§14-18）。測って駄目なら段階5 の #5 だけで止め、「読めるが答えはターミナル」に留める。
+Codex の `item/tool/requestUserInput` のsafeな構造化質問をHUDに並べ、エンコーダ＋✅で答える。
+Claude `AskUserQuestion` は構造化表示と対応TUIの前面化までを実装する。Claudeのin-band注入は
+未検証なので、質問そのものへの回答はTUI fallbackとする（どちらも「許可／拒否」ではなく
+**質問ごとの答え**を返す形だが、回答経路の成立確認はクライアントごとに分ける）。
+
+Codex の safeな構造化 question は Answer Deck へ積み、質問ごとに1回答を仮保存する。複数 question は
+同一 request 内で順に回答し、review画面で全回答を確認してから明示的な Send を1回だけ押す。
+送信形は次の map を使う。
+
+```json
+{
+  "answers": {
+    "<question id>": {
+      "answers": ["<selected option label>"]
+    }
+  }
+}
+```
+
+自由入力、secret入力、不正形、未確認の注入形は Answer Deck に載せず TUI へ委ねる。物理入力は
+Host側で実効 device 条件を再確認し、first-wins（TUI先着、ServerRequest resolved、切断、ID再利用）
+で一度だけ解決する。
+
+Claude の `AskUserQuestion` は構造化表示と TUI 前面化までを実機確認した。in-band `updatedInput.answers`
+注入は未検証のため、Claude の質問回答は引き続き TUI fallback とする。Codex permissions と本物の
+MCP elicitation も同様に、本文表示と TUI fallback の境界を維持する。
 
 ### 段階2：完了（2026-09-06）
 
@@ -929,12 +970,13 @@ first-wins は、ターミナルが先に答えると `PostToolUse` / `Permissio
    | 種類 | 要求に入っている本文 | 返す答えの形 | HUD から答えられるか |
    |---|---|---|---|
    | `item/fileChange/requestApproval` | `reason` と `grantRoot` のみ。**変更内容そのものは要求に入っていない** | `decision` | **可**（✅／❌。command approval と同じ形） |
-   | `item/permissions/requestApproval` | `permissions`（fileSystem／network の profile）、`cwd`、`reason` | `permissions`（`GrantedPermissionProfile`）＋ `scope` | **不可**（許可／拒否ではなく「どの権限をどこまで渡すか」を組み立てる） |
-   | `item/tool/requestUserInput` | `questions`（`title` ＋ `options`）、`isBlocking`、`autoResolutionMs` | `answers`（質問 id ごとの答え） | **不可**（許可／拒否ではない）。**段階6 で可になる** |
-   | `mcpServer/elicitation/request` | `message`（`form`／`openai/form`／`openaiForm`／`url` の4 mode）。**`openai/userVerification` mode だけは `message` を持たず `title`／`description` を持つ** | `action`（accept／decline／cancel）＋ `content` | **拒否だけ可**（accept には入力内容が要る） |
+   | `item/permissions/requestApproval` | `permissions`（fileSystem／network の profile）、`cwd`、`reason` | `permissions`（`GrantedPermissionProfile`）＋ `scope` | **HUDは表示のみ。回答はTUI**（Hostが権限profileを推測して組み立てない） |
+   | `item/tool/requestUserInput` | `questions`（`title` ＋ `options`）、`isBlocking`、`autoResolutionMs` | `answers`（質問 id ごとの答え） | **可（safeな構造化形のみ）**。Answer Deckで積み、review後の明示Sendで1回送る |
+   | `mcpServer/elicitation/request` | `message`（`form`／`openai/form`／`openaiForm`／`url` の4 mode）。**`openai/userVerification` mode だけは `message` を持たず `title`／`description` を持つ** | `action`（accept／decline／cancel）＋ `content` | **HUDは表示のみ。回答はTUI**（acceptの入力を推測しない） |
 
-   **決定:** 4種とも**本文は出す**。答えられるのは**ファイル変更（✅／❌）と elicitation の拒否だけ**。
-   権限要求とツールの入力要求は HUD に**「ターミナルで答えてください」と明記**する。
+   **決定:** 要求本文は安全な構造化payloadとして表示する。HUDから物理回答できるのは通常承認、
+   file-change approval、CodexのsafeなrequestUserInputである。permissionsとelicitationはHUDに
+   **「ターミナルで答えてください」**と表示し、ScreenKey短押しで対応TUIを前面化する。
 
    **なぜこの形か。** 「黄色いのに読めない」は段階1 の価値そのものを壊す。気づかせておいて
    読ませないのは、出さないより悪い。一方で、**相手が提示していない権限を Studio が組み立てない**
@@ -982,8 +1024,9 @@ first-wins は、ターミナルが先に答えると `PostToolUse` / `Permissio
     表示が一時的に待機側へ倒れるだけで、完了 hook が届いた時点で直る
 15. **`PostToolBatch` を Studio は解釈していない。** 実機では `PostToolUse` より多く届いて
     いる（1 回 対 2 回）。承認の解決契機として使えるかは未調査
-16. ~~`AskUserQuestion` のような「答えを聞くツール」~~ **→ 2026-09-11 決着。表示の修正は段階5、
-    質問への回答は段階6。**
+16. ~~`AskUserQuestion` のような「答えを聞くツール」~~ **→ 2026-09-12 実装・実機確認済み。
+    構造化表示とTUI前面化はClaudeで確認し、Codexのsafeな`requestUserInput`はAnswer Deckで回答まで確認。
+    Claudeのin-band回答注入は未検証のためTUI fallbackを維持する。**
 
     **きっかけ:** 実機のスクリーンショットで、HUD に `tool_input` の JSON が**改行の潰れた1行**で
     出ており、選択肢も allow／deny の2つしか無いことが分かった。ターミナル側は質問の選択肢4つ＋
@@ -999,11 +1042,12 @@ first-wins は、ターミナルが先に答えると `PostToolUse` / `Permissio
 
     | | 内容 | どこ |
     |---|---|---|
-    | **A** | `AskUserQuestion` 専用の分岐を足し、質問文と選択肢を素直に並べる | **段階5** |
-    | **B** | HUD の選択肢を、質問の選択肢そのものに差し替える（エンコーダ＋✅ で答える） | **段階6** |
-    | **C** | `behavior:"allow"` ＋ `updatedInput.answers` で答えを返せるかを先に実測する | **段階6**（B の前提） |
+    | **A** | `AskUserQuestion` 専用の分岐を足し、質問文と選択肢を素直に並べる | **段階5で実装・実機確認済み** |
+    | **B** | HUD の選択肢を、質問の選択肢そのものに差し替える（エンコーダ＋✅ で答える） | **Codex requestUserInputで実装・実機確認。Claudeは未接続** |
+    | **C** | `behavior:"allow"` ＋ `updatedInput.answers` で答えを返せるかを先に実測する | **Claudeは未検証。TUI fallback** |
 
-    A は低リスクで段階5 を膨らませない。B／C は**返し方が未実測**（§14-18）なので、測ってから繋ぐ。
+    A は低リスクで段階5を膨らませない。CodexのBはApp Serverの`answers` responseを確認して接続した。
+    ClaudeのCは返し方が未検証なので、推測で注入しない。
 
     **§14-17 との違い＝ここが肝。** §14-17 で「選択肢を揃えない」と決めたのは、
     **auto mode がそもそも Host へ渡ってきていなかった**ためで、出すには Studio が候補を捏造する
@@ -1015,9 +1059,9 @@ first-wins は、ターミナルが先に答えると `PostToolUse` / `Permissio
     **境界は「選択肢を増やすな」ではなく「相手が出していないものを作るな」である。**
     ここを取り違えると、出せるものまで出さないことになる。
 
-    **段階6 が入ると §14-4 の表が1行変わる。** `item/tool/requestUserInput` も `answers` を返す形
-    なので、同じ仕組みに乗って「不可」→「可」になる。権限要求と elicitation の accept は、
-    返すものが質問の答えではないので変わらない。
+    **段階6で §14-4 の `item/tool/requestUserInput` 行は「可」になった。** 複数questionを
+    Answer Deckに積み、全回答をreviewしてから `{answers:{id:{answers:[label]}}}` を1回だけ送る。
+    permissionsとelicitationのacceptは質問の答えではないので、引き続きTUI fallbackである。
 
     「Type something」は HUD から打てないので**選択肢に出さない**。拒否（Esc 相当）は末尾に残す。
 17. ~~ターミナルに出る選択肢と HUD の選択肢を揃えたい~~ **→ 2026-09-07 決着。揃えない。**
@@ -1027,12 +1071,10 @@ first-wins は、ターミナルが先に答えると `PostToolUse` / `Permissio
     §9.3 の「候補を解釈して作り変えない」という境界を破る。**ユーザー判断で 2 択のまま据え置く**
     （auto mode を使いたいときはターミナルで選ぶ。プランはどのみちターミナルで読むため）。
     コマンド承認側で 4 択が出る場面の実測も、同じ判断により不要とした
-18. **`behavior:"allow"` ＋ `updatedInput.answers` で `AskUserQuestion` に答えられるか。未実測。**
-    段階6（§13）の前提であり、通らなければ段階6 そのものが成立しない。ツール定義に
-    「`answers`: User answers collected by the permission component」とあるので有望、という段階に
-    留まる（`docs/screenkey-ai-prompt-response-design.md` §4）。あわせて未確認なのは、
-    **質問が複数（最大4つ）あるときの扱い**と、**複数選択（multiSelect）の質問の扱い**。
-    測るのは `claude_hook_probe`（§9.2 と同じ手順）で、**繋ぐ前に測る**（§13 の「観測を先に入れる」）
+18. **Claude `behavior:"allow"` ＋ `updatedInput.answers` のin-band注入は未検証。**
+    実装は推測で繋がず、構造化表示と対応TUIの前面化までに留める。Codex `requestUserInput` は
+    別の App Server response shape を実測・実装済みだが、Codex permissions と本物の MCP elicitation
+    の回答注入は未検証である。
 
 ---
 
@@ -1041,7 +1083,7 @@ first-wins は、ターミナルが先に答えると `PostToolUse` / `Permissio
 - ScreenKey へ要求内容やコマンド文字列を表示すること（§2、§8）
 - 排他的フルスクリーンアプリとの共存（HUD を出さず ScreenKey の点滅のみへ縮退）
 - テキスト入力を伴う回答（Codex の「拒否して指示を伝える」、`isOther` の自由記述）
-- MCP elicitation
+- MCP elicitationのaccept／content回答（本文表示とTUI fallbackは対象。実MCPでの回答注入は未検証）
 - **Codex のプランモードの確認**（App Server プロトコルに要求が存在しない。2026-09-07、
   `codex app-server generate-json-schema --experimental` で `ServerRequest` を全数確認した。
   プランは通知として流れるだけで、確認は CLI の中で完結する。実機でも ScreenKey は黄色に

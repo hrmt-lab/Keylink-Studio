@@ -11,7 +11,6 @@ use std::{
 
 use directories::ProjectDirs;
 use getrandom::fill as fill_random;
-#[cfg(debug_assertions)]
 use rawhid_host_core::hid::DeviceInfo;
 use rawhid_host_core::{
     active_app::SystemActiveAppProvider,
@@ -31,14 +30,14 @@ use rawhid_host_core::{
     },
     config::{
         load_config, ActionsConfig, AppConfig, ClaudeLauncherConfig, CodexLaunchEnvironment,
-        CodexLauncherConfig, ConfigPaths,
+        CodexLauncherConfig, ConfigPaths, HostActionKind,
     },
     hid::{HidDeviceManager, HidError, ProbeResult},
     packet::{
         AiActivityState, AiClientStatePacket, AiClientType, AiClientVariant, AiScreenKeyState,
         AiWorkPhase, ComboBinding, ComboInfo, ComboItem, ConfigStatus, EncoderBinding,
         EncoderBindingFlags, EncoderBindingSource, EncoderGetBindings, EncoderGetInfo,
-        UplinkPacket, CAPABILITY_AI_CLIENT_DISPLAY_SLOT,
+        UplinkPacket, CAPABILITY_AI_CLIENT_DISPLAY_SLOT, CAPABILITY_HOST_ACTION,
     },
     pending_approval::{ApprovalKey, PendingApprovalStore},
     runner::{uplink_device_key, RunEvent, Runner},
@@ -57,6 +56,7 @@ use rawhid_host_core::{
 };
 use tauri::{AppHandle, Emitter, State};
 
+use crate::approval_log::ApprovalLog;
 use crate::debug_log::AI_DISPLAY_LOG_TARGET;
 use crate::foreground::ForegroundWatcher;
 use crate::hud_coordinator::{HudCoordinator, HudTargetSession};
@@ -93,6 +93,7 @@ pub struct MonitorExtras {
     /// on (e.g. `WaitingApproval` -> `Working`). Set from
     /// `actions::ActionOutcome::HudResponded` in `handle_uplink_events`.
     pub hud_responded: Arc<Mutex<Option<(u8, Instant)>>>,
+    pub approval_log: Arc<ApprovalLog>,
 }
 
 #[derive(Default)]
@@ -4327,6 +4328,7 @@ pub fn start_host_link_worker(
         ai_display_slots: Arc::clone(&state.ai_display_slots),
         hud: Arc::clone(&state.hud),
         hud_responded: Arc::new(Mutex::new(None)),
+        approval_log: Arc::clone(&state.approval_log),
     };
 
     let (tx, rx) = mpsc::channel();
@@ -4598,6 +4600,130 @@ fn apply_runner_view(s: &mut MonitorStatus, runner: &MonitorRunner) {
     s.device_layers = runner.layer_states();
 }
 
+const REQUIRED_APPROVAL_HUD_ACTIONS: &[HostActionKind] = &[
+    HostActionKind::SelectHudTarget,
+    HostActionKind::HudPrevious,
+    HostActionKind::HudNext,
+    HostActionKind::HudConfirm,
+    HostActionKind::HudReject,
+];
+
+fn approval_hud_device_is_effective(device: &DeviceInfo, actions_cfg: &ActionsConfig) -> bool {
+    if device.capabilities & CAPABILITY_HOST_ACTION == 0 {
+        return false;
+    }
+    let Some(device_config) = actions_cfg.devices.get(&uplink_device_key(device)) else {
+        return false;
+    };
+    device_config.enabled
+        && REQUIRED_APPROVAL_HUD_ACTIONS.iter().all(|action| {
+            device_config
+                .bindings
+                .iter()
+                .any(|binding| binding.action == *action)
+        })
+}
+
+/// Stable Settings/HUD availability decision. The same result gates the
+/// physical HUD payload and the Host Action response path, so a connected
+/// device that cannot actually drive the complete HUD never appears usable.
+fn approval_hud_unavailable_reason(
+    monitoring: bool,
+    actions_cfg: &ActionsConfig,
+    devices: &[DeviceInfo],
+) -> Option<&'static str> {
+    if !monitoring {
+        return Some("monitoring_stopped");
+    }
+    if !actions_cfg.enabled {
+        return Some("actions_disabled");
+    }
+    let has_enabled_host_action_device = devices.iter().any(|device| {
+        device.capabilities & CAPABILITY_HOST_ACTION != 0
+            && actions_cfg
+                .devices
+                .get(&uplink_device_key(device))
+                .is_some_and(|config| config.enabled)
+    });
+    if !has_enabled_host_action_device {
+        return Some("no_enabled_host_action_device");
+    }
+    if !devices
+        .iter()
+        .any(|device| approval_hud_device_is_effective(device, actions_cfg))
+    {
+        return Some("missing_host_action_bindings");
+    }
+    None
+}
+
+fn update_approval_hud_status(s: &mut MonitorStatus, actions_cfg: &ActionsConfig) {
+    let unavailable_reason =
+        approval_hud_unavailable_reason(s.running, actions_cfg, &s.host_link_devices);
+    s.approval_hud_available = unavailable_reason.is_none();
+    s.approval_hud_unavailable_reason = unavailable_reason.map(str::to_string);
+}
+
+fn clear_pending_approval_hud(app: &AppHandle, extras: &MonitorExtras, reason: &str) {
+    let pending = extras.codex_activity.pending_approvals();
+    pending.clear_client_with_reason(rawhid_host_core::ApprovalClient::Codex, reason);
+    pending.clear_client_with_reason(rawhid_host_core::ApprovalClient::ClaudeCode, reason);
+    record_pending_withdrawals(&pending, extras.approval_log.as_ref());
+    if let Some(hud) = extras.hud.lock().unwrap().as_ref() {
+        hud.update(app, &pending);
+    }
+}
+
+fn is_hud_physical_action(action: HostActionKind) -> bool {
+    matches!(
+        action,
+        HostActionKind::SelectHudTarget
+            | HostActionKind::HudPrevious
+            | HostActionKind::HudNext
+            | HostActionKind::HudConfirm
+            | HostActionKind::HudReject
+    )
+}
+
+/// Delayed uplink packets are accepted only from a device that is still in
+/// the verified Host Link set. This is the Host-side race gate for HUD
+/// actions: a temporary zero-device interval leaves the pending request and
+/// HUD visible, but cannot answer or move it with a stale packet.
+fn host_action_allowed_for_device(
+    hud_available: bool,
+    actions_cfg: &ActionsConfig,
+    verified_devices: &[DeviceInfo],
+    event_device: &DeviceInfo,
+    action: HostActionKind,
+) -> bool {
+    if !is_hud_physical_action(action) {
+        return true;
+    }
+    hud_available
+        && approval_hud_unavailable_reason(true, actions_cfg, verified_devices).is_none()
+        && verified_devices.iter().any(|device| {
+            device.path == event_device.path
+                && approval_hud_device_is_effective(device, actions_cfg)
+        })
+}
+
+/// Writes each store-side withdrawal once. The store queues metadata at the
+/// same time it removes an entry, so this remains correct when a lifecycle
+/// event races with a later turn/session state change.
+fn record_pending_withdrawals(pending: &PendingApprovalStore, approval_log: &ApprovalLog) {
+    for withdrawal in pending.drain_withdrawals() {
+        approval_log.record_event(crate::approval_log::ApprovalLogEvent::new(
+            withdrawal.session_label,
+            withdrawal.client.as_str(),
+            withdrawal.request_kind,
+            "Withdraw",
+            false,
+            "withdrawn",
+            Some(withdrawal.reason),
+        ));
+    }
+}
+
 fn drain_codex_state_changes(activity: &CodexActivityRuntime) -> Vec<CodexStateChange> {
     let mut changes = Vec::new();
     while let Some(change) = activity.try_recv_session_change() {
@@ -4717,7 +4843,7 @@ fn drain_claude_state_changes(
         let reason = unanswered.reason.diagnostic_label();
         let key = ApprovalKey::new(unanswered.token);
         let pending_before = pending_approvals.len();
-        pending_approvals.resolve(&key);
+        pending_approvals.withdraw_with_reason(&key, "hook_unanswerable");
         let pending_after = pending_approvals.len();
         let session_changes = integration.registry.withdraw_approval_requests(
             &unanswered.launch_id,
@@ -5287,6 +5413,7 @@ fn apply_monitor_config(
         s.device_layers = Vec::new();
         s.ai_usage = ai_usage;
         s.last_error = None;
+        update_approval_hud_status(s, actions_cfg);
     });
 
     Ok(())
@@ -5311,12 +5438,16 @@ fn process_command(
         MonitorCommand::Shutdown => true,
         MonitorCommand::SetAutomationEnabled(enabled, reply) => {
             *automation_enabled = enabled;
+            if !enabled {
+                clear_pending_approval_hud(app, extras, "monitoring_stopped");
+            }
             update_status(app, status, |s| {
                 s.running = enabled;
                 if !enabled {
                     s.current_layer = None;
                     s.current_rule = None;
                 }
+                update_approval_hud_status(s, actions_cfg);
             });
             let _ = reply.send(Ok(()));
             false
@@ -5350,6 +5481,7 @@ fn process_command(
                         s.running = false;
                         s.current_layer = None;
                         s.current_rule = None;
+                        update_approval_hud_status(s, actions_cfg);
                     });
                 }
             } else {
@@ -5607,7 +5739,24 @@ fn handle_uplink_events(
                             })
                     })
                     .flatten();
+                let action_allowed = binding.map_or(true, |binding| {
+                    let hud_available = status.lock().unwrap().approval_hud_available;
+                    host_action_allowed_for_device(
+                        hud_available,
+                        actions_cfg,
+                        &runner.verified_devices(),
+                        &event.device,
+                        binding.action,
+                    )
+                });
                 let (level, message) = match binding {
+                    Some(_binding) if !action_allowed => (
+                        "info",
+                        format!(
+                            "host action {} ignored (host action device unavailable)",
+                            action.action_id
+                        ),
+                    ),
                     Some(binding) => {
                         match actions::execute(app, binding, action.value, extras, status) {
                             Ok(actions::ActionOutcome::Continue) => (
@@ -5750,9 +5899,16 @@ fn run_monitor_loop(
                     let msg = format!("HID init error: {error}");
                     let entry = add_log(&log_entries, &log_counter, "error", &msg);
                     update_status(&app, &status, |s| {
-                        s.running = automation_enabled;
+                        s.running = false;
+                        s.connected_devices = 0;
+                        s.connected_device_names = Vec::new();
+                        s.host_link_devices = Vec::new();
+                        s.device_battery = Vec::new();
+                        s.device_layers = Vec::new();
+                        update_approval_hud_status(s, &config.actions);
                         s.last_error = Some(msg);
                     });
+                    clear_pending_approval_hud(&app, &extras, "host_link_error");
                     let _ = app.emit("log-added", entry);
                     init_error_logged = true;
                 }
@@ -5762,7 +5918,13 @@ fn run_monitor_loop(
                     }
                     Ok(MonitorCommand::SetAutomationEnabled(enabled, reply)) => {
                         automation_enabled = enabled;
-                        status.lock().unwrap().running = enabled;
+                        update_status(&app, &status, |s| {
+                            s.running = false;
+                            update_approval_hud_status(s, &config.actions);
+                        });
+                        if !enabled {
+                            clear_pending_approval_hud(&app, &extras, "monitoring_stopped");
+                        }
                         let _ = reply.send(Ok(()));
                     }
                     Ok(MonitorCommand::UpdateConfig(next, shared)) => {
@@ -5790,6 +5952,7 @@ fn run_monitor_loop(
 
     update_status(&app, &status, |s| {
         s.running = automation_enabled;
+        update_approval_hud_status(s, &config.actions);
         s.last_error = None;
     });
 
@@ -5853,6 +6016,7 @@ fn run_monitor_loop(
                         s.current_layer = Some(layer);
                         s.current_rule = Some(rule_name.clone());
                         apply_runner_view(s, &runner);
+                        update_approval_hud_status(s, &actions_cfg);
                         s.last_error = None;
                     });
                     let msg = format!("Switched to layer {} (rule: {})", layer, rule_name);
@@ -5864,6 +6028,7 @@ fn run_monitor_loop(
                         s.current_layer = None;
                         s.current_rule = None;
                         apply_runner_view(s, &runner);
+                        update_approval_hud_status(s, &actions_cfg);
                     });
                 }
                 Ok(RunEvent::Unchanged) => {
@@ -5882,12 +6047,18 @@ fn run_monitor_loop(
                             return false;
                         }
                         apply_runner_view(s, &runner);
+                        update_approval_hud_status(s, &actions_cfg);
                         true
                     });
                 }
                 Err(e) => {
                     let msg = format!("Error: {}", e);
-                    update_status(&app, &status, |s| s.last_error = Some(msg.clone()));
+                    clear_pending_approval_hud(&app, &extras, "host_link_error");
+                    update_status(&app, &status, |s| {
+                        s.approval_hud_available = false;
+                        s.approval_hud_unavailable_reason = Some("host_link_error".to_string());
+                        s.last_error = Some(msg.clone());
+                    });
                     let entry = add_log(&log_entries, &log_counter, "error", &msg);
                     let _ = app.emit("log-added", entry);
                 }
@@ -5908,6 +6079,7 @@ fn run_monitor_loop(
                     s.running = false;
                     s.current_layer = None;
                     s.current_rule = None;
+                    update_approval_hud_status(s, &actions_cfg);
                 });
             }
         } else {
@@ -5915,14 +6087,22 @@ fn run_monitor_loop(
                 Ok(()) => {
                     update_status(&app, &status, |s| {
                         apply_runner_view(s, &runner);
+                        update_approval_hud_status(s, &actions_cfg);
                         s.running = false;
                         s.device_battery.clear();
                         s.device_layers.clear();
+                        update_approval_hud_status(s, &actions_cfg);
                         s.last_error = None;
                     });
                 }
                 Err(error) => {
+                    // This branch is an explicit transport failure. A
+                    // temporary device disappearance is a successful rescan
+                    // with zero verified devices and never reaches here.
+                    clear_pending_approval_hud(&app, &extras, "host_link_error");
                     update_status(&app, &status, |s| {
+                        s.approval_hud_available = false;
+                        s.approval_hud_unavailable_reason = Some("host_link_error".to_string());
                         s.last_error = Some(format!("Error: {error}"))
                     });
                 }
@@ -5932,6 +6112,10 @@ fn run_monitor_loop(
         let now = Instant::now();
         let codex_snapshots = extras.codex_activity.snapshots();
         let codex_changes = drain_codex_state_changes(&extras.codex_activity);
+        record_pending_withdrawals(
+            &extras.codex_activity.pending_approvals(),
+            extras.approval_log.as_ref(),
+        );
         // Diagnostic for the reported "first approval flashes yellow then
         // turns green while the request is still unanswered": records every
         // Codex activity transition alongside how many approvals the store
@@ -5970,6 +6154,10 @@ fn run_monitor_loop(
                 &extras.claude_permission_gate,
                 now,
             );
+        record_pending_withdrawals(
+            &extras.codex_activity.pending_approvals(),
+            extras.approval_log.as_ref(),
+        );
         // The HUD's current target, read before the `ai_display_slots` lock
         // is taken below -- never hold both locks at once (see the
         // `hud`/`ai_display_slots` boundary in `actions.rs`'s `HudConfirm`
@@ -6142,7 +6330,12 @@ fn run_monitor_loop(
         // fed into `pending_approvals` by `drain_codex_state_changes` /
         // `drain_claude_state_changes` above.
         if let Some(hud) = extras.hud.lock().unwrap().as_ref() {
-            hud.update(&app, &extras.codex_activity.pending_approvals());
+            let physical_input_available = status.lock().unwrap().approval_hud_available;
+            hud.update_with_device_availability(
+                &app,
+                &extras.codex_activity.pending_approvals(),
+                physical_input_available,
+            );
         }
         match sync_ai_client_state(
             &mut runner,
@@ -6284,6 +6477,7 @@ fn run_monitor_loop(
                         s.running = false;
                         s.current_layer = None;
                         s.current_rule = None;
+                        update_approval_hud_status(s, &actions_cfg);
                     });
                     break 'wait;
                 }
@@ -6300,6 +6494,7 @@ fn run_monitor_loop(
         store.flush_all();
     }
 
+    clear_pending_approval_hud(&app, &extras, "monitoring_stopped");
     update_status(&app, &status, |s| {
         s.running = false;
         s.connected_devices = 0;
@@ -6309,6 +6504,7 @@ fn run_monitor_loop(
         s.current_rule = None;
         s.device_battery = Vec::new();
         s.device_layers = Vec::new();
+        update_approval_hud_status(s, &actions_cfg);
     });
 
     let entry = add_log(
@@ -6436,9 +6632,83 @@ fn refresh_error_code(error: AiUsageRefreshError) -> String {
 mod tests {
     use super::*;
     use rawhid_host_core::claude_activity::ClaudeStateChangeReason;
+    use rawhid_host_core::config::{ActionBinding, DeviceActionsConfig};
+    use rawhid_host_core::hid::{DeviceConnectionType, DeviceInfo};
     use rawhid_host_core::packet::{AiActivityState, AiClientType, AiClientVariant, AiWorkPhase};
+    use rawhid_host_core::pending_approval::{
+        codex_key_for_thread, ApprovalClient, ApprovalOwner, PendingApprovalBody,
+        PendingApprovalStore,
+    };
     use rawhid_host_core::runner::{DeviceBatterySource, DeviceBatteryStatus};
     use rawhid_host_core::studio::{StudioLayer, StudioLayoutSource};
+
+    #[test]
+    fn ordinary_turn_resolution_has_no_withdraw_log_and_external_resolution_logs_once() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!("keylink-withdraw-test-{nonce}"));
+        let log = ApprovalLog::for_directory(directory.clone());
+        let pending = PendingApprovalStore::new();
+        let key = codex_key_for_thread(
+            "connection-a",
+            &serde_json::Value::from(1),
+            Some("thread-a"),
+        );
+        let body = PendingApprovalBody {
+            primary_text: Some("command is not logged".to_string()),
+            full_command: Some("command is not logged".to_string()),
+            reason: None,
+            cwd: None,
+            kind: None,
+            available_decisions: None,
+            tool_use_id: None,
+            prompt_id: None,
+            permission_suggestions: None,
+            interaction: None,
+        };
+
+        pending.insert(
+            key.clone(),
+            ApprovalClient::Codex,
+            ApprovalOwner::Codex {
+                connection_id: "connection-a".to_string(),
+            },
+            body.clone(),
+        );
+        // A normal response/turn completion removes the entry silently.
+        pending.resolve(&key);
+        record_pending_withdrawals(&pending, &log);
+        assert!(!directory.exists());
+
+        pending.insert(
+            key.clone(),
+            ApprovalClient::Codex,
+            ApprovalOwner::Codex {
+                connection_id: "connection-a".to_string(),
+            },
+            body,
+        );
+        pending.withdraw_with_reason(&key, "server_resolved");
+        record_pending_withdrawals(&pending, &log);
+        // The monitor may visit the same state-change path again, but the
+        // store queue has already been drained and cannot duplicate it.
+        record_pending_withdrawals(&pending, &log);
+
+        let path = std::fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .next()
+            .expect("withdraw log");
+        let text = std::fs::read_to_string(path).unwrap();
+        assert_eq!(text.lines().count(), 1);
+        assert!(text.contains("session=codex:thread:thread-a"));
+        assert!(text.contains("reason=server_resolved"));
+        assert!(!text.contains("codex:connection-a:1"));
+        assert!(!text.contains("command_is_not_logged"));
+        let _ = std::fs::remove_dir_all(directory);
+    }
 
     #[test]
     fn launcher_update_preserves_every_other_config_value() {
@@ -6465,6 +6735,270 @@ mod tests {
         let broker = codex_broker_config(&config).unwrap();
 
         assert!(broker.version_check_enabled);
+    }
+
+    fn approval_test_device(uid: u64) -> DeviceInfo {
+        DeviceInfo {
+            path: format!("test:{uid}"),
+            vendor_id: 1,
+            product_id: 2,
+            usage_page: 3,
+            usage: 4,
+            connection_type: DeviceConnectionType::Usb,
+            manufacturer: Some("test".to_string()),
+            product: Some(format!("device-{uid}")),
+            serial_number: None,
+            capabilities: CAPABILITY_HOST_ACTION,
+            device_uid_hash: Some(uid),
+        }
+    }
+
+    fn complete_approval_actions(device: &DeviceInfo) -> ActionsConfig {
+        let mut actions = ActionsConfig {
+            enabled: true,
+            ..ActionsConfig::default()
+        };
+        actions.devices.insert(
+            uplink_device_key(device),
+            DeviceActionsConfig {
+                enabled: true,
+                bindings: REQUIRED_APPROVAL_HUD_ACTIONS
+                    .iter()
+                    .map(|action| ActionBinding {
+                        action: *action,
+                        ..ActionBinding::default()
+                    })
+                    .collect(),
+                ..DeviceActionsConfig::default()
+            },
+        );
+        actions
+    }
+
+    #[test]
+    fn approval_hud_uses_a_later_complete_device_when_the_first_is_incomplete() {
+        let first = approval_test_device(1);
+        let second = approval_test_device(2);
+        let required = [
+            HostActionKind::SelectHudTarget,
+            HostActionKind::HudPrevious,
+            HostActionKind::HudNext,
+            HostActionKind::HudConfirm,
+            HostActionKind::HudReject,
+        ];
+        let mut actions = ActionsConfig {
+            enabled: true,
+            ..ActionsConfig::default()
+        };
+        actions.devices.insert(
+            uplink_device_key(&first),
+            DeviceActionsConfig {
+                enabled: true,
+                bindings: vec![ActionBinding {
+                    action: HostActionKind::HudConfirm,
+                    ..ActionBinding::default()
+                }],
+                ..DeviceActionsConfig::default()
+            },
+        );
+        actions.devices.insert(
+            uplink_device_key(&second),
+            DeviceActionsConfig {
+                enabled: true,
+                bindings: required
+                    .iter()
+                    .map(|action| ActionBinding {
+                        action: *action,
+                        ..ActionBinding::default()
+                    })
+                    .collect(),
+                ..DeviceActionsConfig::default()
+            },
+        );
+
+        let mut status = MonitorStatus {
+            running: true,
+            host_link_devices: vec![first, second],
+            ..MonitorStatus::default()
+        };
+        update_approval_hud_status(&mut status, &actions);
+
+        assert!(status.approval_hud_available);
+        assert_eq!(status.approval_hud_unavailable_reason, None);
+    }
+
+    #[test]
+    fn hud_actions_are_gated_for_zero_or_stale_devices_but_resume_after_reconnect() {
+        let connected = approval_test_device(1);
+        let stale = approval_test_device(2);
+        let actions = complete_approval_actions(&connected);
+
+        assert!(!host_action_allowed_for_device(
+            false,
+            &actions,
+            &[],
+            &connected,
+            HostActionKind::HudConfirm
+        ));
+        assert!(host_action_allowed_for_device(
+            true,
+            &actions,
+            std::slice::from_ref(&connected),
+            &connected,
+            HostActionKind::HudConfirm
+        ));
+        assert!(!host_action_allowed_for_device(
+            true,
+            &actions,
+            std::slice::from_ref(&connected),
+            &stale,
+            HostActionKind::HudConfirm
+        ));
+        assert!(host_action_allowed_for_device(
+            false,
+            &ActionsConfig::default(),
+            &[],
+            &stale,
+            HostActionKind::ShowWindow
+        ));
+    }
+
+    #[test]
+    fn approval_hud_availability_requires_the_same_complete_effective_device() {
+        let connected = approval_test_device(1);
+        let mut unsupported = connected.clone();
+        unsupported.capabilities = 0;
+        let complete = complete_approval_actions(&connected);
+
+        assert_eq!(
+            approval_hud_unavailable_reason(false, &complete, std::slice::from_ref(&connected)),
+            Some("monitoring_stopped")
+        );
+        assert_eq!(
+            approval_hud_unavailable_reason(
+                true,
+                &ActionsConfig::default(),
+                std::slice::from_ref(&connected)
+            ),
+            Some("actions_disabled")
+        );
+        assert_eq!(
+            approval_hud_unavailable_reason(true, &complete, std::slice::from_ref(&unsupported)),
+            Some("no_enabled_host_action_device")
+        );
+        assert_eq!(
+            approval_hud_unavailable_reason(true, &complete, &[]),
+            Some("no_enabled_host_action_device")
+        );
+        assert_eq!(
+            approval_hud_unavailable_reason(true, &complete, std::slice::from_ref(&connected)),
+            None
+        );
+
+        let mut incomplete = complete.clone();
+        incomplete
+            .devices
+            .get_mut(&uplink_device_key(&connected))
+            .unwrap()
+            .bindings
+            .truncate(1);
+        assert_eq!(
+            approval_hud_unavailable_reason(true, &incomplete, std::slice::from_ref(&connected)),
+            Some("missing_host_action_bindings")
+        );
+        assert!(!host_action_allowed_for_device(
+            true,
+            &incomplete,
+            std::slice::from_ref(&connected),
+            &connected,
+            HostActionKind::HudConfirm
+        ));
+    }
+
+    #[test]
+    fn hid_unavailable_keeps_pending_but_errors_and_monitoring_stop_withdraw() {
+        let pending = PendingApprovalStore::new();
+        let key = codex_key_for_thread(
+            "connection-a",
+            &serde_json::Value::from(2),
+            Some("thread-a"),
+        );
+        pending.insert(
+            key.clone(),
+            ApprovalClient::Codex,
+            ApprovalOwner::Codex {
+                connection_id: "connection-a".to_string(),
+            },
+            PendingApprovalBody {
+                primary_text: Some("pending".to_string()),
+                full_command: None,
+                reason: None,
+                cwd: None,
+                kind: None,
+                available_decisions: Some(vec![serde_json::json!("approve")]),
+                tool_use_id: None,
+                prompt_id: None,
+                permission_suggestions: None,
+                interaction: None,
+            },
+        );
+
+        let mut status = MonitorStatus {
+            running: true,
+            host_link_devices: Vec::new(),
+            ..MonitorStatus::default()
+        };
+        update_approval_hud_status(
+            &mut status,
+            &ActionsConfig {
+                enabled: true,
+                ..ActionsConfig::default()
+            },
+        );
+        assert!(!status.approval_hud_available);
+        assert_eq!(
+            status.approval_hud_unavailable_reason.as_deref(),
+            Some("no_enabled_host_action_device")
+        );
+        assert!(pending.get(&key).is_some());
+
+        // The same verified device reappearing makes the reconnect path
+        // explicit rather than treating another device as a replacement.
+        status.host_link_devices = vec![approval_test_device(1)];
+        let actions = complete_approval_actions(&status.host_link_devices[0]);
+        update_approval_hud_status(&mut status, &actions);
+        assert!(status.approval_hud_available);
+        assert!(pending.get(&key).is_some());
+
+        // A normal zero-device rescan above preserved the request. An actual
+        // Runner error follows the existing host_link_error boundary and
+        // withdraws it even when no device is currently verified.
+        pending.clear_client_with_reason(ApprovalClient::Codex, "host_link_error");
+        assert!(pending.get(&key).is_none());
+        assert_eq!(pending.drain_withdrawals().len(), 1);
+
+        pending.insert(
+            key.clone(),
+            ApprovalClient::Codex,
+            ApprovalOwner::Codex {
+                connection_id: "connection-a".to_string(),
+            },
+            PendingApprovalBody {
+                primary_text: Some("pending".to_string()),
+                full_command: None,
+                reason: None,
+                cwd: None,
+                kind: None,
+                available_decisions: Some(vec![serde_json::json!("approve")]),
+                tool_use_id: None,
+                prompt_id: None,
+                permission_suggestions: None,
+                interaction: None,
+            },
+        );
+        pending.clear_client_with_reason(ApprovalClient::Codex, "monitoring_stopped");
+        assert!(pending.get(&key).is_none());
+        assert_eq!(pending.drain_withdrawals().len(), 1);
     }
 
     #[derive(Default)]

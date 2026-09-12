@@ -65,11 +65,62 @@ pub const CLAUDE_DECISION_DENY: &str = "deny";
 /// that variant's own doc comment for why the array is never reconstructed.
 pub const CLAUDE_DECISION_ALLOW_WITH_PERMISSIONS: &str = "allow_with_permissions";
 
+/// The kind of server request represented by a pending HUD entry.  Approval
+/// entries keep the protocol's opaque decision array; input and elicitation
+/// entries carry only the fields needed to render a safe fallback message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PendingRequestKind {
+    Approval,
+    Input,
+    Permissions,
+    Elicitation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingQuestionOption {
+    pub label: String,
+    pub description: Option<String>,
+    pub is_other: bool,
+    pub is_secret: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingQuestion {
+    pub id: String,
+    pub header: Option<String>,
+    pub question: String,
+    pub options: Vec<PendingQuestionOption>,
+    pub multi_select: bool,
+}
+
+/// Extra display data for a non-command server request.  This is deliberately
+/// normalized at the Broker/Claude boundary so neither the HUD nor the
+/// ScreenKey path needs to parse protocol-specific JSON.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PendingInteraction {
+    pub kind: PendingRequestKind,
+    pub questions: Vec<PendingQuestion>,
+    pub message: Option<String>,
+    pub url: Option<String>,
+    pub permission_text: Option<String>,
+    pub requires_terminal: bool,
+}
+
 /// Which AI client an approval request originated from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ApprovalClient {
     Codex,
     ClaudeCode,
+}
+
+impl ApprovalClient {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Codex => "codex",
+            Self::ClaudeCode => "claude_code",
+        }
+    }
 }
 
 /// Groups every pending entry belonging to one connection/session, so a
@@ -347,6 +398,10 @@ pub struct PendingApprovalBody {
     /// objects, so any assumption about its fields beyond "pass it through"
     /// is unverified.
     pub permission_suggestions: Option<Vec<Value>>,
+    /// Normalized request metadata for Codex file/permission/input/elicitation
+    /// requests and Claude's AskUserQuestion display.  `None` preserves the
+    /// existing command/permission approval shape.
+    pub interaction: Option<PendingInteraction>,
 }
 
 impl PendingApprovalBody {
@@ -375,6 +430,29 @@ pub struct PendingApprovalSnapshot {
     pub protected: bool,
 }
 
+/// Privacy-safe metadata for auditing a pending request withdrawal.  The
+/// request body, options, and answer values are deliberately absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingApprovalLogContext {
+    /// Stable client/session label. This is deliberately not the opaque
+    /// request token: Codex uses its thread (or connection fallback), while
+    /// Claude Code uses its launch/session pair.
+    pub session_label: String,
+    pub client: ApprovalClient,
+    pub request_kind: String,
+}
+
+/// Metadata queued exactly when an unresolved entry is withdrawn by an
+/// external lifecycle event. Request bodies, options, answer values, and the
+/// request token are intentionally absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingApprovalWithdrawal {
+    pub session_label: String,
+    pub client: ApprovalClient,
+    pub request_kind: String,
+    pub reason: String,
+}
+
 /// Validated routing data for one Codex HUD answer. The decision is cloned
 /// directly from that request's opaque `availableDecisions` array.
 #[derive(Debug, Clone, PartialEq)]
@@ -383,6 +461,17 @@ pub struct CodexPendingResponse {
     pub connection_id: String,
     pub request_id: Value,
     pub decision: Value,
+}
+
+/// Validated routing data for a Codex server request whose result is built by
+/// the caller (for example `item/tool/requestUserInput`).  Unlike
+/// [`CodexPendingResponse`], this deliberately does not require an opaque
+/// `availableDecisions` element to exist.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CodexPendingRequest {
+    pub key: ApprovalKey,
+    pub connection_id: String,
+    pub request_id: Value,
 }
 
 /// Validated routing data for one Claude Code HUD answer. Unlike
@@ -410,6 +499,10 @@ struct Inner {
     /// Least-recently-touched key at the front, most-recently-touched at
     /// the back. `insert` moves a key to the back.
     lru: VecDeque<ApprovalKey>,
+    /// Removal notifications are drained by the Tauri monitor loop. Keeping
+    /// them beside `entries` makes removal and notification one atomic
+    /// operation, so a later state change cannot manufacture a duplicate.
+    withdrawals: VecDeque<PendingApprovalWithdrawal>,
 }
 
 /// In-memory store of unresolved approval-request bodies. Share it via
@@ -417,6 +510,8 @@ struct Inner {
 pub struct PendingApprovalStore {
     inner: Mutex<Inner>,
 }
+
+const MAX_WITHDRAWALS: usize = MAX_ENTRIES * 2;
 
 impl Default for PendingApprovalStore {
     fn default() -> Self {
@@ -482,14 +577,30 @@ impl PendingApprovalStore {
     /// No-op if the key is not present.
     pub fn resolve(&self, key: &ApprovalKey) {
         let mut inner = self.inner.lock().unwrap();
-        inner.entries.remove(key);
-        inner.lru.retain(|existing| existing != key);
+        remove_entry(&mut inner, key);
+    }
+
+    /// Discards one pending entry because an external client/lifecycle event
+    /// made it no longer answerable. The notification is queued only when an
+    /// entry was actually present, and only once for that key.
+    pub fn withdraw_with_reason(&self, key: &ApprovalKey, reason: impl Into<String>) {
+        let mut inner = self.inner.lock().unwrap();
+        let Some(entry) = remove_entry(&mut inner, key) else {
+            return;
+        };
+        enqueue_withdrawal(&mut inner, key, &entry, reason.into());
     }
 
     /// Discards every entry belonging to one connection/session (a
     /// disconnect, a `Stop`, or a `SessionEnd`).
     pub fn clear_owner(&self, owner: &ApprovalOwner) {
         self.retain_dropping(|entry| &entry.owner != owner);
+    }
+
+    /// `clear_owner` variant used by lifecycle paths that need an audit
+    /// record for each entry that was really removed.
+    pub fn clear_owner_with_reason(&self, owner: &ApprovalOwner, reason: impl Into<String>) {
+        self.retain_dropping_with_reason(|entry| &entry.owner != owner, reason.into());
     }
 
     /// Discards every entry for every session of one Claude Code wrapper
@@ -505,10 +616,57 @@ impl PendingApprovalStore {
         });
     }
 
+    pub fn clear_claude_launch_with_reason(&self, launch_id: &str, reason: impl Into<String>) {
+        self.retain_dropping_with_reason(
+            |entry| {
+                !matches!(
+                    &entry.owner,
+                    ApprovalOwner::ClaudeSession { launch_id: candidate, .. }
+                        if candidate == launch_id
+                )
+            },
+            reason.into(),
+        );
+    }
+
     /// Discards every entry for one client (Codex Broker stop / lifecycle
     /// error, which ends every connection at once).
     pub fn clear_client(&self, client: ApprovalClient) {
         self.retain_dropping(|entry| entry.client != client);
+    }
+
+    pub fn clear_client_with_reason(&self, client: ApprovalClient, reason: impl Into<String>) {
+        self.retain_dropping_with_reason(|entry| entry.client != client, reason.into());
+    }
+
+    /// Returns only stable session labels and normalized kind metadata for a
+    /// best-effort audit record before callers withdraw the entries.
+    /// No body text, options, or answer values leave the store.
+    pub fn audit_contexts(&self) -> Vec<PendingApprovalLogContext> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .entries
+            .iter()
+            .map(|(key, entry)| audit_context_for_entry(key, entry))
+            .collect()
+    }
+
+    /// Returns the metadata needed to audit a physical action while the
+    /// request is still present. Callers that may resolve the entry must
+    /// capture this before dispatching the response.
+    pub fn audit_context(&self, key: &ApprovalKey) -> Option<PendingApprovalLogContext> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .entries
+            .get(key)
+            .map(|entry| audit_context_for_entry(key, entry))
+    }
+
+    /// Drains external-withdrawal notifications. Each actual removal is
+    /// returned at most once; successful `resolve` calls never appear here.
+    pub fn drain_withdrawals(&self) -> Vec<PendingApprovalWithdrawal> {
+        let mut inner = self.inner.lock().unwrap();
+        inner.withdrawals.drain(..).collect()
     }
 
     fn retain_dropping(&self, keep: impl Fn(&Entry) -> bool) {
@@ -520,8 +678,22 @@ impl PendingApprovalStore {
             .map(|(key, _)| key.clone())
             .collect();
         for key in doomed {
-            inner.entries.remove(&key);
-            inner.lru.retain(|existing| existing != &key);
+            remove_entry(&mut inner, &key);
+        }
+    }
+
+    fn retain_dropping_with_reason(&self, keep: impl Fn(&Entry) -> bool, reason: String) {
+        let mut inner = self.inner.lock().unwrap();
+        let doomed: Vec<ApprovalKey> = inner
+            .entries
+            .iter()
+            .filter(|(_, entry)| !keep(entry))
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in doomed {
+            if let Some(entry) = remove_entry(&mut inner, &key) {
+                enqueue_withdrawal(&mut inner, &key, &entry, reason.clone());
+            }
         }
     }
 
@@ -563,6 +735,28 @@ impl PendingApprovalStore {
             connection_id: target.connection_id.clone(),
             request_id: target.request_id.clone(),
             decision,
+        })
+    }
+
+    /// Looks up the exact route for a Codex server request by its opaque HUD
+    /// token. This is used when the result is assembled from retained
+    /// interaction state rather than selected from `availableDecisions`.
+    pub fn codex_request(&self, request_token: &str) -> Option<CodexPendingRequest> {
+        let inner = self.inner.lock().unwrap();
+        let (key, entry) = inner
+            .entries
+            .iter()
+            .find(|(key, _)| key.token() == request_token)?;
+        if entry.client != ApprovalClient::Codex
+            || !matches!(&entry.content, PendingApprovalContent::Body(_))
+        {
+            return None;
+        }
+        let target = key.codex_target()?;
+        Some(CodexPendingRequest {
+            key: key.clone(),
+            connection_id: target.connection_id.clone(),
+            request_id: target.request_id.clone(),
         })
     }
 
@@ -681,6 +875,82 @@ impl PendingApprovalStore {
     }
 }
 
+fn request_kind_for_content(content: &PendingApprovalContent) -> String {
+    let kind = match content {
+        PendingApprovalContent::Body(body) => body
+            .interaction
+            .as_ref()
+            .map(|interaction| interaction.kind),
+        PendingApprovalContent::Oversized => None,
+    };
+    match kind {
+        Some(PendingRequestKind::Approval) | None => "approval",
+        Some(PendingRequestKind::Input) => "input",
+        Some(PendingRequestKind::Permissions) => "permissions",
+        Some(PendingRequestKind::Elicitation) => "elicitation",
+    }
+    .to_string()
+}
+
+fn audit_context_for_entry(key: &ApprovalKey, entry: &Entry) -> PendingApprovalLogContext {
+    let session_label = match entry.client {
+        ApprovalClient::Codex => key
+            .codex_target()
+            .and_then(|target| target.thread_id.as_deref())
+            .map(|thread_id| format!("codex:thread:{thread_id}"))
+            .or_else(|| {
+                matches!(&entry.owner, ApprovalOwner::Codex { .. }).then(|| match &entry.owner {
+                    ApprovalOwner::Codex { connection_id } => {
+                        format!("codex:connection:{connection_id}")
+                    }
+                    ApprovalOwner::ClaudeSession { .. } => "codex:unknown".to_string(),
+                })
+            })
+            .unwrap_or_else(|| "codex:unknown".to_string()),
+        ApprovalClient::ClaudeCode => key
+            .claude_session()
+            .map(|(launch_id, session_id)| format!("claude:{launch_id}:{session_id}"))
+            .or_else(|| {
+                matches!(&entry.owner, ApprovalOwner::ClaudeSession { .. }).then(|| {
+                    match &entry.owner {
+                        ApprovalOwner::ClaudeSession {
+                            launch_id,
+                            session_id,
+                        } => format!("claude:{launch_id}:{session_id}"),
+                        ApprovalOwner::Codex { .. } => "claude:unknown".to_string(),
+                    }
+                })
+            })
+            .unwrap_or_else(|| "claude:unknown".to_string()),
+    };
+    PendingApprovalLogContext {
+        session_label,
+        client: entry.client,
+        request_kind: request_kind_for_content(&entry.content),
+    }
+}
+
+fn remove_entry(inner: &mut Inner, key: &ApprovalKey) -> Option<Entry> {
+    let entry = inner.entries.remove(key);
+    if entry.is_some() {
+        inner.lru.retain(|existing| existing != key);
+    }
+    entry
+}
+
+fn enqueue_withdrawal(inner: &mut Inner, key: &ApprovalKey, entry: &Entry, reason: String) {
+    if inner.withdrawals.len() >= MAX_WITHDRAWALS {
+        inner.withdrawals.pop_front();
+    }
+    let context = audit_context_for_entry(key, entry);
+    inner.withdrawals.push_back(PendingApprovalWithdrawal {
+        session_label: context.session_label,
+        client: context.client,
+        request_kind: context.request_kind,
+        reason,
+    });
+}
+
 /// Evicts the least-recently-touched unprotected entry, if the store is at
 /// capacity. If every entry happens to be protected, this does nothing --
 /// insertion proceeds and the store is allowed past `MAX_ENTRIES` rather
@@ -702,8 +972,10 @@ fn evict_for_capacity(inner: &mut Inner) {
     let Some(victim) = victim else {
         return;
     };
-    inner.entries.remove(&victim);
-    inner.lru.retain(|existing| existing != &victim);
+    if let Some(entry) = inner.entries.remove(&victim) {
+        inner.lru.retain(|existing| existing != &victim);
+        enqueue_withdrawal(inner, &victim, &entry, "capacity_evicted".to_string());
+    }
 }
 
 #[cfg(test)]
@@ -721,6 +993,7 @@ mod tests {
             tool_use_id: None,
             prompt_id: None,
             permission_suggestions: None,
+            interaction: None,
         }
     }
 
@@ -746,6 +1019,91 @@ mod tests {
         assert!(store.get(&key).is_none());
         // Resolving an absent key is a harmless no-op.
         store.resolve(&key);
+    }
+
+    #[test]
+    fn audit_context_uses_client_session_labels_not_request_tokens() {
+        let store = PendingApprovalStore::new();
+        let codex = codex_key_for_thread("connection-secret", &Value::from(42), Some("thread-7"));
+        store.insert(
+            codex.clone(),
+            ApprovalClient::Codex,
+            codex_owner("connection-secret"),
+            body("command is never logged"),
+        );
+        let context = store.audit_context(&codex).expect("codex context");
+        assert_eq!(context.session_label, "codex:thread:thread-7");
+        assert!(!context.session_label.contains(codex.token()));
+
+        let claude = claude_key("launch-3", "session-9");
+        store.insert(
+            claude.clone(),
+            ApprovalClient::ClaudeCode,
+            ApprovalOwner::ClaudeSession {
+                launch_id: "launch-3".to_string(),
+                session_id: "session-9".to_string(),
+            },
+            body("also never logged"),
+        );
+        let context = store.audit_context(&claude).expect("claude context");
+        assert_eq!(context.session_label, "claude:launch-3:session-9");
+        // Claude's existing key is itself derived from the launch/session
+        // pair; the audit label still carries that pair explicitly rather
+        // than treating an independent request id as the session.
+        assert_eq!(context.session_label, "claude:launch-3:session-9");
+    }
+
+    #[test]
+    fn ordinary_resolution_is_silent_but_external_withdrawal_is_queued_once() {
+        let store = PendingApprovalStore::new();
+        let key = codex_key_for_thread("connection-a", &Value::from(1), Some("thread-a"));
+        store.insert(
+            key.clone(),
+            ApprovalClient::Codex,
+            codex_owner("connection-a"),
+            body("command"),
+        );
+
+        // This models a normal turn completion that already resolved the
+        // request through the successful response path.
+        store.resolve(&key);
+        assert!(store.drain_withdrawals().is_empty());
+
+        store.insert(
+            key.clone(),
+            ApprovalClient::Codex,
+            codex_owner("connection-a"),
+            body("command"),
+        );
+        store.withdraw_with_reason(&key, "server_resolved");
+        store.withdraw_with_reason(&key, "turn_completed");
+        let withdrawals = store.drain_withdrawals();
+        assert_eq!(withdrawals.len(), 1);
+        assert_eq!(withdrawals[0].session_label, "codex:thread:thread-a");
+        assert_eq!(withdrawals[0].reason, "server_resolved");
+        assert!(store.drain_withdrawals().is_empty());
+    }
+
+    #[test]
+    fn clear_then_later_state_change_cannot_duplicate_withdrawal() {
+        let store = PendingApprovalStore::new();
+        let key = claude_key("launch-1", "session-1");
+        store.insert(
+            key.clone(),
+            ApprovalClient::ClaudeCode,
+            ApprovalOwner::ClaudeSession {
+                launch_id: "launch-1".to_string(),
+                session_id: "session-1".to_string(),
+            },
+            body("command"),
+        );
+        store.clear_client_with_reason(ApprovalClient::ClaudeCode, "hid_device_lost");
+        // A subsequent turn/session event sees no entry and therefore has no
+        // second audit item to enqueue.
+        store.withdraw_with_reason(&key, "turn_completed");
+        let withdrawals = store.drain_withdrawals();
+        assert_eq!(withdrawals.len(), 1);
+        assert_eq!(withdrawals[0].reason, "hid_device_lost");
     }
 
     #[test]
@@ -1101,6 +1459,35 @@ mod tests {
         assert_eq!(response.request_id, request_id);
         assert_eq!(response.decision, decisions[1]);
         assert!(store.codex_response(response.key.token(), 3).is_none());
+    }
+
+    #[test]
+    fn codex_request_route_does_not_require_available_decisions() {
+        let store = PendingApprovalStore::new();
+        let request_id = serde_json::json!(43);
+        let key = codex_key("connection-input", &request_id);
+        let mut input = body("Which mode?");
+        input.interaction = Some(PendingInteraction {
+            kind: PendingRequestKind::Input,
+            questions: Vec::new(),
+            message: None,
+            url: None,
+            permission_text: None,
+            requires_terminal: false,
+        });
+        store.insert(
+            key.clone(),
+            ApprovalClient::Codex,
+            codex_owner("connection-input"),
+            input,
+        );
+
+        let route = store
+            .codex_request(key.token())
+            .expect("input requests have a routable JSON-RPC target");
+        assert_eq!(route.key, key);
+        assert_eq!(route.connection_id, "connection-input");
+        assert_eq!(route.request_id, request_id);
     }
 
     fn insert_claude(

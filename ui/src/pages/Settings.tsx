@@ -20,7 +20,7 @@ import { Toggle } from "../components/Toggle";
 import { ErrorNotice, PageHeader, PrimaryButton, SecondaryButton, SectionCard, SettingRow } from "../components/Ui";
 import { useConfigSection } from "../hooks/useConfigSection";
 import { friendlyError } from "../lib/errors";
-import { useLang } from "../i18n";
+import { useLang, type TranslationKey } from "../i18n";
 import {
   PRESET_ACCENTS,
   getAccent,
@@ -38,6 +38,18 @@ interface Props {
 }
 
 const MAX_USAGE = 0xffff;
+
+const APPROVAL_HUD_REASON_KEYS: Record<string, TranslationKey> = {
+  monitoring_stopped: "settings.approval_hud.reason.monitoring_stopped",
+  actions_disabled: "settings.approval_hud.reason.actions_disabled",
+  no_enabled_host_action_device: "settings.approval_hud.reason.no_enabled_host_action_device",
+  missing_host_action_bindings: "settings.approval_hud.reason.missing_host_action_bindings",
+  host_link_error: "settings.approval_hud.reason.host_link_error",
+};
+
+function approvalHudReason(t: (key: TranslationKey) => string, reason: string | null) {
+  return t(APPROVAL_HUD_REASON_KEYS[reason ?? ""] ?? "settings.approval_hud.reason.unknown");
+}
 
 export default function Settings({ config, setConfig, status }: Props) {
   const { t } = useLang();
@@ -123,6 +135,19 @@ export default function Settings({ config, setConfig, status }: Props) {
       />
 
       {error && <ErrorNotice message={error} />}
+
+      <SectionCard title={t("settings.approval_hud.section")}>
+        <SettingRow
+          label={t("settings.approval_hud.label")}
+          description={status.approval_hud_available
+            ? t("settings.approval_hud.available")
+            : `${t("settings.approval_hud.unavailable")}（${approvalHudReason(t, status.approval_hud_unavailable_reason)}）`}
+        >
+          <span className={`rounded-pill px-3 py-1 text-sm font-medium ${status.approval_hud_available ? "bg-emerald-100 text-emerald-700" : "bg-background text-faint"}`}>
+            {status.approval_hud_available ? t("settings.approval_hud.status.available") : t("settings.approval_hud.status.unavailable")}
+          </span>
+        </SettingRow>
+      </SectionCard>
 
       {/* Appearance */}
       <SectionCard title={t("settings.appearance.section")}>

@@ -42,11 +42,15 @@ use crate::pending_approval::{
     PendingInteraction, PendingQuestion, PendingQuestionOption, PendingRequestKind,
 };
 
-pub const SUPPORTED_CODEX_VERSION: &str = "codex-cli 0.154.0";
+pub const SUPPORTED_CODEX_VERSION: &str = "codex-cli 0.157.1";
 pub const SUPPORTED_SCHEMA_SHA256: &str =
-    "24DF528ACEC2952E6B96C1C2B061F98E60177D059E12C90CF318621380C9DE9E";
+    "D6D70A4B2AF4C6BB03DEE46AF2CDA9C8B7B4D656CD5A55C54F748146985CDB43";
 const COMPATIBLE_CODEX_RELEASES: &[(&str, &str)] = &[
     (SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256),
+    (
+        "codex-cli 0.154.0",
+        "24DF528ACEC2952E6B96C1C2B061F98E60177D059E12C90CF318621380C9DE9E",
+    ),
     (
         "codex-cli 0.153.2",
         "B06F77062369D481A59CC70720C12B89CB9DD49C385863923262102D3AD6C978",
@@ -2094,16 +2098,40 @@ pub fn extract_command_approval_body(text: &str) -> Option<CodexApprovalRequestB
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    let reason = params
+        .get("reason")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let reason = if let Some(network) = params
+        .get("networkApprovalContext")
+        .and_then(Value::as_object)
+    {
+        match (
+            network.get("host").and_then(Value::as_str),
+            network.get("protocol").and_then(Value::as_str),
+        ) {
+            (Some(host), Some(protocol)) => {
+                // 0.157.1 schema defines only `host` and `protocol`; there
+                // is no separate port field. Keep the host string intact in
+                // case the server includes a port as part of it.
+                let context = format!("Network access approval: {protocol}://{host}");
+                Some(match reason {
+                    Some(reason) if !reason.is_empty() => format!("{context}\n{reason}"),
+                    _ => context,
+                })
+            }
+            _ => reason,
+        }
+    } else {
+        reason
+    };
     Some(CodexApprovalRequestBody {
         command_actions,
         command: params
             .get("command")
             .and_then(Value::as_str)
             .map(str::to_string),
-        reason: params
-            .get("reason")
-            .and_then(Value::as_str)
-            .map(str::to_string),
+        reason,
         cwd: params
             .get("cwd")
             .and_then(Value::as_str)
@@ -2949,6 +2977,10 @@ mod tests {
             Some(SUPPORTED_SCHEMA_SHA256)
         );
         assert_eq!(
+            compatible_schema_sha256("codex-cli 0.154.0"),
+            Some("24DF528ACEC2952E6B96C1C2B061F98E60177D059E12C90CF318621380C9DE9E")
+        );
+        assert_eq!(
             compatible_schema_sha256("codex-cli 0.153.2"),
             Some("B06F77062369D481A59CC70720C12B89CB9DD49C385863923262102D3AD6C978")
         );
@@ -2981,7 +3013,7 @@ mod tests {
         assert_eq!(compatible_schema_sha256("codex-cli 0.145.0"), None);
         assert_eq!(
             compatible_codex_versions(),
-            "codex-cli 0.154.0, codex-cli 0.153.2, codex-cli 0.151.0, codex-cli 0.150.1, codex-cli 0.149.1, codex-cli 0.149.0, codex-cli 0.147.0, codex-cli 0.146.0"
+            "codex-cli 0.157.1, codex-cli 0.154.0, codex-cli 0.153.2, codex-cli 0.151.0, codex-cli 0.150.1, codex-cli 0.149.1, codex-cli 0.149.0, codex-cli 0.147.0, codex-cli 0.146.0"
         );
     }
 
@@ -3111,6 +3143,25 @@ mod tests {
         assert!(extract_command_approval_body("not json").is_none());
         assert!(extract_command_approval_body(r#"{"id":1,"method":"other"}"#).is_none());
         assert!(extract_command_approval_body(r#"{"jsonrpc":"2.0"}"#).is_none());
+    }
+
+    #[test]
+    fn network_approval_context_is_visible_in_the_approval_reason() {
+        let body = extract_command_approval_body(
+            r#"{"method":"item/commandExecution/requestApproval","params":{"commandActions":[{"command":"curl https://packages.example.test:8443"}],"reason":"Download dependency","networkApprovalContext":{"host":"packages.example.test:8443","protocol":"https"}}}"#,
+        )
+        .expect("network approval body");
+
+        assert_eq!(
+            body.reason.as_deref(),
+            Some(
+                "Network access approval: https://packages.example.test:8443\nDownload dependency"
+            )
+        );
+        assert_eq!(
+            body.command_actions,
+            ["curl https://packages.example.test:8443"]
+        );
     }
 
     #[test]

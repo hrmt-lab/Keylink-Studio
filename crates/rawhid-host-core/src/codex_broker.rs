@@ -42,11 +42,15 @@ use crate::pending_approval::{
     PendingInteraction, PendingQuestion, PendingQuestionOption, PendingRequestKind,
 };
 
-pub const SUPPORTED_CODEX_VERSION: &str = "codex-cli 0.157.1";
+pub const SUPPORTED_CODEX_VERSION: &str = "codex-cli 0.160.0";
 pub const SUPPORTED_SCHEMA_SHA256: &str =
-    "D6D70A4B2AF4C6BB03DEE46AF2CDA9C8B7B4D656CD5A55C54F748146985CDB43";
+    "7243BA241962AF92CA60581F1A81808EBDA4212A800F8B205F54703BCFD508C5";
 const COMPATIBLE_CODEX_RELEASES: &[(&str, &str)] = &[
     (SUPPORTED_CODEX_VERSION, SUPPORTED_SCHEMA_SHA256),
+    (
+        "codex-cli 0.157.1",
+        "D6D70A4B2AF4C6BB03DEE46AF2CDA9C8B7B4D656CD5A55C54F748146985CDB43",
+    ),
     (
         "codex-cli 0.154.0",
         "24DF528ACEC2952E6B96C1C2B061F98E60177D059E12C90CF318621380C9DE9E",
@@ -2111,7 +2115,7 @@ pub fn extract_command_approval_body(text: &str) -> Option<CodexApprovalRequestB
             network.get("protocol").and_then(Value::as_str),
         ) {
             (Some(host), Some(protocol)) => {
-                // 0.157.1 schema defines only `host` and `protocol`; there
+                // 0.160.0 schema defines only `host` and `protocol`; there
                 // is no separate port field. Keep the host string intact in
                 // case the server includes a port as part of it.
                 let context = format!("Network access approval: {protocol}://{host}");
@@ -2977,6 +2981,10 @@ mod tests {
             Some(SUPPORTED_SCHEMA_SHA256)
         );
         assert_eq!(
+            compatible_schema_sha256("codex-cli 0.157.1"),
+            Some("D6D70A4B2AF4C6BB03DEE46AF2CDA9C8B7B4D656CD5A55C54F748146985CDB43")
+        );
+        assert_eq!(
             compatible_schema_sha256("codex-cli 0.154.0"),
             Some("24DF528ACEC2952E6B96C1C2B061F98E60177D059E12C90CF318621380C9DE9E")
         );
@@ -3013,7 +3021,7 @@ mod tests {
         assert_eq!(compatible_schema_sha256("codex-cli 0.145.0"), None);
         assert_eq!(
             compatible_codex_versions(),
-            "codex-cli 0.157.1, codex-cli 0.154.0, codex-cli 0.153.2, codex-cli 0.151.0, codex-cli 0.150.1, codex-cli 0.149.1, codex-cli 0.149.0, codex-cli 0.147.0, codex-cli 0.146.0"
+            "codex-cli 0.160.0, codex-cli 0.157.1, codex-cli 0.154.0, codex-cli 0.153.2, codex-cli 0.151.0, codex-cli 0.150.1, codex-cli 0.149.1, codex-cli 0.149.0, codex-cli 0.147.0, codex-cli 0.146.0"
         );
     }
 

@@ -1,13 +1,13 @@
 # 互換性情報
 
-## 現行 Codex CLI 基準（2026-09-27）
+## 現行 Codex CLI 基準（2026-10-03）
 
-現行基準は `codex-cli 0.157.1` です。experimental App Server schema の SHA-256 は
-`D6D70A4B2AF4C6BB03DEE46AF2CDA9C8B7B4D656CD5A55C54F748146985CDB43` です。
-検証済みの `0.154.0`、`0.153.2`、`0.151.0`、`0.150.1`、`0.149.1`、`0.149.0`、`0.147.0`、
+現行基準は `codex-cli 0.160.0` です。experimental App Server schema の SHA-256 は
+`7243BA241962AF92CA60581F1A81808EBDA4212A800F8B205F54703BCFD508C5` です。
+検証済みの `0.157.1`、`0.154.0`、`0.153.2`、`0.151.0`、`0.150.1`、`0.149.1`、`0.149.0`、`0.147.0`、
 WSL 側 `0.146.0` も対応する version/schema pair として保持しています。
 
-詳細は [`codex-cli-0.157.1-compatibility.md`](codex-cli-0.157.1-compatibility.md) を参照してください。
+詳細は [`codex-cli-0.160.0-compatibility.md`](codex-cli-0.160.0-compatibility.md) を参照してください。
 
 Keylink Studio のアプリバージョンと Host Link protocol version は別管理です。
 
@@ -64,5 +64,5 @@ Host Link v1 は 32 byte packet と packet type ごとの個別 layout を使う
 - `DEVICE_HELLO` v2 は `capabilities` と `device_uid_hash` を返します。v1 の `protocol_min` / `protocol_max` はありません。
 - `device_uid_hash = 0` は host 側で `None` に正規化します。
 - Config RPCは`ENCODER` / `COMBO` featureをHost／Firmwareとも実装済みです。ComboはKeymap Viewerの共通保存／破棄／`.keymapに戻す`と`.keymap.json` Export／Restoreへ統合済みです。tap danceなど52 byte payloadを超えるデータの分割方式は将来拡張です。
-- Codex CLIの現行互換性基準は`0.153.2`です。設定の`version_check_enabled = true`では、検証済みの`0.153.2`、`0.151.0`、`0.150.1`、`0.149.1`、`0.149.0`、`0.147.0`、WSL側`0.146.0`を対応するexperimental App Server schema hashとの正しい組み合わせに限り受理します。既定値の`false`ではCLI versionを制限せず、生成schemaのhashが検証済みhashのいずれかと一致する場合だけ起動します。OFFは互換性確認の完全無効化ではなく、未知schema、schema生成失敗、`codex --version`実行失敗は拒否します。`0.153.2`では、0.151.0からのschema差分が既存APIに対して追加的であり、Keylink Studioが使う初期化、Thread／Turn、item、approval／input methodに破壊的変更がないことを確認しています。また実Broker経由のpreflight／認証、`initialize`、`thread/start`、Plan Turnの入力要求、Default Turnのcommand approval、Turn完了、停止後のlistener／一時token解放に合格しています。`0.147.0`では、1つのApp Serverに2つのCLI相当clientを接続する互換性ゲートに合格しています。Hostは最大8接続、最大32 threadを内部管理します。実ScreenKeyでの複数Codex切替・非選択event非奪取・片側切断・approval/input分離は確認済みです。3秒以内resume時の表示とrevision維持だけは未実施です。
+- Codex CLIの現行互換性基準は`0.160.0`です。`version_check_enabled = true`では、上記の検証済みversion/schemaペアだけを受理します。既定の`false`でも生成schemaのhash照合は必須です。`0.160.0`では旧版からのschema差分を確認し、Brokerが使う承認・入力要求に変更は不要でした。Windows Brokerの実Codex Turn検証は`0.160.0`では未実施です。過去の実測と未検証項目は各バージョンの互換性記録を参照してください。
 - Keylink Studioは最大8個の論理表示slotを管理し、slotごとにAutoまたは固定sessionを設定できます。Host Linkの8-byte slot payloadはbit 13でgateされます。bit 13対応Firmwareを搭載した2画面keyboardで、2026-08-09に個別表示、slot間分離、slot別cycle、固定／自動割当、slot数縮退を実機確認しました。bit 13なしの既存Firmwareはslot 0の従来表示を維持します。

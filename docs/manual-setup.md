@@ -230,9 +230,9 @@ Thumbs.db
 - AI Usage の収集は監視とは独立して動きます。Raw HID 送信には監視が必要です。
 - Codex sessions 自動検出 (`sessions_auto_detect`、既定オン) は Windows デフォルト・各 WSL ディストロの `~/.codex/sessions` (`include_wsl_sessions`)・`extra_sessions_paths` を読み込み、WSL 上の Codex 使用分もまとめて反映します。`rate_limits` は全ディレクトリ中の最新値を使用し、history fallback はトークンを全ディレクトリ合算します。
 - Claude Code credentials 自動検出は Windows デフォルト・WSL デフォルト・追加 credentials パスに対応しています。refresh token 更新は v1 では行いません。
-- ZMK Studio Keymap Viewer は ZMK Studio RPC transport を使います。USB serial / CDC ACM と BLE Studio transport のどちらでも表示と編集に対応します。編集には実機側で `&studio_unlock` を実行して Studio を unlocked にする必要があります。Host 側から unlock は行いません。BLE Studio では USB より書き込み応答待ちが長くなることがあります。
+- キーマップエディタは ZMK Studio RPC transport を使います。USB serial / CDC ACM と BLE Studio transport のどちらでも表示と編集に対応します。編集には実機側で `&studio_unlock` を実行して Studio を unlocked にする必要があります。Host 側から unlock は行いません。BLE Studio では USB より書き込み応答待ちが長くなることがあります。
 
 - エンコーダ編集は Host Link Config RPC を使うため、Studio RPC とは独立して接続確認とエラー表示を行います。Host Link が未接続または UID が一致しない場合、通常キーの編集は可能でもエンコーダ編集は利用できません。
 - Combo編集もHost Link Config RPCを使います。Combo非対応の場合でも、通常キーとエンコーダの編集は継続できます。Comboの`適用`はRAM上の変更であり、再起動後も残すには共通編集バーの`保存`が必要です。
 - デバイス単位の App Layer ルールを使う場合は、firmware が `DEVICE_HELLO` で `APP_LAYER` capability と安定した非ゼロの `device_uid_hash` を返す必要があります。
-- Keymap Viewer のヒートマップ / キーテスターは、ZMK Studio `serial_number` が 16 桁 hex UID の場合、Host Link `device_uid_hash` と UID 優先で紐付けます。古い firmware では従来の serial number 照合に fallback します。
+- キーマップエディタのヒートマップ / キーテスターは、ZMK Studio `serial_number` が 16 桁 hex UID の場合、Host Link `device_uid_hash` と UID 優先で紐付けます。古い firmware では従来の serial number 照合に fallback します。

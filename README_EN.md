@@ -44,14 +44,14 @@ The output goes into `target/` (not tracked in this repository).
 - Actions: Configure bindings that let keys on the keyboard trigger PC-side actions.
 - Time Sync: Enable/disable time sync and set display format and sync interval.
 - AI Usage: Configure and check the status of Codex / Claude Code usage sending.
-- Keymap Viewer: View the keymap, check the heatmap, use the key tester, and edit the keymap.
+- Keymap Editor: View the keymap, check the heatmap, use the key tester, and edit the keymap.
 - Settings: Configure appearance, polling, HID, startup behavior, Codex integration, and the Codex CLI launcher.
 
 The UI can switch between Japanese and English, and the accent color can be changed from Settings. Detailed instructions for each screen are in the [App Usage Manual](docs/manual-app-usage.md) (Japanese only for now).
 
 ## ZMK Studio keymap editing
 
-In Keymap Viewer's edit mode, you can rewrite the keymap on the actual device on the spot. Beyond plain key assignments, supported keyboards let you edit encoder CW/CCW assignments and add, edit, or delete combos. Changes take effect on the device's unsaved state as soon as you pick a key, but you need to press `Save` for them to survive a restart. `Discard changes` can undo them at any time.
+In Keymap Editor's edit mode, you can rewrite the keymap on the actual device on the spot. Beyond plain key assignments, supported keyboards let you edit encoder CW/CCW assignments and add, edit, or delete combos. Changes take effect on the device's unsaved state as soon as you pick a key, but you need to press `Save` for them to survive a restart. `Discard changes` can undo them at any time.
 
 A few things worth knowing:
 

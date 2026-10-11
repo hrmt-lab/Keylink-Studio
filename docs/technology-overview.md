@@ -229,7 +229,7 @@ Host Link HID は PC とキーボードの間で独自の 64 byte Host Link pack
 
 byte layout は [Packet Specification](packet-spec.md) にあります。
 
-Host Link の UID は `DEVICE_HELLO` の `device_uid_hash` から `uid:<16桁hex>` として扱います。ZMK Studio `get_device_info().serial_number` が同じ UID を 16 桁小文字 hex 文字列で返す firmware では、Keymap Viewer のヒートマップやキーテスターも USB / BLE Studio のどちらから開いても同じ Host Link デバイスへ紐付けます。
+Host Link の UID は `DEVICE_HELLO` の `device_uid_hash` から `uid:<16桁hex>` として扱います。ZMK Studio `get_device_info().serial_number` が同じ UID を 16 桁小文字 hex 文字列で返す firmware では、キーマップエディタのヒートマップやキーテスターも USB / BLE Studio のどちらから開いても同じ Host Link デバイスへ紐付けます。
 
 ## Layer が切り替わる流れ
 
@@ -249,7 +249,7 @@ flowchart TD
 
 ```mermaid
 sequenceDiagram
-    participant UI as Keymap Viewer
+    participant UI as Keymap Editor
     participant T as Tauri Command
     participant S as StudioEditSession
     participant Z as ZMK Studio RPC

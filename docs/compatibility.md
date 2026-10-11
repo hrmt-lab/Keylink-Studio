@@ -56,13 +56,13 @@ Host Link v1 は 32 byte packet と packet type ごとの個別 layout を使う
 | `LAYER_STATE` | 表示専用の layer state 受信 | `LAYER_STATE` uplink 送信、`LAYER_STATE` capability | `APP_LAYER` として echo back しない |
 | `KEY_PRESS` | key tester のリアルタイム表示 | `KEY_PRESS` uplink 送信、`KEY_PRESS` capability | 累積記録はしない |
 | Config RPC / encoder | `ENCODER` の情報取得、CW / CCW override 編集、保存、破棄、override解除 | `CONFIG_RPC` capability と `ENCODER GET_INFO` / `GET_BINDINGS` / `SET_BINDINGS` / `GET_DIRTY` / `SAVE` / `DISCARD` / `CLEAR_OVERRIDE` | Host は `seq + feature + op` で応答を照合し、timeout 時は1回再試行 |
-| Config RPC / combo | core／CLI／Tauri／Keymap Viewerで全8 operation、`.keymap.json` Export／Restore対応 | `COMBO GET_INFO` / `GET_COMBO` / `SET_COMBO` / `GET_DIRTY` / `SAVE` / `DISCARD` / `DELETE_COMBO` / `RESET_TO_KEYMAP`、Settings load／保存 | CLI mutationは対象UID必須。Restoreは同名更新または空きslot追加で、バックアップにない既存Comboを削除しない |
+| Config RPC / combo | core／CLI／Tauri／キーマップエディタで全8 operation、`.keymap.json` Export／Restore対応 | `COMBO GET_INFO` / `GET_COMBO` / `SET_COMBO` / `GET_DIRTY` / `SAVE` / `DISCARD` / `DELETE_COMBO` / `RESET_TO_KEYMAP`、Settings load／保存 | CLI mutationは対象UID必須。Restoreは同名更新または空きslot追加で、バックアップにない既存Comboを削除しない |
 | ZMK Studio keymap editing | ZMK Studio RPC client | ZMK Studio 対応 firmware と unlocked Studio state | Host Link v2 とは別 transport |
 
 ## 補足
 
 - `DEVICE_HELLO` v2 は `capabilities` と `device_uid_hash` を返します。v1 の `protocol_min` / `protocol_max` はありません。
 - `device_uid_hash = 0` は host 側で `None` に正規化します。
-- Config RPCは`ENCODER` / `COMBO` featureをHost／Firmwareとも実装済みです。ComboはKeymap Viewerの共通保存／破棄／`.keymapに戻す`と`.keymap.json` Export／Restoreへ統合済みです。tap danceなど52 byte payloadを超えるデータの分割方式は将来拡張です。
+- Config RPCは`ENCODER` / `COMBO` featureをHost／Firmwareとも実装済みです。Comboはキーマップエディタの共通保存／破棄／`.keymapに戻す`と`.keymap.json` Export／Restoreへ統合済みです。tap danceなど52 byte payloadを超えるデータの分割方式は将来拡張です。
 - Codex CLIの現行互換性基準は`0.160.0`です。`version_check_enabled = true`では、上記の検証済みversion/schemaペアだけを受理します。既定の`false`でも生成schemaのhash照合は必須です。`0.160.0`では旧版からのschema差分を確認し、Brokerが使う承認・入力要求に変更は不要でした。Windows Brokerの実Codex Turn検証は`0.160.0`では未実施です。過去の実測と未検証項目は各バージョンの互換性記録を参照してください。
 - Keylink Studioは最大8個の論理表示slotを管理し、slotごとにAutoまたは固定sessionを設定できます。Host Linkの8-byte slot payloadはbit 13でgateされます。bit 13対応Firmwareを搭載した2画面keyboardで、2026-08-09に個別表示、slot間分離、slot別cycle、固定／自動割当、slot数縮退を実機確認しました。bit 13なしの既存Firmwareはslot 0の従来表示を維持します。

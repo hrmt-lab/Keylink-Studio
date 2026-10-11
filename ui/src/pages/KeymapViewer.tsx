@@ -1798,7 +1798,6 @@ export default function KeymapViewer({
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-xl font-medium text-ink">{t("keymap.title")}</h1>
-          <p className="mt-0.5 text-sm text-muted">{t("keymap.subtitle")}</p>
         </div>
         <div className="flex items-center gap-2">
           <button

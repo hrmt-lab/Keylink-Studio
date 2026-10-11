@@ -20,7 +20,7 @@ Host Link は、Keylink Studio 独自の packet protocol に対応している�
 
 Host Link 一覧は `device_uid_hash` 単位で集約します。同じキーボードが USB と BLE HOG の両方で見えている場合は 1 カードにまとめ、USB / Bluetooth の両方のアイコンを表示します。カードの`詳細`を開くと、それぞれの HID path などを確認できます。`device_uid_hash` が取得できないデバイスは誤結合を避けるため path 単位で個別に扱います。
 
-ZMK Studio は、ZMK Studio RPC に対応しているかを表します。Keymap Viewer では、この Studio 対応デバイスを使ってキーマップを読み取り・編集します。Host Link 対応デバイスと Studio 対応デバイスは必ずしも同じではありません。
+ZMK Studio は、ZMK Studio RPC に対応しているかを表します。キーマップエディタでは、この Studio 対応デバイスを使ってキーマップを読み取り・編集します。Host Link 対応デバイスと Studio 対応デバイスは必ずしも同じではありません。
 
 BATTERY 対応キーボードを監視中は、デバイスカードに `C` (central/self) と `P1` / `P2` / `P3` (peripheral) のバッテリー残量が表示されます。`level=0xFF` の source は unknown / not available / disconnected として通常表示から隠されます。表示可能な source がない場合のみ、未取得状態として `--` が表示されます。
 
@@ -114,11 +114,11 @@ Claude Code は OAuth usage API を experimental / best-effort source として�
 
 access token、credentials JSON、API response、raw error は画面に表示しません。
 
-## キーマップ表示・編集
+## キーマップエディタ
 
-![Keymap Viewer](images/manual-keymap-viewer.svg)
+![キーマップエディタ](images/manual-keymap-viewer.svg)
 
-キーマップ表示では、ZMK Studio 対応キーボードの現在のキーマップを確認できます。画面上部には Studio 対応デバイスだけが表示されます。デバイスを選択すると、そのキーボードのキーマップを自動で読み取ります。
+キーマップエディタでは、ZMK Studio 対応キーボードの現在のキーマップを確認できます。画面上部には Studio 対応デバイスだけが表示されます。デバイスを選択すると、そのキーボードのキーマップを自動で読み取ります。
 
 通常表示でできること:
 

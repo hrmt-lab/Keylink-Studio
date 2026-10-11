@@ -1,13 +1,13 @@
 # 互換性情報
 
-## 現行 Codex CLI 基準（2026-10-03）
+## 現行 Codex CLI 基準（2026-10-11）
 
-現行基準は `codex-cli 0.160.0` です。experimental App Server schema の SHA-256 は
-`7243BA241962AF92CA60581F1A81808EBDA4212A800F8B205F54703BCFD508C5` です。
-検証済みの `0.157.1`、`0.154.0`、`0.153.2`、`0.151.0`、`0.150.1`、`0.149.1`、`0.149.0`、`0.147.0`、
+現行基準は `codex-cli 0.162.1` です。experimental App Server schema の SHA-256 は
+`E4E7F0C7D3FD77C48CD8619CAD2BF2B315D860AB006AD5A7EBE44F6E32E666C1` です。
+検証済みの `0.160.0`、`0.157.1`、`0.154.0`、`0.153.2`、`0.151.0`、`0.150.1`、`0.149.1`、`0.149.0`、`0.147.0`、
 WSL 側 `0.146.0` も対応する version/schema pair として保持しています。
 
-詳細は [`codex-cli-0.160.0-compatibility.md`](codex-cli-0.160.0-compatibility.md) を参照してください。
+詳細は [`codex-cli-0.162.1-compatibility.md`](codex-cli-0.162.1-compatibility.md) を参照してください。過去の検証記録も各バージョンの文書に保持しています。
 
 Keylink Studio のアプリバージョンと Host Link protocol version は別管理です。
 
@@ -64,5 +64,5 @@ Host Link v1 は 32 byte packet と packet type ごとの個別 layout を使う
 - `DEVICE_HELLO` v2 は `capabilities` と `device_uid_hash` を返します。v1 の `protocol_min` / `protocol_max` はありません。
 - `device_uid_hash = 0` は host 側で `None` に正規化します。
 - Config RPCは`ENCODER` / `COMBO` featureをHost／Firmwareとも実装済みです。Comboはキーマップエディタの共通保存／破棄／`.keymapに戻す`と`.keymap.json` Export／Restoreへ統合済みです。tap danceなど52 byte payloadを超えるデータの分割方式は将来拡張です。
-- Codex CLIの現行互換性基準は`0.160.0`です。`version_check_enabled = true`では、上記の検証済みversion/schemaペアだけを受理します。既定の`false`でも生成schemaのhash照合は必須です。`0.160.0`では旧版からのschema差分を確認し、Brokerが使う承認・入力要求に変更は不要でした。Windows Brokerの実Codex Turn検証は`0.160.0`では未実施です。過去の実測と未検証項目は各バージョンの互換性記録を参照してください。
+- Codex CLIの現行互換性基準は`0.162.1`です。`version_check_enabled = true`では、検証済みversion/schemaペアだけを受理します。既定の`false`でも生成schemaのhash照合は必須です。0.162.1ではexperimental schema差分を確認し、Broker adapter変更は不要でした。Windows Brokerの認証済み実Turnは未検証です。過去の実測と未検証項目は各バージョンの互換性記録を参照してください。
 - Keylink Studioは最大8個の論理表示slotを管理し、slotごとにAutoまたは固定sessionを設定できます。Host Linkの8-byte slot payloadはbit 13でgateされます。bit 13対応Firmwareを搭載した2画面keyboardで、2026-08-09に個別表示、slot間分離、slot別cycle、固定／自動割当、slot数縮退を実機確認しました。bit 13なしの既存Firmwareはslot 0の従来表示を維持します。
